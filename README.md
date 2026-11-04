@@ -230,6 +230,12 @@ Uses `run_erc`, `run_drc`, and `detect_pin_conflicts`.
 | `get_netlist_nets` | List all nets with pin connections |
 | `get_netlist_components` | List components with their net connections |
 
+### Bill of Materials
+
+| Tool | Description |
+|------|-------------|
+| `export_bom` | The BOM of the full project, as `kicad-cli sch export bom` of the installed KiCad makes it: the fields that the caller selects (default: all fields), one line for each reference or groups, the DNP filter, and the variants of KiCad 10. It can keep the CSV file of kicad-cli, for example for `project_check` of [datasheet-lens](https://github.com/turbyho/datasheet-lens) |
+
 ### Libraries
 
 The library tools read the library tables of the installed KiCad and of the project.

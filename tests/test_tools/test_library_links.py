@@ -8,6 +8,7 @@ import pytest
 from kicad_workbench.parsers.board_models import BoardFootprint, board_models
 from kicad_workbench.tools import library as library_tools
 from kicad_workbench.tools import library_links
+from kicad_workbench.utils import kicad_cli as kicad_cli_module
 from kicad_workbench.utils.library_footprint import FootprintItems, PadNumber
 
 from .test_library_footprint import make_footprints
@@ -166,7 +167,7 @@ def project(tmp_path, monkeypatch):
     async def version():
         return "10.0.6"
 
-    monkeypatch.setattr(library_tools, "run_kicad_cli_sync", kicad_cli)
+    monkeypatch.setattr(kicad_cli_module, "run_kicad_cli_sync", kicad_cli)
     monkeypatch.setattr(library_links, "run_kicad_cli_sync", kicad_cli)
     monkeypatch.setattr(library_tools, "read_footprints", read_footprints)
     monkeypatch.setattr(library_links, "get_kicad_version", version)

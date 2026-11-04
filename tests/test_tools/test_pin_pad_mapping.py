@@ -7,6 +7,7 @@ import pytest
 from kicad_workbench.parsers.board_netlist import NetlistPin, read_board_netlist
 from kicad_workbench.parsers.symbol_info import SymbolPin
 from kicad_workbench.tools import library as library_tools
+from kicad_workbench.utils import kicad_cli as kicad_cli_module
 from kicad_workbench.utils import pin_pad_mapping
 from kicad_workbench.utils.library_footprint import FootprintItems, PadNumber, footprint_info
 from kicad_workbench.utils.pin_pad_mapping import (
@@ -401,7 +402,7 @@ def board(tmp_path, monkeypatch):
         pads = [state["pads"].get(name) for _library, name in items]
         return state["reader"], [None if p is None else FootprintItems(p, (), ()) for p in pads]
 
-    monkeypatch.setattr(library_tools, "run_kicad_cli_sync", kicad_cli)
+    monkeypatch.setattr(kicad_cli_module, "run_kicad_cli_sync", kicad_cli)
     monkeypatch.setattr(library_tools, "read_footprints", read_pads)
     footprints.update(state=state, schematic=footprints["project"] / "board.kicad_sch")
     return footprints

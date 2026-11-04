@@ -1,0 +1,513 @@
+"""The tool export_bom: the bill of materials (BOM) of a schematic, as KiCad makes it.
+
+The tool runs "kicad-cli sch export bom" (EESCHEMA_JOBS_HANDLER::JobExportBom
+and FIELDS_EDITOR_GRID_DATA_MODEL, KiCad 8.0.9, 9.0.9 and 10.0.6) and reads
+its CSV file. kicad-cli writes each text in the language of the KiCad
+settings, thus the tool does not read the text of its messages: it gives
+each message to the caller.
+
+The rules of KiCad for the lines of the BOM:
+
+- A power symbol is never in the BOM.
+- A symbol that is excluded from the BOM is not in the BOM. Only kicad-cli of
+  KiCad 9 can include it (--include-excluded-from-bom); the tool does not use
+  that option.
+- The units of one reference are one line. The units of a reference that is
+  not annotated ("R?") are different lines.
+- Each instance of a sheet that the hierarchy uses more than one time gives
+  its own lines, with the references of that instance.
+- With no fields to group by, each reference is one line. Only a field that the
+  list of fields names can group the symbols: "*" adds the other fields with no
+  group.
+- A cell holds the different values of the symbols of one line: KiCad 9 and
+  later join them with a comma and leave out the empty values. KiCad 8
+  writes INDETERMINATE_STATE ("-- mixed values --", in the language of
+  KiCad).
+- kicad-cli removes the tabs and the line breaks from the values, and puts
+  each value between double quotes (a double quote in a value is two double
+  quotes).
+"""
+
+import asyncio
+import csv
+import io
+import os
+import re
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..parsers.kicad_versions import KICAD8, KICAD9, KICAD10, kicad_release
+from ..parsers.sexpr import SExprError, parse
+from ..server import mcp
+from ..utils.kicad_cli import CliExport, export_with_kicad_cli, get_kicad_version
+from ..utils.kicad_text import KiCadEncodingError, read_as_kicad, read_kicad_json
+from ..utils.sch_hierarchy import AmbiguousRootError, project_files, schematic_project_file
+from .library import NO_KICAD_CLI, cell, netlist_root
+
+_BOM_TIMEOUT = 300
+DEFAULT_FIELDS = ("Reference", "Value", "Footprint", "Datasheet", "${QUANTITY}", "${DNP}", "*")
+# IsGeneratedField of KiCad: a field name that is one text variable.
+_GENERATED = re.compile(r"\$\{\w*\}")
+# The generated columns of JobExportBom of KiCad 10. kicad-cli of KiCad 10
+# also accepts their names with no "${}" (normalizeFieldName).
+_KICAD10_GENERATED = (
+    "QUANTITY",
+    "ITEM_NUMBER",
+    "DNP",
+    "EXCLUDE_FROM_BOM",
+    "EXCLUDE_FROM_BOARD",
+    "EXCLUDE_FROM_SIM",
+)
+
+
+@dataclass(frozen=True)
+class BomField:
+    """One item of --fields, as JobExportBom reads it (BOM_FIELD)."""
+
+    raw: str  # The item as the caller gave it.
+    name: str  # The field name.
+    shown: bool  # The BOM has a column of the field.
+    group: bool  # The field groups the symbols.
+
+
+@dataclass(frozen=True)
+class BomFields:
+    """The items of --fields, before and after the first "*"."""
+
+    before: list[BomField]
+    after: list[BomField]
+    star: bool  # The items have a "*".
+
+    def grouped(self, name: str) -> bool:
+        return any(f.name == name and f.group for f in self.before + self.after)
+
+
+def bom_rules(kicad: str) -> int:
+    """Return the major version of the BOM rules of the installed KiCad: 8, 9 or 10.
+
+    Raises:
+        ValueError: The server has no BOM rules for the version. JobExportBom of
+            the nightly builds 10.99 (branch master, 2026-11-04) reads --group-by
+            with other rules: it adds a field that --fields does not name.
+    """
+    release = kicad_release(kicad)
+    for known, major in ((KICAD8, 8), (KICAD9, 9), (KICAD10, 10)):
+        if release is known:
+            return major
+    raise ValueError(
+        f"The installed KiCad is {kicad}. This server knows the BOM rules of kicad-cli of "
+        "KiCad 8.0, 9.0 and 10.0."
+    )
+
+
+def _check_names(names: list[str], what: str) -> None:
+    """Refuse the field names that kicad-cli cannot get.
+
+    kicad-cli splits the lists of --fields and --group-by at each comma
+    (SCH_EXPORT_BOM_COMMAND::convertStringList).
+    """
+    for name in names:
+        if not name:
+            raise ValueError(f"An item of {what} is empty.")
+        if "," in name:
+            raise ValueError(
+                f"The field name {name!r} of {what} has a comma. kicad-cli splits the "
+                "list of fields at each comma, thus it cannot export this field."
+            )
+
+
+def _file_variants(file: Path) -> set[str]:
+    """Return the variant names of the symbol and sheet instances of a schematic file
+    (SCH_SCREEN::GetVariantNames)."""
+    names = set()
+    root = parse(read_as_kicad(file))
+    for item in [*root.children("symbol"), *root.children("sheet")]:
+        for instances in item.children("instances"):
+            for variant in instances.walk("variant"):
+                name = variant.first("name")
+                if name is not None and name.value(0) is not None:
+                    names.add(name.value(0))
+    return names
+
+
+def _project_variants(project: Path) -> set[str]:
+    """Return the names of "schematic.variants" of a project file (SCHEMATIC_SETTINGS)."""
+    if not project.is_file():
+        return set()
+    try:
+        settings = read_kicad_json(project)
+    except ValueError:
+        # KiCad uses the default settings for a project file that is not JSON
+        # (JSON_SETTINGS::LoadFromFile): they have no variants.
+        return set()
+    schematic = settings.get("schematic") if isinstance(settings, dict) else None
+    variants = schematic.get("variants") if isinstance(schematic, dict) else None
+    return {
+        entry["name"]
+        for entry in (variants if isinstance(variants, list) else [])
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    }
+
+
+def variant_names(project: Path) -> set[str]:
+    """Return the variant names of a project, as SCHEMATIC::rebuildHierarchyState of KiCad 10.
+
+    The names are in the symbol and sheet instances of each schematic file of
+    the project, and in the project file.
+
+    Raises:
+        KiCadEncodingError, SExprError, OSError: A file cannot be read.
+    """
+    names = _project_variants(project)
+    for file in project_files(project):
+        names |= _file_variants(file)
+    return names
+
+
+def _field(raw: str, group_by: list[str], major: int) -> BomField:
+    """Read one item of --fields as JobExportBom of the KiCad version does.
+
+    KiCad 10 reads a generated field name with no "${}" (for example "DNP") as
+    the generated field (normalizeFieldName). KiCad 9 and later do not show a
+    field whose name starts with "__". A field groups the symbols when
+    --group-by has its name (KiCad 10: also the item as the caller gave it).
+    """
+    name = raw
+    if major >= 10 and raw in _KICAD10_GENERATED:
+        name = "${" + raw + "}"
+    shown = True
+    if major >= 9 and name.startswith("__"):
+        name, shown = name[2:], False
+    group = name in group_by or (major >= 10 and raw in group_by)
+    return BomField(raw, name, shown, group)
+
+
+def bom_fields(fields: list[str], group_by: list[str], major: int) -> BomFields:
+    """Return the items of --fields as ApplyBomPreset uses them.
+
+    The first item of a name counts. "*" adds each other field of the symbols
+    at its place, with no group (JobExportBom), thus only an item of fields
+    groups the symbols.
+
+    Raises:
+        ValueError: An item of group_by does not group the symbols.
+    """
+    seen: set[str] = set()
+    before: list[BomField] = []
+    after: list[BomField] = []
+    star = False
+    for raw in fields:
+        if raw == "*":
+            star = True
+            continue
+        field = _field(raw, group_by, major)
+        if not field.name or field.name in seen:
+            # ApplyBomPreset ignores an empty name and the second item of a name.
+            continue
+        seen.add(field.name)
+        if star and field.group and not field.shown:
+            # "*" compares the item as the caller gave it, thus it adds the field
+            # first, with no group, when a symbol has the field.
+            raise ValueError(
+                f"The hidden field {raw!r} after '*' cannot group the symbols. Put it before '*'."
+            )
+        (after if star else before).append(field)
+    used = {
+        g
+        for g in group_by
+        for f in before + after
+        if f.group and (g == f.name or (major >= 10 and g == f.raw))
+    }
+    for name in group_by:
+        if name not in used:
+            raise ValueError(
+                f"KiCad groups the symbols only by an item of fields: {name!r} is not one. "
+                "A field that '*' adds does not group the symbols. Add the field to fields."
+            )
+    return BomFields(before, after, star)
+
+
+def bom_args(fields: list[str], group_by: list[str], exclude_dnp: bool, variant: str) -> list[str]:
+    """Return the options of kicad-cli sch export bom for the tool arguments.
+
+    The tool gives no labels: the label of a column is then the name of its
+    field, and the name with no "${}" for a generated field.
+
+    Raises:
+        ValueError: kicad-cli cannot do the export that the arguments ask for.
+    """
+    if not fields:
+        raise ValueError("fields is empty. Give the fields of the BOM, or no fields.")
+    _check_names(fields, "fields")
+    _check_names(group_by, "group_by")
+    args = ["--fields", ",".join(fields)]
+    if group_by:
+        args += ["--group-by", ",".join(group_by)]
+    if exclude_dnp:
+        args.append("--exclude-dnp")
+    if variant:
+        args += ["--variant", variant]
+    return args
+
+
+def read_bom(data: bytes) -> list[list[str]]:
+    """Read the CSV file of kicad-cli: the header line, then one list for each line.
+
+    kicad-cli writes UTF-8 (wxFile::Write with wxConvAuto), a comma between
+    the values and each value between double quotes
+    (FIELDS_EDITOR_GRID_DATA_MODEL::Export with the default options).
+
+    Raises:
+        ValueError: The file is not UTF-8, or it has no header line.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"The BOM of kicad-cli is not UTF-8: {e}") from e
+    rows = list(csv.reader(io.StringIO(text, newline="")))
+    if not rows:
+        raise ValueError("The BOM of kicad-cli has no header line.")
+    return rows
+
+
+def field_columns(header: list[str], fields: BomFields) -> dict[str, int] | None:
+    """Return the column of each shown item of fields, or None when the header does
+    not agree.
+
+    The columns of the items before "*" are the first columns, and the columns of
+    the items after "*" are the last columns. The label of a column is the field
+    name, or the name with no "${}" for a generated field (the tool gives no
+    labels).
+    """
+    before = [f for f in fields.before if f.shown]
+    after = [f for f in fields.after if f.shown]
+    count = len(before) + len(after)
+    if count > len(header) or (not fields.star and count != len(header)):
+        return None
+    columns = {f.name: i for i, f in enumerate(before)}
+    start = len(header) - len(after)
+    columns.update({f.name: start + i for i, f in enumerate(after)})
+    for name, column in columns.items():
+        label = name[2:-1] if _GENERATED.fullmatch(name) else name
+        if header[column] != label:
+            return None
+    return columns
+
+
+def empty_columns(rows: list[list[str]], columns: dict[str, int]) -> list[str]:
+    """Return the fields of the symbols that have no value in a line.
+
+    A generated field (for example ${DNP}) can be empty in each line, thus the
+    check applies only to the fields of the symbols.
+    """
+    return [
+        name
+        for name, column in columns.items()
+        if not _GENERATED.fullmatch(name)
+        and all(column >= len(row) or not row[column] for row in rows[1:])
+    ]
+
+
+def _is_kicad_file(path: Path) -> bool:
+    name = path.name.lower()
+    return path.suffix.lower().startswith(".kicad_") or name.endswith("-lib-table")
+
+
+def _resolve_output(output_path: str, project: Path) -> Path:
+    """Return the path of the BOM file.
+
+    The tool writes the file itself: kicad-cli writes into a temporary
+    directory. A relative path is relative to the project directory. The tool
+    does not expand variables (kicad-cli expands the text and environment
+    variables of its output path, JOB::ResolveOutputPath).
+
+    Raises:
+        ValueError: The path has a variable, or it is a KiCad file or a directory
+            (also through a symbolic link).
+    """
+    if "${" in output_path or "$(" in output_path:
+        raise ValueError(
+            f"The output path {output_path!r} has a variable. The tool does not expand "
+            "variables: give the path."
+        )
+    path = Path(os.path.expanduser(output_path))
+    if not path.is_absolute():
+        path = Path(os.path.abspath(project)).parent / path
+    target = path.resolve()
+    if _is_kicad_file(path) or _is_kicad_file(target):
+        raise ValueError(f"The output path {path} is a KiCad file. Give a .csv file.")
+    if target.is_dir():
+        raise ValueError(f"The output path {path} is a directory. Give a .csv file.")
+    return path
+
+
+def _bom_text(
+    root: Path,
+    kicad: str,
+    export: CliExport,
+    rows: list[list[str]],
+    fields: BomFields,
+    output: Path | None,
+    replaced: bool,
+    variant: str,
+    grouped: bool,
+) -> str:
+    header, lines = rows[0], rows[1:]
+    lines_out = [f"# BOM of {root.name}", ""]
+    source = f"kicad-cli of KiCad {kicad} (`sch export bom`)"
+    if variant:
+        source += f", variant {variant!r}"
+    lines_out.append(f"{source}: {len(lines)} lines.")
+    if output is not None:
+        state = "replaced" if replaced else "written"
+        lines_out.append(f"The CSV file of kicad-cli is {state}: `{output}`")
+    else:
+        lines_out.append("No CSV file is kept. Give output_path to keep the CSV file of kicad-cli.")
+    for message in export.messages:
+        lines_out.append(f"⚠️ kicad-cli: {message}")
+    columns = field_columns(rows[0], fields)
+    empty = empty_columns(rows, columns) if columns is not None else []
+    if columns is None:
+        lines_out.append(
+            "⚠️ The columns of the BOM are not the columns of fields, thus the tool did not "
+            "look for empty columns."
+        )
+    if empty:
+        lines_out.append(
+            "⚠️ No line has a value in these columns: "
+            + ", ".join(f"`{name}`" for name in empty)
+            + ". Make sure that the field names are the names of the symbol fields."
+        )
+    if grouped:
+        warning = (
+            "⚠️ The lines are groups of symbols. A cell of a field that is not in group_by "
+            "joins the different values of the symbols of its line."
+        )
+        if not fields.grouped("${DNP}"):
+            warning += " Thus a line can show DNP when only some of its symbols are DNP."
+        lines_out.append(
+            warning + " For a list of the parts (for example for project_check of "
+            "datasheet-lens), export the BOM with no group_by."
+        )
+    lines_out += [
+        "",
+        "KiCad does not put the power symbols and the symbols that are excluded from the "
+        "BOM into the BOM. A cell can hold the different values of the units of one "
+        "symbol: KiCad 9 and later join them with a comma, KiCad 8 writes "
+        '"-- mixed values --" in the language of KiCad.',
+        "",
+        "| " + " | ".join(cell(label) for label in header) + " |",
+        "|" + "---|" * len(header),
+    ]
+    for line in lines:
+        lines_out.append("| " + " | ".join(cell(value) for value in line) + " |")
+    return "\n".join(lines_out)
+
+
+async def _export_bom(
+    schematic_path: str,
+    output_path: str,
+    fields: list[str] | None,
+    group_by: list[str] | None,
+    exclude_dnp: bool,
+    variant: str,
+) -> str:
+    path = Path(os.path.abspath(os.path.expanduser(schematic_path)))
+    if path.suffix != ".kicad_sch" or not path.is_file():
+        return f"❌ The schematic {path} does not exist or is not a .kicad_sch file."
+    kicad = await get_kicad_version()
+    if kicad is None:
+        return f"❌ {NO_KICAD_CLI}"
+    major = bom_rules(kicad)
+    if variant and major < 10:
+        return f"❌ kicad-cli of KiCad {kicad} has no variants. KiCad 10 and later have them."
+    names = list(DEFAULT_FIELDS) if fields is None else fields
+    args = bom_args(names, group_by or [], exclude_dnp, variant)
+    columns = bom_fields(names, group_by or [], major)
+    try:
+        project = await asyncio.to_thread(schematic_project_file, path)
+    except AmbiguousRootError as e:
+        return f"❌ {e}. Give the root schematic of the project."
+    root, _tops = await asyncio.to_thread(netlist_root, project, kicad, "BOM")
+    if variant:
+        try:
+            known = await asyncio.to_thread(variant_names, project)
+        except (OSError, KiCadEncodingError, SExprError) as e:
+            return f"❌ The variants of the project {project} cannot be read: {e}"
+        if variant not in known:
+            # JobExportBom uses the default variant for an unknown name, with no message.
+            listed = ", ".join(repr(name) for name in sorted(known)) or "none"
+            return (
+                f"❌ The project {project} has no variant {variant!r}. Its variants: {listed}. "
+                "Give no variant for the default variant."
+            )
+    output = _resolve_output(output_path, project) if output_path else None
+    try:
+        export = await asyncio.to_thread(
+            export_with_kicad_cli, ["sch", "export", "bom", *args], root, "bom.csv", _BOM_TIMEOUT
+        )
+    except RuntimeError as e:
+        return f"❌ kicad-cli did not write the BOM of {root}: {e}"
+    rows = read_bom(export.data)
+    replaced = False
+    if output is not None:
+        replaced = output.exists()
+
+        def write() -> None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(export.data)
+
+        await asyncio.to_thread(write)
+    return _bom_text(root, kicad, export, rows, columns, output, replaced, variant, bool(group_by))
+
+
+@mcp.tool()
+async def export_bom(
+    schematic_path: str,
+    output_path: str = "",
+    fields: list[str] | None = None,
+    group_by: list[str] | None = None,
+    exclude_dnp: bool = False,
+    variant: str = "",
+) -> str:
+    """Give the bill of materials (BOM) of a schematic, as KiCad makes it.
+
+    The tool runs "kicad-cli sch export bom" for the full project of the
+    schematic, and gives its lines as a table. Without group_by, each
+    reference is one line. KiCad does not put the power symbols and the
+    symbols that are excluded from the BOM into the BOM.
+
+    For project_check of datasheet-lens, give output_path and no group_by.
+    Then give the path of the CSV file to project_check (argument bom).
+
+    Args:
+        schematic_path: A .kicad_sch file of the project. The BOM is the BOM
+            of the full project, also for a sub-sheet.
+        output_path: The CSV file to write, as kicad-cli writes it. A relative
+            path is relative to the project directory. The tool does not
+            expand variables. The tool replaces an existing file. Empty: the
+            tool keeps no file.
+        fields: The fields of the BOM, in their order. "*" adds all other
+            fields. A generated field has the form "${QUANTITY}" or "${DNP}".
+            Default: Reference, Value, Footprint, Datasheet, ${QUANTITY},
+            ${DNP} and "*".
+        group_by: The fields whose equal values put symbols into one line.
+            Each name must be an item of fields: a field that "*" adds does
+            not group the symbols. Default: no groups.
+        exclude_dnp: True to remove the symbols that have DNP.
+        variant: The name of a variant of the project (KiCad 10 and later).
+            Empty: the default variant.
+
+    Returns:
+        The number of lines, the path of the CSV file, the messages of
+        kicad-cli, the warnings, and the table of the BOM.
+    """
+    try:
+        return await _export_bom(
+            schematic_path, output_path, fields, group_by, exclude_dnp, variant
+        )
+    except ValueError as e:
+        return f"❌ {e}"
+    except Exception as e:
+        return f"❌ Error: {e}\n\n{traceback.format_exc()}"

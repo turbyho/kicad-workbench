@@ -28,8 +28,13 @@ from ..parsers.sch_geometry import mm_text
 from ..parsers.sexpr import SExprError, parse
 from ..parsers.symbol_info import SymbolInfo, SymbolPin, symbol_info
 from ..server import mcp
-from ..utils.kicad_cli import decode_output, get_kicad_version, run_kicad_cli_sync
-from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
+from ..utils.kicad_cli import (
+    decode_output,
+    export_with_kicad_cli,
+    get_kicad_version,
+    run_kicad_cli_sync,
+)
+from ..utils.kicad_text import KiCadEncodingError, decode_as_kicad, read_as_kicad
 from ..utils.library_footprint import (
     FootprintInfo,
     FootprintItems,
@@ -996,19 +1001,22 @@ def _stacked_text(number: str) -> bool:
     return number.startswith("[") and number.endswith("]")
 
 
-def netlist_root(project: Path, kicad: str) -> tuple[Path, int]:
+def netlist_root(project: Path, kicad: str, output: str = "netlist") -> tuple[Path, int]:
     """Return the schematic that gives kicad-cli the netlist of the full project.
 
     kicad-cli uses the project file of the name of the schematic
     (EESCHEMA_HELPERS::LoadSchematic). From KiCad 10.0.7 it loads all
     top-level sheets of that project (top_level_sheets) when the schematic is
-    one of them. KiCad 10.0.0 to 10.0.6 load only the schematic.
+    one of them. KiCad 10.0.0 to 10.0.6 load only the schematic. The BOM
+    export loads the schematic in the same way (JobExportBom).
+
+    output: The name of the output in the error messages, for example "BOM".
 
     Returns:
         (the schematic, the number of top-level sheets of the project).
 
     Raises:
-        ValueError: kicad-cli cannot write the netlist of the full project.
+        ValueError: kicad-cli cannot write the output of the full project.
     """
     tops = top_level_sheets(project)
     named = Path(os.path.abspath(project.with_suffix(".kicad_sch")))
@@ -1024,13 +1032,13 @@ def netlist_root(project: Path, kicad: str) -> tuple[Path, int]:
     if numbers is None or numbers < (10, 0, 7):
         raise ValueError(
             f"The project {project} has {len(tops)} top-level sheets. kicad-cli of KiCad "
-            f"{kicad} writes the netlist of one top-level sheet only. KiCad 10.0.7 and later "
-            "write the netlist of all top-level sheets."
+            f"{kicad} writes the {output} of one top-level sheet only. KiCad 10.0.7 and later "
+            f"write the {output} of all top-level sheets."
         )
     if not named.is_file() or all(top.file.resolve() != named.resolve() for top in tops):
         raise ValueError(
             f"The project {project} has {len(tops)} top-level sheets, but {named.name} is "
-            "not one of them. kicad-cli writes the netlist of all top-level sheets only for "
+            f"not one of them. kicad-cli writes the {output} of all top-level sheets only for "
             "the schematic with the name of the project."
         )
     return named, len(tops)
@@ -1317,32 +1325,22 @@ def _board_netlist(root: Path) -> tuple[str, str]:
     """Write the netlist that "Update PCB from Schematic" gives pcbnew, with kicad-cli.
 
     The format kicadsexpr is the netlist of NETLIST_EXPORTER_KICAD, the
-    exporter of the update. The thread that runs this function owns the
-    temporary directory: a cancel of the tool call does not stop kicad-cli.
+    exporter of the update.
 
     Returns:
-        (the netlist, the output of kicad-cli).
+        (the netlist, the messages of kicad-cli).
 
     Raises:
         RuntimeError: kicad-cli did not write the netlist.
         KiCadEncodingError: The netlist is not UTF-8.
     """
-    directory = Path(tempfile.mkdtemp(prefix="kicad-workbench-netlist-"))
-    try:
-        netlist = directory / "board.net"
-        args = ["sch", "export", "netlist", "--format", "kicadsexpr", "--output", str(netlist)]
-        try:
-            result = run_kicad_cli_sync([*args, str(root)], timeout=_NETLIST_TIMEOUT, english=True)
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"kicad-cli did not stop in {_NETLIST_TIMEOUT} s.") from e
-        output = (decode_output(result.stdout) + decode_output(result.stderr)).strip()
-        if result.returncode != 0 or not netlist.is_file():
-            raise RuntimeError(
-                f"kicad-cli stopped with the exit code {result.returncode}: {output}"
-            )
-        return read_as_kicad(netlist), output
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
+    export = export_with_kicad_cli(
+        ["sch", "export", "netlist", "--format", "kicadsexpr"],
+        root,
+        "board.net",
+        _NETLIST_TIMEOUT,
+    )
+    return decode_as_kicad(export.data, Path("board.net")), "\n".join(export.messages)
 
 
 @dataclass(frozen=True)

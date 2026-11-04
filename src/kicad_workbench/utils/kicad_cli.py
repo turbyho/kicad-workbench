@@ -24,6 +24,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from .kicad_version import find_kicad_install
@@ -221,6 +223,52 @@ def run_kicad_cli_sync(
     return subprocess.run(
         [exe] + args, capture_output=True, timeout=timeout, env=kicad_cli_env(english)
     )
+
+
+@dataclass(frozen=True)
+class CliExport:
+    """The output file and the messages of a kicad-cli export."""
+
+    data: bytes  # The output file, as kicad-cli wrote it.
+    messages: list[str]  # The lines of kicad-cli, less the line that names the output file.
+
+
+def export_with_kicad_cli(
+    command: list[str], source: Path, file_name: str, timeout: float
+) -> CliExport:
+    """Run a kicad-cli export into a new temporary directory, and return its file.
+
+    kicad-cli gets ``[*command, "--output", <file>, <source>]``. The thread
+    that runs this function owns the temporary directory: a cancel of the tool
+    call does not stop kicad-cli. kicad-cli writes its messages in the
+    language of the KiCad settings, thus the function finds the line that
+    names the output file by the name of the directory, not by its text.
+
+    Raises:
+        RuntimeError: kicad-cli did not stop in time, or did not write the file.
+        FileNotFoundError: kicad-cli was not found.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="kicad-workbench-"))
+    try:
+        output = directory / file_name
+        args = [*command, "--output", str(output), str(source)]
+        try:
+            result = run_kicad_cli_sync(args, timeout=timeout, english=True)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"kicad-cli did not stop in {timeout:g} s.") from e
+        text = decode_output(result.stdout) + "\n" + decode_output(result.stderr)
+        messages = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and directory.name not in line
+        ]
+        if result.returncode != 0 or not output.is_file():
+            raise RuntimeError(
+                f"kicad-cli stopped with the exit code {result.returncode}: " + " ".join(messages)
+            )
+        return CliExport(output.read_bytes(), messages)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 async def run_kicad_cli(

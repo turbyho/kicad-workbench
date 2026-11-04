@@ -4,6 +4,7 @@ Core KiCad operations - simplified and focused.
 """
 
 from . import (
+    bom,
     device_tree,
     hierarchical_analysis,
     library,
@@ -22,6 +23,7 @@ from . import (
 )
 
 __all__ = [
+    "bom",
     "project",
     "schematic",
     "schematic_editor",

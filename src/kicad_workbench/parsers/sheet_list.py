@@ -219,6 +219,11 @@ class Screen:
     # (SCH_SHEET_LIST::UpdateSheetInstanceData).
     sheet_instances: list[tuple[tuple[Kiid, ...], str]] = field(default_factory=list)
 
+    @property
+    def kicad(self) -> int:
+        """The field rules of the file: 9 (KiCad 8 and 9) or 10."""
+        return self.rules.kicad
+
 
 @dataclass(eq=False)
 class SheetItem:

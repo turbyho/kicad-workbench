@@ -20,6 +20,7 @@ from kicad_workbench.parsers.annotation import (
     erc_violations,
     marker_text,
     ref_des_prefix,
+    split_reference,
 )
 from kicad_workbench.parsers.sexpr import parse
 from kicad_workbench.parsers.sheet_list import (
@@ -141,6 +142,13 @@ class TestSplit:
         ref = _Ref(None, None, text, 1, "", 0)  # type: ignore[arg-type]
         ref.split()
         assert (ref.is_new, ref.ref, ref.num, ref.num_str) == (new, prefix, number, number_text)
+
+    @pytest.mark.parametrize(
+        "text, shown", [("C?", "C?"), ("C", "C?"), ("C012", "C012"), ("U 1", "U?"), ("123", "123?")]
+    )
+    def test_shown_reference(self, text, shown):
+        # The BOM writes GetRef() + GetRefNumber(): "?" for no number.
+        assert split_reference(text).shown == shown
 
     def test_prefix_and_case(self):
         assert ref_des_prefix("R12?") == "R" and ref_des_prefix("12") == ""

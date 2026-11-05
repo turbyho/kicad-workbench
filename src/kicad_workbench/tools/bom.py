@@ -267,11 +267,11 @@ _BOM_NOTE = (
 )
 
 
-def _unit_check(project: Path, variants: list[str]) -> list[str]:
+def _unit_check(project: Path, kicad: str, variants: list[str]) -> list[str]:
     """Return the lines about the units of one package with different fields (see
     parsers/unit_fields): an error of the design, first in the output."""
     try:
-        conflicts, problems = unit_conflicts(project, variants)
+        conflicts, problems = unit_conflicts(project, kicad, variants)
     except (OSError, KiCadEncodingError, SExprError, KicadFileError, ValueError) as e:
         # The BOM of kicad-cli is correct: only this check did not run.
         return [f"⚠️ The tool could not compare the fields of the units of the symbols: {e}"]
@@ -426,7 +426,7 @@ async def _export_all_variants(
         )
     except OSError as e:
         return f"❌ The BOM files cannot be written: {e}. The tool changed no file."
-    units = await asyncio.to_thread(_unit_check, project, variants)
+    units = await asyncio.to_thread(_unit_check, project, kicad, variants)
     count = len(variants)
     lines_out = [
         f"# BOM of {root.name}, all variants",
@@ -528,7 +528,7 @@ async def _export_bom(
             output.write_bytes(export.data)
 
         await asyncio.to_thread(write)
-    units = await asyncio.to_thread(_unit_check, project, [variant] if variant else [])
+    units = await asyncio.to_thread(_unit_check, project, kicad, [variant] if variant else [])
     return _bom_text(
         root, kicad, export, rows, columns, output, replaced, variant, bool(group_by), units
     )

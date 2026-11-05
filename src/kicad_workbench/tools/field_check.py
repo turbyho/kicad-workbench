@@ -17,6 +17,7 @@ import os
 import traceback
 from pathlib import Path
 
+from ..parsers.annotation import kicad_major
 from ..parsers.confirmed_mpns import (
     CadSymbol,
     FieldCheck,
@@ -199,6 +200,10 @@ async def _check(schematic_path: str) -> str:
         return f"❌ {NO_KICAD_CLI}"
     major = bom_rules(kicad)
     try:
+        kicad_major(kicad)  # the references of the symbols after the load
+    except ValueError as e:
+        return f"❌ {e}"
+    try:
         project = await asyncio.to_thread(schematic_project_file, path)
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
@@ -207,7 +212,7 @@ async def _check(schematic_path: str) -> str:
         variants = []
         if major >= 10:
             variants = other_variants(await asyncio.to_thread(variant_names, project))
-        units = await asyncio.to_thread(variant_unit_conflicts, project, variants)
+        units = await asyncio.to_thread(variant_unit_conflicts, project, kicad, variants)
     except (OSError, KiCadEncodingError, SExprError, KicadFileError, ValueError) as e:
         # The tool cannot check the units of one package: a proposal for such a BOM
         # line would write its joined values.

@@ -21,7 +21,7 @@ LIB = (
 )
 
 
-def symbol(reference, unit, paths=("/r",), mpn="A", variants=""):
+def symbol(reference, unit, paths=("/a0",), mpn="A", variants=""):
     """A placed unit of LM358 with its instances: (path, reference) or a path."""
     instances = ""
     for path in paths:
@@ -49,15 +49,15 @@ def write_project(
             f'\t(sheet\n\t\t(at 1 1)\n\t\t(size 2 2)\n\t\t(uuid "{uuid}")\n'
             f'\t\t(property "Sheetname" "{name}"\n\t\t\t(at 0 0 0)\n\t\t)\n'
             f'\t\t(property "Sheetfile" "sub.kicad_sch"\n\t\t\t(at 0 0 0)\n\t\t)\n\t)\n'
-            for uuid, name in (("s1", "A"), ("s2", "B"))
+            for uuid, name in (("b1", "A"), ("b2", "B"))
         )
         (directory / "sub.kicad_sch").write_text(
-            f'(kicad_sch\n\t(version {version})\n\t(generator "eeschema")\n\t(uuid "sub")\n{LIB}{sub})\n',
+            f'(kicad_sch\n\t(version {version})\n\t(generator "eeschema")\n\t(uuid "c0")\n{LIB}{sub})\n',
             encoding="utf-8",
         )
     path = directory / "board.kicad_sch"
     path.write_text(
-        f'(kicad_sch\n\t(version {version})\n\t(generator "eeschema")\n\t(uuid "r")\n{LIB}{root}{sheets})\n',
+        f'(kicad_sch\n\t(version {version})\n\t(generator "eeschema")\n\t(uuid "a0")\n{LIB}{root}{sheets})\n',
         encoding="utf-8",
     )
     variants = {"schematic": {"variants": [{"name": "Pro"}, {"name": "Lite"}]}}
@@ -68,13 +68,14 @@ def write_project(
 
 
 @pytest.fixture(autouse=True)
-def no_kicad(monkeypatch):
-    """The default text size of the application settings: none (50 mils)."""
+def no_kicad(monkeypatch, tmp_path):
+    """KiCad 10.0.6 with no application settings: the default text size is 50 mils."""
 
     async def version():
-        return None
+        return "10.0.6"
 
     monkeypatch.setattr(symbol_fields, "get_kicad_version", version)
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "kicad-config"))
 
 
 async def write(path: Path, *changes: FieldChange) -> str:
@@ -104,7 +105,7 @@ class TestSymbolFields:
             )
             == 2
         )
-        assert unit_conflicts(tmp_path / "board.kicad_pro")[0] == []
+        assert unit_conflicts(tmp_path / "board.kicad_pro", "10.0.6")[0] == []
 
     async def test_kicad9_format_and_text_size(self, tmp_path):
         settings = {"drawing": {"default_text_size": 60}}
@@ -126,7 +127,7 @@ class TestSymbolFields:
     async def test_shared_sheet(self, tmp_path):
         # The sheet is used two times: one symbol has the references U5 and U6.
         sub = "".join(
-            symbol("U5", unit, paths=(("/r/s1", "U5"), ("/r/s2", "U6"))) for unit in (1, 2)
+            symbol("U5", unit, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6"))) for unit in (1, 2)
         )
         path = write_project(tmp_path, "", sub)
         out = await write(path, FieldChange(reference="U5", fields={"MPN": "X"}))
@@ -181,7 +182,7 @@ class TestSymbolFields:
         assert (
             text.count('(name "Lite")\n\t\t\t\t\t\t(dnp yes)\n\t\t\t\t\t)') == 2
         )  # the flag stays
-        assert unit_conflicts(tmp_path / "board.kicad_pro", ["Pro", "Lite"])[0] == []
+        assert unit_conflicts(tmp_path / "board.kicad_pro", "10.0.6", ["Pro", "Lite"])[0] == []
         # KiCad 10 reads a mandatory field with no difference of case (also in an older
         # file): the tool takes only the exact name.
         out = await write(path, FieldChange(reference="U1", fields={"value": "X"}, variant="Pro"))
@@ -195,6 +196,8 @@ class TestSymbolFields:
                 "does not write the Reference",
             ),
             (FieldChange(reference="U?", fields={"MPN": "X"}), "is not annotated"),
+            # SCH_REFERENCE::Split: no number is not annotated too.
+            (FieldChange(reference="U", fields={"MPN": "X"}), "is not annotated"),
             (FieldChange(reference="U9", fields={"MPN": "X"}), "no symbol with the reference U9"),
             (FieldChange(reference="U1", fields={"MPN": "X\nY"}), "has a line break or a tab"),
             (FieldChange(reference="U1", fields={}), "has no fields"),
@@ -227,7 +230,7 @@ class TestSymbolFields:
         assert out.startswith("❌ Two changes of U1")
 
     async def test_open_file_writes_no_file(self, tmp_path):
-        sub = symbol("U5", 1, paths=(("/r/s1", "U5"), ("/r/s2", "U6")))
+        sub = symbol("U5", 1, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6")))
         path = write_project(tmp_path, symbol("U1", 1), sub)
         lock_file_path(tmp_path / "sub.kicad_sch").write_text(
             '{"hostname":"h","username":"u"}', encoding="utf-8"
@@ -278,21 +281,21 @@ class TestReviewCases:
         assert out.startswith("# Fields")
         text = path.read_text(encoding="utf-8")
         assert '(name "Pro")' not in text and '(name "Lite")' in text
-        assert unit_conflicts(tmp_path / "board.kicad_pro", ["Lite"])[0] == []
+        assert unit_conflicts(tmp_path / "board.kicad_pro", "10.0.6", ["Lite"])[0] == []
 
     async def test_sheet_hierarchy_that_the_tool_cannot_read(self, tmp_path):
         # The second place of the shared sheet has no UUID: KiCad gives it new UUIDs
         # at each load, thus the tool cannot find its references (sheet_paths).
-        sub = symbol("U5", 1, paths=(("/r/s1", "U5"),))
+        sub = symbol("U5", 1, paths=(("/a0/b1", "U5"),))
         path = write_project(tmp_path, symbol("U1", 1), sub)
-        text = path.read_text(encoding="utf-8").replace('\t\t(uuid "s2")\n', "")
+        text = path.read_text(encoding="utf-8").replace('\t\t(uuid "b2")\n', "")
         path.write_text(text, encoding="utf-8")
         out = await write(path, FieldChange(reference="U5", fields={"MPN": "X"}))
         assert out.startswith("❌ The tool cannot read the full sheet hierarchy")
         assert (tmp_path / "sub.kicad_sch").read_text(encoding="utf-8").count('"MPN" "X"') == 0
 
     async def test_failed_write_restores_the_written_files(self, tmp_path, monkeypatch):
-        sub = symbol("U5", 1, paths=(("/r/s1", "U5"), ("/r/s2", "U6")))
+        sub = symbol("U5", 1, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6")))
         path = write_project(tmp_path, symbol("U1", 1), sub)
         before = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.glob("*.kicad_sch")}
         real = symbol_fields.write_schematic
@@ -386,7 +389,7 @@ class TestReviewCases:
 
     async def test_output_cells_and_count(self, tmp_path):
         sub = "".join(
-            symbol("U5", unit, paths=(("/r/s1", "U5"), ("/r/s2", "U6"))) for unit in (1, 2)
+            symbol("U5", unit, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6"))) for unit in (1, 2)
         )
         path = write_project(tmp_path, "", sub)
         out = await write(

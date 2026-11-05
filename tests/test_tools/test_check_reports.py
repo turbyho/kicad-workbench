@@ -247,7 +247,7 @@ class TestKicadCliIntegration:
         monkeypatch.setattr(validation, "get_kicad_version", nightly)
         out = await validation.run_erc(str(sch))
         assert out.startswith("⚠️ **ERC: no violation in the report of kicad-cli**")
-        assert "no verified rules of the annotation check for KiCad 10.99.0" in out
+        assert "no verified rules of KiCad 10.99.0 for the load of a schematic" in out
         out = await validation.get_erc_violations(str(sch))
         assert out.startswith("⚠️ **No violation in the report of kicad-cli**")
 

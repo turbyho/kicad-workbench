@@ -326,7 +326,7 @@ class TestExportBom:
             assert lines[3] == "- U1: MPN: A = 'LM358NG', B = 'LM358P'"
 
     async def test_unit_check_failure_keeps_the_bom(self, project, monkeypatch):
-        def failing(project, variants):
+        def failing(project, version, variants):
             raise ValueError("bad unit")
 
         monkeypatch.setattr(bom, "unit_conflicts", failing)

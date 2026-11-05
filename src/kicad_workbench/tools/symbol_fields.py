@@ -36,6 +36,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..parsers.annotation import kicad_major, split_reference
 from ..parsers.kicad_fields import SYMBOL_FIELD_NAMES
 from ..parsers.kicad_versions import (
     EMPTY_TEXT_MARKER,
@@ -260,7 +261,9 @@ def _check_change(change: FieldChange, known_variants: set[str]) -> None:
     Raises:
         ValueError: The reason.
     """
-    if not change.reference or change.reference.endswith("?"):
+    # SCH_REFERENCE::Split: a reference that ends with "?" or with no digit is not
+    # annotated ("U?", "U"), as CheckAnnotation finds it.
+    if not change.reference or split_reference(change.reference).new:
         raise ValueError(
             f"The reference {change.reference!r} is not annotated. Annotate the schematic in "
             "KiCad first."
@@ -374,7 +377,7 @@ def _variant_edit(state: _Variants) -> tuple[int, int, str] | None:
 
 
 def _plan(
-    project: Path, changes: list[FieldChange], size: float
+    project: Path, kicad: str, changes: list[FieldChange], size: float
 ) -> tuple[dict[Path, str], list[_Row], dict[Path, SchematicFile], list[str]]:
     """Return the new text of each file to write, the rows of the output, the
     files, and the warnings.
@@ -382,7 +385,8 @@ def _plan(
     Raises:
         ValueError: A change cannot be written (the message tells why).
     """
-    instances, files, problems = placed_instances(project)
+    # The references of the schematic editor of the installed KiCad (user, 2026-11-05).
+    instances, files, problems = placed_instances(project, kicad, "gui")
     if problems:
         # A sheet that the tool cannot read can hold an other reference of a symbol
         # (a shared sheet): the check of _check_shared would not be complete.
@@ -682,9 +686,18 @@ async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) ->
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
     kicad = await get_kicad_version()
+    if kicad is None:
+        return (
+            "❌ The version of KiCad is not known (kicad-cli does not run): the references of "
+            "the symbols depend on it. Install KiCad or set KICAD_CLI."
+        )
+    try:
+        kicad_major(kicad)
+    except ValueError as e:
+        return f"❌ {e}"
     size = await asyncio.to_thread(default_text_size, project, kicad)
     try:
-        texts, rows, files, problems = await asyncio.to_thread(_plan, project, changes, size)
+        texts, rows, files, problems = await asyncio.to_thread(_plan, project, kicad, changes, size)
     except (OSError, KiCadEncodingError, SExprError, KicadFileError) as e:
         return f"❌ The schematic files of {project} cannot be read: {e}"
     # The checks of all files first: the tool writes no file when one check fails.

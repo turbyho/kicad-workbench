@@ -33,14 +33,14 @@ def write_project(
             f'  (sheet (at 1 1) (size 2 2) (uuid "{uuid}")\n'
             f'    (property "Sheetname" "{name}" (at 0 0 0))\n'
             f'    (property "Sheetfile" "sub.kicad_sch" (at 0 0 0)))\n'
-            for uuid, name in (("s1", "A"), ("s2", "B"))
+            for uuid, name in (("b1", "A"), ("b2", "B"))
         )
         (directory / "sub.kicad_sch").write_text(
-            f'(kicad_sch (version {VERSION}) (generator "eeschema") (uuid "sub")\n{sub_symbols})\n',
+            f'(kicad_sch (version {VERSION}) (generator "eeschema") (uuid "c0")\n{sub_symbols})\n',
             encoding="utf-8",
         )
     (directory / "board.kicad_sch").write_text(
-        f'(kicad_sch (version {version}) (generator "eeschema") (uuid "r")\n'
+        f'(kicad_sch (version {version}) (generator "eeschema") (uuid "a0")\n'
         f"{root_symbols}{sheets})\n",
         encoding="utf-8",
     )
@@ -50,28 +50,28 @@ def write_project(
 
 
 def texts(project: Path, variants=None) -> list[str]:
-    conflicts, problems = unit_conflicts(project, variants)
+    conflicts, problems = unit_conflicts(project, "10.0.6", variants)
     assert problems == []
     return [c.text() for c in conflicts]
 
 
 class TestUnitConflicts:
     def test_four_units_with_one_other_mpn(self, tmp_path):
-        symbols = "".join(symbol("U1", unit, "/r") for unit in (1, 2, 3))
-        symbols += symbol("U1", 4, "/r", mpn="LM324N")
+        symbols = "".join(symbol("U1", unit, "/a0") for unit in (1, 2, 3))
+        symbols += symbol("U1", 4, "/a0", mpn="LM324N")
         assert texts(write_project(tmp_path, symbols)) == [
             "U1: MPN: A = 'LM324DR', B = 'LM324DR', C = 'LM324DR', D = 'LM324N'"
         ]
 
     def test_same_fields_give_nothing(self, tmp_path):
-        symbols = "".join(symbol("U1", unit, "/r") for unit in (1, 2, 3, 4))
+        symbols = "".join(symbol("U1", unit, "/a0") for unit in (1, 2, 3, 4))
         assert texts(write_project(tmp_path, symbols)) == []
 
     def test_value_and_empty_mpn(self, tmp_path):
         # An empty field and a missing field are differences too (user, 2026-11-05).
-        symbols = symbol("U3", 1, "/r", value="LM358 (A)", mpn="A")
-        symbols += symbol("U3", 2, "/r", value="LM358", mpn=None)
-        symbols += symbol("U4", 1, "/r", mpn="X ") + symbol("U4", 2, "/r", mpn="X")
+        symbols = symbol("U3", 1, "/a0", value="LM358 (A)", mpn="A")
+        symbols += symbol("U3", 2, "/a0", value="LM358", mpn=None)
+        symbols += symbol("U4", 1, "/a0", mpn="X ") + symbol("U4", 2, "/a0", mpn="X")
         assert texts(write_project(tmp_path, symbols)) == [
             "U3: Value: A = 'LM358 (A)', B = 'LM358'",
             "U3: MPN: A = 'A', B = ''",
@@ -80,41 +80,43 @@ class TestUnitConflicts:
 
     def test_tilde_by_file_version(self, tmp_path):
         # "~" is an empty field only in a file older than EMPTY_TEXT_MARKER (parseSchField).
-        symbols = symbol("U4", 1, "/r", mpn="~") + symbol("U4", 2, "/r", mpn=None)
+        symbols = symbol("U4", 1, "/a0", mpn="~") + symbol("U4", 2, "/a0", mpn=None)
         assert texts(write_project(tmp_path, symbols, version="20250114")) == []
         assert texts(write_project(tmp_path, symbols)) == ["U4: MPN: A = '~', B = ''"]
 
     def test_duplicate_reference_is_not_compared(self, tmp_path):
-        symbols = symbol("R1", 1, "/r", value="10k") + symbol("R1", 1, "/r", value="1k")
-        conflicts, problems = unit_conflicts(write_project(tmp_path, symbols))
+        symbols = symbol("R1", 1, "/a0", value="10k") + symbol("R1", 1, "/a0", value="1k")
+        conflicts, problems = unit_conflicts(write_project(tmp_path, symbols), "10.0.6")
         assert conflicts == [] and problems[0].startswith("R1: a duplicate reference")
 
     def test_reference_case_and_reference_field(self, tmp_path):
         # KiCad groups "U1" and "u1" (CompareRef); a symbol with no instance for the
         # sheet path uses its Reference field (SCH_SYMBOL::GetRef).
-        symbols = symbol("U1", 1, "/r", mpn="A") + symbol("u1", 2, "/other", mpn="B")
+        symbols = symbol("U1", 1, "/a0", mpn="A") + symbol("u1", 2, "/other", mpn="B")
         assert texts(write_project(tmp_path, symbols)) == ["U1: MPN: A = 'A', B = 'B'"]
 
     def test_other_mpn_field_names(self, tmp_path):
         assert is_mpn_field("Manufacturer_Part_Number") and is_mpn_field("mfr pn")
         assert not is_mpn_field("Part Number")
-        symbols = symbol("U1", 1, "/r", mpn_name="Manufacturer Part Number", mpn="A")
-        symbols += symbol("U1", 2, "/r", mpn_name="Manufacturer Part Number", mpn="B")
+        symbols = symbol("U1", 1, "/a0", mpn_name="Manufacturer Part Number", mpn="A")
+        symbols += symbol("U1", 2, "/a0", mpn_name="Manufacturer Part Number", mpn="B")
         assert texts(write_project(tmp_path, symbols)) == [
             "U1: Manufacturer Part Number: A = 'A', B = 'B'"
         ]
 
     def test_not_annotated_and_power_symbols(self, tmp_path):
-        symbols = symbol("U?", 1, "/r", mpn="A") + symbol("U?", 2, "/r", mpn="B")
-        symbols += symbol("#PWR01", 1, "/r", mpn="A") + symbol("#PWR01", 2, "/r", mpn="B")
+        # "U" with no number is not annotated too: the BOM gives "U?" lines.
+        symbols = symbol("U?", 1, "/a0", mpn="A") + symbol("U?", 2, "/a0", mpn="B")
+        symbols += symbol("U", 1, "/a0", mpn="A") + symbol("U", 2, "/a0", mpn="B")
+        symbols += symbol("#PWR01", 1, "/a0", mpn="A") + symbol("#PWR01", 2, "/a0", mpn="B")
         assert texts(write_project(tmp_path, symbols)) == []
 
     def test_shared_sheet_gives_each_reference(self, tmp_path):
         # The sheet sub.kicad_sch is used two times: its units get U5 and U6.
         def unit(number, mpn):
-            return symbol("U5", number, "/r/s1", mpn=mpn).replace(
+            return symbol("U5", number, "/a0/b1", mpn=mpn).replace(
                 '(reference "U5")',
-                f'(reference "U5") (unit {number})) (path "/r/s2" (reference "U6")',
+                f'(reference "U5") (unit {number})) (path "/a0/b2" (reference "U6")',
                 1,
             )
 
@@ -127,8 +129,8 @@ class TestUnitConflicts:
     def test_value_confirmed(self, tmp_path):
         """Value_Confirmed is the confirmed copy of Value: the BOM line joins it too."""
         assert is_confirmed_field("value confirmed") and not is_confirmed_field("Value")
-        symbols = symbol("U1", 1, "/r", mpn_name="Value_Confirmed", mpn="LM324")
-        symbols += symbol("U1", 2, "/r", mpn_name="Value_Confirmed", mpn="LM324 (LM324DR)")
+        symbols = symbol("U1", 1, "/a0", mpn_name="Value_Confirmed", mpn="LM324")
+        symbols += symbol("U1", 2, "/a0", mpn_name="Value_Confirmed", mpn="LM324 (LM324DR)")
         assert texts(write_project(tmp_path, symbols)) == [
             "U1: Value_Confirmed: A = 'LM324', B = 'LM324 (LM324DR)'"
         ]
@@ -137,8 +139,8 @@ class TestUnitConflicts:
         """variant_unit_conflicts gives the full set of each variant: a variant can
         make the fields of the units equal."""
         lite = '(variant (name "Lite") (field (name "MPN") (value "B")))'
-        symbols = symbol("U2", 1, "/r", mpn="A", variants=lite) + symbol("U2", 2, "/r", mpn="B")
-        check = variant_unit_conflicts(write_project(tmp_path, symbols), ["Lite"])
+        symbols = symbol("U2", 1, "/a0", mpn="A", variants=lite) + symbol("U2", 2, "/a0", mpn="B")
+        check = variant_unit_conflicts(write_project(tmp_path, symbols), "10.0.6", ["Lite"])
         assert (check.hierarchy, check.duplicates, check.conflicts["Lite"]) == ([], [], [])
         assert [c.text() for c in check.conflicts[""]] == ["U2: MPN: A = 'A', B = 'B'"]
 
@@ -146,12 +148,12 @@ class TestUnitConflicts:
         lite = '(variant (name "Lite") (field (name "MPN") (value "LM324N")))'
         # KiCad finds the field of a variant by its exact name: "value" is no Value.
         lite += '(variant (name "Lite") (field (name "value") (value "X")))'
-        symbols = symbol("U2", 1, "/r") + symbol("U2", 2, "/r", variants=lite)
+        symbols = symbol("U2", 1, "/a0") + symbol("U2", 2, "/a0", variants=lite)
         project = write_project(tmp_path, symbols)
         assert texts(project) == []
         assert texts(project, ["Lite", "Pro"]) == [
             "U2 (variant 'Lite'): MPN: A = 'LM324DR', B = 'LM324N'"
         ]
         # A variant gives only the conflicts that the default variant does not give.
-        symbols = symbol("U2", 1, "/r", mpn="A") + symbol("U2", 2, "/r", mpn="B")
+        symbols = symbol("U2", 1, "/a0", mpn="A") + symbol("U2", 2, "/a0", mpn="B")
         assert texts(write_project(tmp_path, symbols), ["Lite"]) == ["U2: MPN: A = 'A', B = 'B'"]

@@ -177,6 +177,10 @@ class _Instance:
     path: tuple[Kiid, ...]
     reference: str
     unit: int
+    node: Node | None = None  # the (path ...) of the file; None: KiCad made the instance
+    # The (path ...) with the variants of the instance: node, or the node of the
+    # instance that KiCad 10 copied (CheckForMissingSymbolInstances copies m_Variants).
+    variants: Node | None = None
 
 
 def ref_des_prefix(text: str) -> str:
@@ -318,14 +322,17 @@ def _load_symbol(screen: Screen, node: Node, kicad: int) -> _Symbol:
             symbol.unit = int(data)  # type: ignore[call-overload]
         else:
             project_name, path = data  # type: ignore[misc]
-            instance = _Instance(project_name, kiid_path(path.value(0, "")), "", 1)
+            instance = _Instance(project_name, kiid_path(path.value(0, "")), "", 1, path, path)
             for item in path.children():
                 if item.head == "reference":
                     instance.reference = item.value(0, "")
                 elif item.head == "unit":
                     instance.unit = int(item.number(0, 1))
                 elif item.head == "value":
-                    symbol.value = text(item.value(0, ""))
+                    # KiCad 10 reads "~" of a file before EMPTY_TEXT_MARKER as empty;
+                    # KiCad 8 and 9 keep it (SetValueFieldText).
+                    value = item.value(0, "")
+                    symbol.value = text(value) if kicad >= 10 else value
                 if kicad <= 9:
                     symbol.add_instance(replace(instance))
             if kicad >= 10:
@@ -380,35 +387,61 @@ class _Ref:
     item: AnnotationItem | None = None
 
     def split(self) -> None:
-        """``SCH_REFERENCE::Split`` on the UTF-8 bytes, with a signed ``char``."""
-        data = self.ref.encode("utf-8")
-        self.num = -1
-        self.num_str = ""
-        last = len(data) - 1
-        if last < 0:
-            self.is_new = True  # KiCad reads before the text: the tool calls it new.
-            return
-        if data[last] == ord("?"):
-            self.is_new = True
-            self.ref = data[:last].decode("utf-8")
-        elif not _is_digit(data[last]):
-            self.is_new = True
-        else:
-            while last >= 0:
-                byte = data[last]
-                if byte >= 0x80 or byte <= 0x20 or _is_digit(byte):
-                    last -= 1
-                    continue
-                if _is_digit(data[last + 1]):
-                    digits = data[last + 1 :]
-                    end = 0
-                    while end < len(digits) and _is_digit(digits[end]):
-                        end += 1
-                    # atoi: strtol gives LONG_MAX on overflow, then the cast to int.
-                    self.num = to_int(min(int(digits[:end]), 2**63 - 1))
-                self.num_str = data[last + 1 :].decode("utf-8")
-                self.ref = data[: last + 1].decode("utf-8")
-                break
+        """``SCH_REFERENCE::Split``: see split_reference."""
+        split = split_reference(self.ref)
+        self.ref, self.num, self.num_str = split.prefix, split.number, split.number_text
+        self.is_new = self.is_new or split.new
+
+
+@dataclass(frozen=True)
+class SplitReference:
+    """A reference after ``SCH_REFERENCE::Split``."""
+
+    prefix: str  # m_ref: without "?" and without the number
+    number: int  # m_numRef; -1: no number
+    number_text: str  # m_numRefStr
+    new: bool  # m_isNew: not annotated
+
+    @property
+    def shown(self) -> str:
+        """The reference of the BOM and of the cross-probe: the prefix and the number
+        text, or "?" for no number (GetRef() + GetRefNumber())."""
+        return self.prefix + (self.number_text if self.number >= 0 else "?")
+
+
+def split_reference(text: str) -> SplitReference:
+    """``SCH_REFERENCE::Split`` on the UTF-8 bytes, with a signed ``char``.
+
+    A reference that ends with "?" or with no digit is new (not annotated). The loop
+    from the end skips the digits, the spaces and each byte of a character that is
+    not ASCII; the number is the digits after the prefix (atoi). A text with no
+    prefix ("123") stays as it is, with no number.
+    """
+    data = text.encode("utf-8")
+    last = len(data) - 1
+    if last < 0:
+        return SplitReference("", -1, "", True)  # KiCad reads before the text.
+    if data[last] == ord("?"):
+        return SplitReference(data[:last].decode("utf-8"), -1, "", True)
+    if not _is_digit(data[last]):
+        return SplitReference(text, -1, "", True)
+    while last >= 0:
+        byte = data[last]
+        if byte >= 0x80 or byte <= 0x20 or _is_digit(byte):
+            last -= 1
+            continue
+        number = -1
+        if _is_digit(data[last + 1]):
+            digits = data[last + 1 :]
+            end = 0
+            while end < len(digits) and _is_digit(digits[end]):
+                end += 1
+            # atoi: strtol gives LONG_MAX on overflow, then the cast to int.
+            number = to_int(min(int(digits[:end]), 2**63 - 1))
+        return SplitReference(
+            data[: last + 1].decode("utf-8"), number, data[last + 1 :].decode("utf-8"), False
+        )
+    return SplitReference(text, -1, "", False)
 
 
 def _sub_reference(symbol: _Symbol, unit: int, kicad: int, settings: SubpartSettings) -> str:
@@ -492,7 +525,13 @@ def _missing_instances(state: _State, kicad: int, project: str) -> None:
                 source = next(
                     (i for i in symbol.instances if i.project == project), symbol.instances[0]
                 )
-                symbol.add_instance(_Instance(project, path.kiids, source.reference, source.unit))
+                # The copy has the variants of the source (SCH_SYMBOL_INSTANCE), but no
+                # (path ...) of its own in the file.
+                symbol.add_instance(
+                    _Instance(
+                        project, path.kiids, source.reference, source.unit, None, source.variants
+                    )
+                )
             else:
                 symbol.add_instance(
                     _Instance(project, path.kiids, symbol.reference_field, symbol.unit)
@@ -821,6 +860,41 @@ def _in_list(symbol: _Symbol, reference: str, symbols_filter: str) -> bool:
     return symbol.definition is not None
 
 
+def _loaded_state(
+    sheet_list: SheetList,
+    loaded: dict[Path, list[_Symbol]],
+    kicad: int,
+    view: str,
+    symbols_filter: str,
+    project: str,
+    rank: dict[int, int],
+) -> _State:
+    """The symbols and the pages after the changes of KiCad after the load, and before
+    the check of the view (see check_annotation and placed_symbols_after_load), for
+    one order of the paths with an unknown order. "gui" is the schematic editor after
+    the load."""
+    problems: list[str] = []
+    symbols = {file: [_copy(symbol) for symbol in items] for file, items in loaded.items()}
+    state = _State(sheet_list, dict(sheet_list.pages), symbols, [], problems)
+    state.order = _sorted(state, rank)
+
+    if view == "cli":
+        state.pages = _Pages(sheet_list).pages
+
+    if view in ("erc", "update", "gui") or kicad >= 10:
+        _missing_instances(state, kicad, project)
+        _repair_pages(state, kicad)
+    if view == "cli" and kicad <= 9:
+        _annotate_power_symbols(state, kicad, symbols_filter, problems)
+    # RecalculateConnections sorts the hierarchy again (RefreshHierarchy).
+    state.order = _sorted(state, rank)
+    # The ERC dialog of KiCad 8 and ReadyToNetlist of KiCad 8 and 9 annotate the power
+    # symbols before the check.
+    if (view == "erc" and kicad == 8) or (view == "update" and kicad <= 9):
+        _annotate_power_symbols(state, kicad, symbols_filter, problems)
+    return state
+
+
 def _run(
     sheet_list: SheetList,
     loaded: dict[Path, list[_Symbol]],
@@ -832,32 +906,14 @@ def _run(
     rank: dict[int, int],
 ) -> tuple[list[AnnotationError], list[str], tuple[list[AnnotationItem], list[AnnotationItem]]]:
     """Run the load fixes and the check for one order of the paths with an unknown order."""
-    problems: list[str] = []
-    symbols = {file: [_copy(symbol) for symbol in items] for file, items in loaded.items()}
-    state = _State(sheet_list, dict(sheet_list.pages), symbols, [], problems)
-    state.order = _sorted(state, rank)
-
-    if view == "cli":
-        state.pages = _Pages(sheet_list).pages
-
-    if view in ("erc", "update") or kicad >= 10:
-        _missing_instances(state, kicad, project)
-        _repair_pages(state, kicad)
-    if view == "cli" and kicad <= 9:
-        _annotate_power_symbols(state, kicad, symbols_filter, problems)
-    # RecalculateConnections sorts the hierarchy again (RefreshHierarchy).
-    state.order = _sorted(state, rank)
-    # The ERC dialog of KiCad 8 and ReadyToNetlist of KiCad 8 and 9 annotate the power
-    # symbols before the check.
-    if (view == "erc" and kicad == 8) or (view == "update" and kicad <= 9):
-        _annotate_power_symbols(state, kicad, symbols_filter, problems)
-
+    state = _loaded_state(sheet_list, loaded, kicad, view, symbols_filter, project, rank)
+    problems = state.problems
     numbers = _sheet_numbers(state, kicad)
     refs: list[_Ref] = []
     for path in state.order:
         if path.screen is None:
             continue
-        for symbol in symbols[path.screen.file]:
+        for symbol in state.symbols[path.screen.file]:
             if _in_list(symbol, symbol.get_ref(path.kiids), symbols_filter):
                 refs.append(_new_ref(symbol, path, kicad, numbers[id(path)]))
     if not refs:
@@ -903,8 +959,9 @@ def kicad_major(version: str) -> int:
     # The rules of kicad-cli 10 change in 10.0.7 (_tops): the patch must be known.
     if major is None or major not in KICAD_VERSIONS or version_triple(version) is None:
         raise ValueError(
-            f"The server has no verified rules of the annotation check for KiCad {version}: "
-            "only the releases of KiCad 8, 9 and 10."
+            f"The server has no verified rules of KiCad {version} for the load of a "
+            "schematic and the annotation (the references of the symbols): only the "
+            "releases of KiCad 8, 9 and 10."
         )
     return major
 
@@ -927,7 +984,7 @@ def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> l
     if numbers is None:
         raise ValueError(f"The KiCad version {version!r} has no patch number.")
     declared = top_level_sheets(project_file.with_suffix(PRO_SUFFIX)) if kicad >= 10 else []
-    if view in ("erc", "update"):
+    if view in ("erc", "update", "gui"):
         load_all = kicad >= 10
     else:
         load_all = (
@@ -949,6 +1006,125 @@ def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> l
     if not tops:
         raise ValueError(f"KiCad cannot load a top-level sheet of {project_file}.")
     return tops
+
+
+@dataclass
+class _Loaded:
+    """A project as KiCad of a version and a view loads it (_load)."""
+
+    project: Path  # the absolute .kicad_pro file
+    kicad: int  # the major version
+    sheet_list: SheetList
+    symbols: dict[Path, list[_Symbol]]  # the placed symbols of each file
+    problems: list[str]  # the problems of the hierarchy and the notes of _tops
+
+
+def _load(project_file: Path, version: str, view: str) -> _Loaded:
+    """Load the project as KiCad of the version and the view does.
+
+    Raises:
+        ValueError: KiCad has no verified rules for the version, or KiCad cannot load
+            the root schematic. A unit is not a number.
+        KicadFileError: A file has a version that the server does not know.
+    """
+    kicad = kicad_major(version)
+    project_file = Path(project_file).absolute()
+    root = project_file.with_suffix(SCH_SUFFIX)
+    problems: list[str] = []
+    tops = _tops(project_file, version, view, problems)
+    sheet_list = build_sheet_list(tops, project_file.parent, text_variables(root), kicad)
+    problems += sheet_list.problems
+    symbols = {
+        file: [_load_symbol(screen, node, kicad) for node in placed_symbols(screen.root)]
+        for file, screen in sheet_list.screens.items()
+    }
+    return _Loaded(project_file, kicad, sheet_list, symbols, problems)
+
+
+@dataclass(frozen=True)
+class PlacedSymbol:
+    """A placed symbol in one sheet path, as KiCad has it after the load."""
+
+    screen: Screen
+    symbol: Node
+    sheet: SheetPath
+    # The (path ...) of the file that KiCad uses for the instance; None: KiCad made the
+    # instance after the load, or it uses the Reference field (SCH_SYMBOL::GetRef).
+    path: Node | None
+    # The (path ...) with the variants of the instance: path, or the instance that
+    # KiCad 10 copied for a sheet path with no instance (CheckForMissingSymbolInstances).
+    variants: Node | None
+    reference: str  # SCH_SYMBOL::GetRef
+    unit: int  # SCH_SYMBOL::GetUnitSelection
+    unit_count: int  # the units of the library symbol; 1 with no library symbol
+    # The text of the Value field after the load: the property, or the (value ...) of
+    # an instance (the parser sets the Value field).
+    value: str
+    in_bom: bool  # no (in_bom no)
+    has_library_symbol: bool  # SCH_SYMBOL::GetLibSymbolRef
+
+    @property
+    def file(self) -> Path:
+        return self.screen.file
+
+    @property
+    def key(self) -> tuple[Path, int]:
+        """The placed symbol: its file and its offset (one symbol, more instances)."""
+        return (self.screen.file, self.symbol.start)
+
+
+def placed_symbols_after_load(
+    project_file: Path, version: str, view: str
+) -> tuple[list[PlacedSymbol], dict[Path, Screen], list[str]]:
+    """Return each placed symbol in each sheet path with the reference and the unit
+    that KiCad gives it after the load, the screens, and the problems of the sheet
+    hierarchy (a file that cannot be read, a sheet with no UUID).
+
+    The parser rules of the version apply (_load_symbol): the last (path ...) of a
+    sheet path wins, the first instance sets the Reference field, and KiCad 8 and 9
+    add no instance for a (path ...) with no items. Then the changes of KiCad after
+    the load (CheckForMissingSymbolInstances, and AnnotatePowerSymbols of kicad-cli 8
+    and 9) apply. The notes of these changes (a top-level sheet that KiCad does not
+    load, a power symbol number) are no problems of the hierarchy.
+
+    Args:
+        view: "gui": the schematic editor after the project opens. "cli": the jobs
+            of kicad-cli.
+
+    Raises:
+        ValueError: An argument is not valid, KiCad has no verified rules for the
+            version, or KiCad cannot load the root schematic. A unit is not a number.
+        KicadFileError: A file has a version that the server does not know.
+    """
+    if view not in ("gui", "cli"):
+        raise ValueError("view must be one of gui, cli")
+    loaded = _load(project_file, version, view)
+    state = _loaded_state(
+        loaded.sheet_list, loaded.symbols, loaded.kicad, view, "all", loaded.project.stem, {}
+    )
+    placed = []
+    for path in state.order:
+        if path.screen is None:
+            continue
+        for symbol in state.symbols[path.screen.file]:
+            found = symbol.instance(path.kiids)
+            in_bom = symbol.node.first("in_bom")
+            placed.append(
+                PlacedSymbol(
+                    path.screen,
+                    symbol.node,
+                    path,
+                    found.node if found is not None else None,
+                    found.variants if found is not None else None,
+                    symbol.get_ref(path.kiids),
+                    symbol.unit_selection(path.kiids),
+                    symbol.unit_count,
+                    symbol.value,
+                    in_bom is None or in_bom.value(0, "yes") != "no",
+                    symbol.definition is not None,
+                )
+            )
+    return placed, loaded.sheet_list.screens, list(loaded.sheet_list.problems)
 
 
 def check_annotation(
@@ -974,25 +1150,16 @@ def check_annotation(
             version, or KiCad cannot load the root schematic. A unit is not a number.
         KicadFileError: A file has a version that the server does not know.
     """
-    kicad = kicad_major(version)
     if view not in VIEWS:
         raise ValueError(f"view must be one of {', '.join(VIEWS)}")
     if symbols not in SYMBOL_FILTERS:
         raise ValueError(f"symbols must be one of {', '.join(SYMBOL_FILTERS)}")
-    project_file = Path(project_file).absolute()
-    root = project_file.with_suffix(SCH_SUFFIX)
-    problems: list[str] = []
-    tops = _tops(project_file, version, view, problems)
-    sheet_list = build_sheet_list(tops, project_file.parent, text_variables(root), kicad)
-    problems += sheet_list.problems
-    settings = subpart_settings(project_file.with_suffix(PRO_SUFFIX))
+    load = _load(project_file, version, view)
+    kicad, sheet_list, loaded, problems = load.kicad, load.sheet_list, load.symbols, load.problems
+    settings = subpart_settings(load.project.with_suffix(PRO_SUFFIX))
     if settings.problem:
         problems.append(settings.problem)
-    project = project_file.stem
-    loaded = {
-        file: [_load_symbol(screen, node, kicad) for node in placed_symbols(screen.root)]
-        for file, screen in sheet_list.screens.items()
-    }
+    project = load.project.stem
 
     # The paths whose order KiCad gives with a hash of the path, or with an
     # inconsistent compare of two texts of one integer page (KiCad 8 uses the

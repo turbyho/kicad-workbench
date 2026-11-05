@@ -19,13 +19,14 @@ reads each schematic file of the sheet hierarchy:
 - KiCad keeps the reference and the unit of a placed symbol for each sheet
   path, in (instances (project ... (path "<sheet path>" (reference ...)
   (unit ...))). A sheet that the hierarchy uses more than one time gives each
-  of its symbols one reference for each sheet path. With no instance for the
-  sheet path, KiCad uses the Reference field and the (unit) of the symbol
-  (SCH_SYMBOL::GetRef).
+  of its symbols one reference for each sheet path. The references are the
+  references of kicad-cli (the BOM) of the installed KiCad, after the load
+  (parsers/sch_instances.py).
 - KiCad groups the units by the reference, with no difference of case
-  (SCH_REFERENCE::CompareRef). A reference that is not annotated ("U?") is no
-  group: its units are different lines of the BOM. A power symbol ("#PWR01")
-  is not in the BOM.
+  (SCH_REFERENCE::CompareRef). A reference with no number after
+  SCH_REFERENCE::Split ("U?", or "U" with no digit) is no group: its units are
+  different lines of the BOM, as "U?" (FIELDS_EDITOR_GRID_DATA_MODEL). A power
+  symbol ("#PWR01") is not in the BOM.
 - Two symbols with one reference and one unit, or with different unit
   counts, are a duplicate reference (ERCE_DUPLICATE_REFERENCE): KiCad does not
   compare their values, and this module does not compare their fields.
@@ -43,7 +44,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .kicad_fields import FieldRules, rules_for_version, symbol_fields
+from .annotation import split_reference
 from .kicad_versions import EMPTY_TEXT_MARKER
 from .sch_instances import placed_instances
 from .sexpr import Node, property_field
@@ -116,14 +117,18 @@ class _Unit:
     variants: dict[str, dict[str, str]]  # variant name -> the fields that it sets
 
 
-def _symbol_fields(symbol: Node, rules: FieldRules, version: int) -> dict[str, str]:
+def _symbol_fields(symbol: Node, value: str, version: int) -> dict[str, str]:
     """Return Value, the MPN fields and Value_Confirmed of a placed symbol, as KiCad
-    reads them."""
+    reads them.
+
+    value: The Value field after the load (PlacedSymbol.value): the parser sets it
+        also from the (value ...) of an instance.
+    """
 
     def text(value: str) -> str:
         return "" if value == "~" and version < EMPTY_TEXT_MARKER else value
 
-    fields = {"Value": text(symbol_fields(symbol, rules).get("Value", ""))}
+    fields = {"Value": value}
     for prop in symbol.children("property"):
         field = property_field(prop)
         if field is not None and (is_mpn_field(field[0]) or is_confirmed_field(field[0])):
@@ -150,34 +155,35 @@ def _variant_fields(path: Node | None) -> dict[str, dict[str, str]]:
     return variants
 
 
-def _units(project: Path) -> tuple[dict[str, list[_Unit]], list[str]]:
+def _units(project: Path, version: str) -> tuple[dict[str, list[_Unit]], list[str]]:
     """Return the units of each annotated reference of the project (the key is the
     reference in upper case), and the problems.
 
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
-        ValueError: A unit is not a number.
+        ValueError: A unit is not a number, KiCad has no verified rules for the
+            installed version, or KiCad cannot load the root schematic.
     """
-    instances, files, problems = placed_instances(project)
+    instances, files, problems = placed_instances(project, version, "cli")
     fields: dict[tuple[Path, int], dict[str, str]] = {}  # each symbol one time
     units: dict[str, list[_Unit]] = {}
     for instance in instances:
         text = instance.reference
-        if text.startswith("#") or text.endswith("?"):
+        if text.startswith("#") or split_reference(text).number < 0:
             continue
         record = files[instance.file]
         if instance.key not in fields:
-            fields[instance.key] = _symbol_fields(
-                instance.symbol, rules_for_version(record.version), record.version
-            )
+            fields[instance.key] = _symbol_fields(instance.symbol, instance.value, record.version)
         units.setdefault(text.upper(), []).append(
             _Unit(
                 text,
                 instance.unit,
                 instance.unit_count,
                 fields[instance.key],
-                _variant_fields(instance.path),
+                # KiCad 10 copies the variants of an instance for a sheet path with
+                # no instance (CheckForMissingSymbolInstances).
+                _variant_fields(instance.variants),
             )
         )
     return units, problems
@@ -205,9 +211,12 @@ class UnitCheck:
         ]
 
 
-def variant_unit_conflicts(project: Path, variants: list[str] | None = None) -> UnitCheck:
+def variant_unit_conflicts(
+    project: Path, version: str, variants: list[str] | None = None
+) -> UnitCheck:
     """Return all fields with different values in the units of one reference for the
-    default variant ("") and for each name of variants (KiCad 10), the problems of
+    default variant ("") and for each name of variants (KiCad 10), with the
+    references of kicad-cli of the installed KiCad version, the problems of
     the sheet hierarchy (a sheet that the check could not read), and the duplicate
     references.
 
@@ -219,9 +228,10 @@ def variant_unit_conflicts(project: Path, variants: list[str] | None = None) -> 
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
-        ValueError: A unit is not a number.
+        ValueError: A unit is not a number, KiCad has no verified rules for the
+            installed version, or KiCad cannot load the root schematic.
     """
-    units, problems = _units(project)
+    units, problems = _units(project, version)
     duplicates = [
         group[0].reference
         for group in (units[key] for key in sorted(units))
@@ -263,7 +273,7 @@ def variant_unit_conflicts(project: Path, variants: list[str] | None = None) -> 
 
 
 def unit_conflicts(
-    project: Path, variants: list[str] | None = None
+    project: Path, version: str, variants: list[str] | None = None
 ) -> tuple[list[UnitConflict], list[str]]:
     """Return the fields with different values in the units of one reference, and
     the problems of the sheet hierarchy (see variant_unit_conflicts).
@@ -274,9 +284,10 @@ def unit_conflicts(
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
-        ValueError: A unit is not a number.
+        ValueError: A unit is not a number, KiCad has no verified rules for the
+            installed version, or KiCad cannot load the root schematic.
     """
-    check = variant_unit_conflicts(project, variants)
+    check = variant_unit_conflicts(project, version, variants)
     return distinct_conflicts(check.conflicts), check.problems
 
 

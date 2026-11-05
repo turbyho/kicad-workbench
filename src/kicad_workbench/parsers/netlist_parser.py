@@ -135,15 +135,18 @@ class NetlistParser:
                 if ref and pin_num:
                     pins_list.append((ref, pin_num))
 
-                    # Populate component pins
-                    if ref in components:
-                        components[ref].pins[pin_num] = name
-                        components[ref].pin_names[pin_num] = pin_name_of_node(
-                            node.get("pinfunction", ""), pin_num, kicad_version
-                        )
-                        components[ref].pin_types[pin_num] = node.get("pintype", "").replace(
-                            "+no_connect", ""
-                        )
+                    # Populate component pins. KiCad writes no <comp> for a symbol with
+                    # no library symbol, but its pins are in the nets: the component has
+                    # only these pins.
+                    if ref not in components:
+                        components[ref] = NetlistComponent(reference=ref, value="", library="")
+                    components[ref].pins[pin_num] = name
+                    components[ref].pin_names[pin_num] = pin_name_of_node(
+                        node.get("pinfunction", ""), pin_num, kicad_version
+                    )
+                    components[ref].pin_types[pin_num] = node.get("pintype", "").replace(
+                        "+no_connect", ""
+                    )
 
             nets[name] = NetlistNet(name=name, code=code, pins=pins_list)
 

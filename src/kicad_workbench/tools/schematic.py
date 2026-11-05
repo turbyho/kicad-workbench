@@ -108,10 +108,7 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
     netlist = NetlistParser.from_bytes(export.data)
     component = netlist.get_components().get(reference)
     if component is None:
-        return None, (
-            f"the netlist has no {reference} (the Reference field of the symbol is not the "
-            "reference of its sheet path)"
-        )
+        return None, f"the netlist of kicad-cli has no pin of {reference}"
     pins = [
         {
             "number": number,

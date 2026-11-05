@@ -192,3 +192,20 @@ async def test_symbol_details_with_no_netlist(example_schematic, monkeypatch):
     monkeypatch.setattr(schematic, "export_with_kicad_cli", no_netlist)
     result = await schematic.get_symbol_details(str(example_schematic), "R1")
     assert "⚠️ The pins are the pins of the schematic file: kicad-cli gives no netlist" in result
+
+
+def test_component_with_only_netlist_nodes():
+    # KiCad writes no <comp> for a symbol with no library symbol; its pins are nodes.
+    from kicad_workbench.parsers.netlist_parser import NetlistParser
+
+    text = (
+        b'<export version="E"><design><tool>Eeschema 10.0.6</tool></design><components/>'
+        b'<nets><net code="1" name="A"><node ref="U8" pin="2" pinfunction="X_2" '
+        b'pintype="unspecified"/></net></nets></export>'
+    )
+    component = NetlistParser.from_bytes(text).get_components()["U8"]
+    assert (component.value, component.pin_names, component.pin_types) == (
+        "",
+        {"2": "X"},
+        {"2": "unspecified"},
+    )

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicad_workbench.parsers.board_models import BoardFootprint, board_models
+from kicad_workbench.parsers.board_netlist import NetlistComponent
 from kicad_workbench.parsers.rule_severity_keys import severity_keys
 from kicad_workbench.tools import library as library_tools
 from kicad_workbench.tools import library_links
@@ -310,34 +311,58 @@ class TestCheckLibraryLinks:
         assert "_The footprints have no 3D model._" in out
 
 
-class TestAnnotationChanges:
-    """Annotation errors can join symbols in one netlist component."""
+class TestAnnotationNote:
+    """With an annotation error, the footprints and the 3D models get no pass mark."""
 
     @pytest.mark.parametrize(
-        "warning, errors, references, changes",
+        "warning, errors, references, blocked, starts",
         [
-            (False, [], set(), False),  # no annotation error
-            (True, None, None, True),  # kicad-cli warns, and the server check did not run
-            (True, ["e"], {"r1"}, True),
-            (False, ["e"], set(), False),  # only units with different values
-            # kicad-cli warns, and the server finds no error: the changes are not known.
-            (True, [], set(), True),
+            (False, [], set(), False, None),  # no annotation error
+            # kicad-cli warns, and the server checks did not run.
+            (True, None, None, None, "The server does not know the netlist components"),
+            (True, ["e"], {"r1"}, True, "The annotation errors change the netlist"),
+            # A symbol that is not annotated, or units with different values: no component
+            # changes, but "Update PCB from Schematic" opens the annotation dialog.
+            (True, ["e"], set(), True, '"Update PCB from Schematic" finds annotation errors'),
+            (True, ["e"], set(), False, "The netlist of kicad-cli has annotation errors."),
+            # Only "Update PCB from Schematic" finds errors.
+            (False, [], set(), True, '"Update PCB from Schematic" finds annotation errors'),
         ],
     )
-    def test_annotation_changes(self, warning, errors, references, changes):
+    def test_annotation_note(self, warning, errors, references, blocked, starts):
         found = SimpleNamespace(
-            annotation=warning, annotation_errors=errors, annotation_references=references
+            annotation=warning,
+            annotation_errors=errors,
+            annotation_references=references,
+            update_blocked=blocked,
         )
-        assert library_links._annotation_changes(found) is changes
+        text = library_links._annotation_note(found, "footprint")
+        assert text is None if starts is None else text.startswith(starts)
 
-    def test_models_with_joined_symbols(self):
-        assert library_links._model_lines("T", [], "Symbols", {}, True)[-1] == (
+    def test_footprints_with_a_note(self):
+        found = SimpleNamespace(
+            components=[NetlistComponent("R?", "1k", "Lib:Two", [])],
+            reasons={},
+            annotation=True,
+            annotation_errors=["e"],
+            annotation_references=set(),
+            update_blocked=True,
+        )
+        lines, _count, _users = library_links._footprint_lines(found)
+        assert lines[-1] == (
+            "⚠️ KiCad finds the footprint of each symbol (1 footprint). "
+            '"Update PCB from Schematic" finds annotation errors: it opens the annotation '
+            "dialog, and it runs only when no error stays."
+        )
+
+    def test_models_with_a_note(self):
+        assert library_links._model_lines("T", [], "Symbols", {}, "N.")[-1] == (
             "_The footprints have no 3D model._"
         )
         model = library_links._Model(
             "R1", "Lib:Two", "m.step", True, SimpleNamespace(state="found")
         )
-        lines = library_links._model_lines("T", [model], "Symbols", {}, True)
-        assert lines[-1].startswith("⚠️ KiCad finds the file of each 3D model. The annotation")
-        lines = library_links._model_lines("T", [model], "Symbols", {}, False)
+        lines = library_links._model_lines("T", [model], "Symbols", {}, "N.")
+        assert lines[-1] == "⚠️ KiCad finds the file of each 3D model. N."
+        lines = library_links._model_lines("T", [model], "Symbols", {}, None)
         assert lines[-1] == "✅ KiCad finds the file of each 3D model."

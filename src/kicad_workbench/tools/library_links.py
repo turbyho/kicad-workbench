@@ -46,7 +46,7 @@ from .library import (
     NO_KICAD_CLI,
     SchematicFootprints,
     annotation_lines,
-    annotation_state,
+    annotation_sentences,
     cell,
     netlist_root,
     not_found_reason,
@@ -179,18 +179,20 @@ _JOINED = (
 )
 
 
-def _annotation_changes(found: SchematicFootprints) -> bool:
-    """True when annotation errors can change the components of the netlist."""
-    present, known = annotation_state(found)
-    return present and (not known or bool(found.annotation_references))
+def _annotation_note(found: SchematicFootprints, item: str) -> str | None:
+    """The note about the annotation errors for the footprints or the 3D models
+    ("footprint" or "3D model"), or None when there is no annotation error."""
+    changed = _JOINED.format(item=item) if found.annotation_references else None
+    notes = annotation_sentences(found, changed)
+    return " ".join(notes) if notes else None
 
 
 def _model_lines(
-    title: str, models: list[_Model], owner: str, users: dict[str, str], joined: bool = False
+    title: str, models: list[_Model], owner: str, users: dict[str, str], note: str | None = None
 ) -> list[str]:
     """The section of the 3D models that KiCad does not find.
 
-    joined: Annotation errors can join symbols in one netlist component.
+    note: The note about the annotation errors of the netlist (_annotation_note).
     """
     lines = ["", f"## {title}", ""]
     if not models:
@@ -202,16 +204,13 @@ def _model_lines(
     lines.append("Models: " + ", ".join(f"{count} {state}" for state, count in states.items()))
     bad = [model for model in models if model.found.state in ("not found", "no file name")]
     if not bad:
-        if joined:
-            lines += [
-                "",
-                "⚠️ KiCad finds the file of each 3D model. " + _JOINED.format(item="3D model"),
-            ]
+        if note:
+            lines += ["", f"⚠️ KiCad finds the file of each 3D model. {note}"]
         else:
             lines += ["", "✅ KiCad finds the file of each 3D model."]
         return lines
-    if joined:
-        lines += ["", "⚠️ " + _JOINED.format(item="3D model")]
+    if note:
+        lines += ["", f"⚠️ {note}"]
     lines += [
         "",
         "_The 3D viewer and the STEP export show no model for these files. A model that is "
@@ -316,16 +315,17 @@ def _footprint_lines(found: SchematicFootprints) -> tuple[list[str], int, dict[s
         "",
     ]
     if by_reason:
-        if _annotation_changes(found):
-            lines += ["⚠️ " + _JOINED.format(item="footprint"), ""]
+        if note := _annotation_note(found, "footprint"):
+            lines += [f"⚠️ {note}", ""]
         lines += ["| Reason | Symbols |", "|--------|---------|"]
         lines += [
             f"| {cell(reason)} | {cell(', '.join(refs))} |" for reason, refs in by_reason.items()
         ]
     else:
-        found_text = f"KiCad finds the footprint of each symbol ({len(users)} footprints)."
-        if _annotation_changes(found):
-            lines.append(f"⚠️ {found_text} " + _JOINED.format(item="footprint"))
+        count = f"{len(users)} footprint{'' if len(users) == 1 else 's'}"
+        found_text = f"KiCad finds the footprint of each symbol ({count})."
+        if note := _annotation_note(found, "footprint"):
+            lines.append(f"⚠️ {found_text} {note}")
         else:
             lines.append(f"✅ {found_text}")
     count = sum(len(refs) for refs in by_reason.values())
@@ -416,7 +416,7 @@ async def _schematic_part(schematic: Path, kicad: str) -> _Part:
             models,
             "Symbols",
             users,
-            _annotation_changes(found),
+            _annotation_note(found, "3D model"),
         )
     part.problems += found.problems
     return part

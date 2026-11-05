@@ -2,6 +2,7 @@
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -431,22 +432,46 @@ class TestAnnotationReferences:
         )
         assert library_tools.annotation_references(check) == {"r1", "c?", "u5"}
 
+    @staticmethod
+    def found(warning=True, errors=("e",), references=frozenset(), blocked=True):
+        return SimpleNamespace(
+            annotation=warning,
+            annotation_errors=None if errors is None else list(errors),
+            annotation_references=None if references is None else set(references),
+            update_blocked=blocked,
+        )
+
     def test_result_lines(self):
         result = library_tools._annotation_result
+        blocked = library_tools.UPDATE_BLOCKED
+        changed = self.found(references={"r1"})
         # The errors of a changed symbol keep the result line of the counts.
-        assert result("**Result**: ❌ 1 pin number with no pad", 3, 1, True, True) == (
-            "**Result**: ❌ 1 pin number with no pad; 1 symbol has an annotation error: the "
-            "result of this symbol is not complete."
+        assert result("**Result**: ❌ 1 pin number with no pad", 3, 1, changed) == (
+            "**Result**: ❌ 1 pin number with no pad. 1 symbol has an annotation error: the "
+            f"result of this symbol is not complete. {blocked}"
         )
-        assert result(None, 3, 2, True, True) == (
-            "**Result**: ⚠️ No error in the 3 other symbols; 2 symbols have an annotation "
-            "error: the result of these symbols is not complete."
+        assert result(None, 3, 2, changed) == (
+            "**Result**: ⚠️ No error in the 3 other symbols. 2 symbols have an annotation "
+            f"error: the result of these symbols is not complete. {blocked}"
         )
-        assert result(None, 3, 0, True, False).startswith(
-            "**Result**: ⚠️ No error in the 3 symbols;"
+        assert result(None, 3, 0, self.found(errors=None, references=None)).startswith(
+            "**Result**: ⚠️ No error in the 3 symbols. The server does not know"
         )
-        assert result(None, 3, 0, True, True) is None  # only units with different values
-        assert result(None, 3, 0, False, True) is None
+        # No changed component (one "R?", or units with different values): no pass mark.
+        assert result(None, 3, 0, self.found()) == (
+            "**Result**: ⚠️ Each pin number has a pad, and each pad with a number has a pin. "
+            f"{blocked}"
+        )
+        assert result(None, 0, 0, self.found()) == f"**Result**: ⚠️ No symbol to check. {blocked}"
+        # The netlist job has errors, and "Update PCB from Schematic" finds none.
+        assert result(None, 3, 0, self.found(blocked=False)).endswith(
+            ". The netlist of kicad-cli has annotation errors."
+        )
+        # Only "Update PCB from Schematic" finds errors (KiCad 8 and 9 give "R?" to a
+        # symbol with no instance for its sheet path).
+        no_errors = self.found(warning=False, errors=(), blocked=True)
+        assert result(None, 3, 0, no_errors).endswith(blocked)
+        assert result(None, 3, 0, self.found(warning=False, errors=(), blocked=False)) is None
 
 
 class TestCheckSchematicPinPadMapping:
@@ -506,7 +531,7 @@ class TestCheckSchematicPinPadMapping:
         assert "kicad-cli (KiCad 10.0.6) reports annotation errors in the netlist." in out
         # The schematic of the fixture is not a schematic: the check of the server does not run.
         assert "⚠️ The server cannot list the annotation errors: KiCad cannot load" in out
-        assert "the server does not know the symbols that they change" in out
+        assert "The server does not know the netlist components that the annotation" in out
         assert "❌" not in out.split("**Annotation**")[1]
 
     async def test_symbols_that_are_not_annotated(self, board):
@@ -550,7 +575,7 @@ class TestCheckSchematicPinPadMapping:
         # The netlist component R1 can have the pins of the two symbols: its result is
         # not complete, and it is not a symbol with no error.
         assert (
-            "; 1 symbol has an annotation error: the result of this symbol is not complete." in out
+            ". 1 symbol has an annotation error: the result of this symbol is not complete." in out
         )
         assert table_rows(section(out, "Symbols with an annotation error (1)")) == [
             ["R1", "1k", "Lib:Two", "none", "none", "none"]

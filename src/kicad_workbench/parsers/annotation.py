@@ -8,6 +8,9 @@ Who runs the check:
 - The ERC dialog of the schematic editor (``DIALOG_ERC::OnRunERCClick``,
   ``CheckAnnotate`` with ``ANNOTATE_ALL``): all symbols. Each error is an ERC
   marker at the symbol of the first item. ``kicad-cli sch erc`` does not run it.
+- "Update PCB from Schematic" of the schematic editor
+  (``SCH_EDIT_FRAME::ReadyToNetlist``, ``ANNOTATE_ALL``): with an error, it opens
+  the annotation dialog, and it runs only when no error stays.
 - The netlist job of kicad-cli (all symbols) and the BOM job (no symbol with a
   reference that starts with "#"): they write only "Warning: schematic has
   annotation errors".
@@ -27,8 +30,8 @@ The sheet number of an item is the virtual page number in KiCad 8. KiCad 9 and
 10 use the page when it is an integer, else the virtual page number
 (``GetPageNumberAsInt``).
 
-KiCad changes the references and the pages after the load (see the view
-"erc" and "cli" of ``check_annotation``):
+KiCad changes the references and the pages after the load (see the views of
+``check_annotation``):
 
 - ``CheckForMissingSymbolInstances`` gives an instance to a symbol with no
   instance for a sheet path: "U?" and unit 1 in the GUI of KiCad 8 and 9. In
@@ -37,8 +40,9 @@ KiCad changes the references and the pages after the load (see the view
   and 9 do not run it (``SCH_SYMBOL::GetRef`` then uses the Reference field).
 - ``SCH_SHEET_LIST::AnnotatePowerSymbols`` (KiCad 8 and 9) gives a number to
   each power symbol that is not annotated or has a duplicate reference. kicad-cli
-  runs it at the load, the ERC dialog of KiCad 8 before the check. KiCad 9 runs
-  it after the check. In KiCad 10 it has no effect.
+  runs it at the load, the ERC dialog of KiCad 8 before the check. The ERC dialog
+  of KiCad 9 runs it after the check. ReadyToNetlist of KiCad 8 and 9 runs it
+  before the check. In KiCad 10 it has no effect.
 - KiCad 10 repairs the pages (``RepairPageNumbers``). The GUI of KiCad 8 and 9
   gives pages only when all pages are empty (``SetInitialPageNumbers``).
 
@@ -98,7 +102,9 @@ from .sheet_list import (
 )
 
 KICAD_VERSIONS = (8, 9, 10)
-VIEWS = ("erc", "cli")
+# "erc": the ERC dialog; "update": "Update PCB from Schematic" of the schematic editor
+# (SCH_EDIT_FRAME::ReadyToNetlist); "cli": the jobs of kicad-cli.
+VIEWS = ("erc", "update", "cli")
 SYMBOL_FILTERS = ("all", "non_power")
 # The most orders of sheets with an unknown order that the check tries.
 _MAX_ORDERS = 120
@@ -834,14 +840,16 @@ def _run(
     if view == "cli":
         state.pages = _Pages(sheet_list).pages
 
-    if view == "erc" or kicad >= 10:
+    if view in ("erc", "update") or kicad >= 10:
         _missing_instances(state, kicad, project)
         _repair_pages(state, kicad)
     if view == "cli" and kicad <= 9:
         _annotate_power_symbols(state, kicad, symbols_filter, problems)
     # RecalculateConnections sorts the hierarchy again (RefreshHierarchy).
     state.order = _sorted(state, rank)
-    if view == "erc" and kicad == 8:
+    # The ERC dialog of KiCad 8 and ReadyToNetlist of KiCad 8 and 9 annotate the power
+    # symbols before the check.
+    if (view == "erc" and kicad == 8) or (view == "update" and kicad <= 9):
         _annotate_power_symbols(state, kicad, symbols_filter, problems)
 
     numbers = _sheet_numbers(state, kicad)
@@ -919,7 +927,7 @@ def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> l
     if numbers is None:
         raise ValueError(f"The KiCad version {version!r} has no patch number.")
     declared = top_level_sheets(project_file.with_suffix(PRO_SUFFIX)) if kicad >= 10 else []
-    if view == "erc":
+    if view in ("erc", "update"):
         load_all = kicad >= 10
     else:
         load_all = (
@@ -953,7 +961,11 @@ def check_annotation(
         version: The version of the KiCad that runs the check (kicad-cli version,
             for example "10.0.6"): a release of KiCad 8, 9 or 10.
         view: "erc": the ERC dialog of the schematic editor, at the first ERC run
-            after the project opens. "cli": the jobs of kicad-cli.
+            after the project opens. "update": "Update PCB from Schematic" of the
+            schematic editor after the project opens (``ReadyToNetlist``: it
+            annotates the power symbols, then runs CheckAnnotate; with an error it
+            opens the annotation dialog, and it runs only when no error stays).
+            "cli": the jobs of kicad-cli.
         symbols: "all" (ERC, the netlist job) or "non_power" (the BOM job: no
             reference that starts with "#").
 

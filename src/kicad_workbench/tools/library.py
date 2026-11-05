@@ -1349,6 +1349,16 @@ async def _netlist_annotation(
     return check.errors, check.problems, annotation_references(check), check.unannotated
 
 
+async def _update_annotation(project: Path, kicad: str) -> tuple[bool | None, list[str]]:
+    """True when "Update PCB from Schematic" finds annotation errors (view "update" of
+    check_annotation), or None when the check cannot run, and the notes."""
+    try:
+        check = await asyncio.to_thread(check_annotation, project, kicad, "update", "all")
+    except (ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError) as e:
+        return None, [f'The server cannot check the annotation of "Update PCB from Schematic": {e}']
+    return bool(check.errors), check.problems
+
+
 def annotation_references(check: AnnotationCheck) -> set[str]:
     """The references (lower case) of the netlist components that an annotation error
     changes.
@@ -1489,36 +1499,68 @@ def _symbols(count: int, adjective: str = "") -> str:
     return " ".join(word for word in words if word)
 
 
+_PASS = "Each pin number has a pad, and each pad with a number has a pin"
+# SCH_EDIT_FRAME::ReadyToNetlist (KiCad 8.0.9, 9.0.9, 10.0.6).
+UPDATE_BLOCKED = (
+    '"Update PCB from Schematic" finds annotation errors: it opens the annotation dialog, '
+    "and it runs only when no error stays."
+)
+
+
+def annotation_sentences(found: "SchematicFootprints", changed: str | None) -> list[str]:
+    """The sentences of a check tool about the annotation errors; [] for none.
+
+    changed: The sentence about the netlist components that the errors change
+        (annotation_references), or None when no component changes.
+    """
+    present, known = annotation_state(found)
+    notes = []
+    if present and not known:
+        notes.append(
+            "The server does not know the netlist components that the annotation errors "
+            "change: the result can be not complete."
+        )
+    elif changed:
+        notes.append(changed)
+    if found.update_blocked:
+        notes.append(UPDATE_BLOCKED)
+    elif found.update_blocked is None and present:
+        notes.append('The server cannot check the annotation of "Update PCB from Schematic".')
+    if present and not notes:
+        notes.append("The netlist of kicad-cli has annotation errors.")
+    return notes
+
+
 def _annotation_result(
-    result: str | None, others: int, changed: int, present: bool, known: bool
+    result: str | None, others: int, changed: int, found: "SchematicFootprints"
 ) -> str | None:
-    """The result line when annotation errors change the netlist, else result.
+    """The result line with the sentences about the annotation errors
+    (annotation_sentences).
+    With a note, the result has no pass mark.
 
     result: The result line of the counts of all checked symbols (_result_line).
     others: The symbols that the tool checked and no annotation error changes.
     changed: The symbols that an annotation error changes (annotation_references).
-    present, known: see annotation_state.
     """
-    if not present:
-        return result
-    if not known:
-        note = (
-            "the netlist has annotation errors, and the server does not know the symbols that "
-            "they change: the result can be not complete."
-        )
-    elif changed:
-        note = (
+    sentence = None
+    if changed:
+        sentence = (
             f"{_symbols(changed)} {'has' if changed == 1 else 'have'} an annotation error: the "
             f"result of {'this symbol' if changed == 1 else 'these symbols'} is not complete."
         )
-    else:
+    notes = annotation_sentences(found, sentence)
+    if not notes:
         return result
+    text = " ".join(notes)
     if result:
-        return f"{result}; {note}"
+        return f"{result}. {text}"
+    _present, known = annotation_state(found)
     if not others:
-        return f"**Result**: ⚠️ {note[0].upper()}{note[1:]}"
-    other = "other" if known else ""
-    return f"**Result**: ⚠️ No error in the {_symbols(others, other)}; {note}"
+        return f"**Result**: ⚠️ {text}" if changed else f"**Result**: ⚠️ No symbol to check. {text}"
+    if known and not changed:
+        return f"**Result**: ⚠️ {_PASS}. {text}"
+    other = "other" if changed else ""
+    return f"**Result**: ⚠️ No error in the {_symbols(others, other)}. {text}"
 
 
 def _mapping_table(checks: list[_ComponentCheck], empty: str = "") -> list[str]:
@@ -1571,7 +1613,7 @@ def _schematic_mapping_text(
         ),
         len(problems) + len(good),
         len(changed),
-        *annotation_state(found),
+        found,
     )
     lines = [
         f"# Pins and pads of the schematic {root.name}",
@@ -1588,9 +1630,7 @@ def _schematic_mapping_text(
     if result:
         lines.append(result)
     elif checks:
-        lines.append(
-            "**Result**: ✅ Each pin number has a pad, and each pad with a number has a pin."
-        )
+        lines.append(f"**Result**: ✅ {_PASS}.")
     else:
         lines.append("**Result**: the netlist has no symbol to check.")
     lines += annotation
@@ -1672,6 +1712,9 @@ class SchematicFootprints:
     annotation_references: set[str] | None
     # Each symbol of the netlist job that is not annotated (check_annotation).
     annotation_unannotated: list[AnnotationItem]
+    # "Update PCB from Schematic" finds annotation errors (view "update" of
+    # check_annotation); None when the check did not run.
+    update_blocked: bool | None
     reasons: dict[str, str]  # Footprint ID: why KiCad does not find or load it.
     libraries: dict[str, Path]  # Footprint ID: the .pretty directory.
     items: dict[str, FootprintItems]  # Footprint ID: the footprint that pcbnew loaded.
@@ -1700,15 +1743,19 @@ async def schematic_footprints(
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
     root, tops = await asyncio.to_thread(netlist_root, project, kicad)
-    # The annotation check does not need the netlist: it runs at the same time.
-    netlist, annotation = await asyncio.gather(
+    # The annotation checks do not need the netlist: they run at the same time.
+    netlist, annotation, update = await asyncio.gather(
         asyncio.to_thread(_board_netlist, root),
         _netlist_annotation(root, kicad),
+        _update_annotation(project, kicad),
         return_exceptions=True,
     )
     if isinstance(annotation, BaseException):
         raise annotation
-    annotation_errors, annotation_notes, annotation_refs, unannotated = annotation
+    if isinstance(update, BaseException):
+        raise update
+    annotation_errors, notes, annotation_refs, unannotated = annotation
+    update_blocked, update_notes = update
     try:
         if isinstance(netlist, BaseException):
             raise netlist
@@ -1783,9 +1830,10 @@ async def schematic_footprints(
         absent=absent,
         annotation=_ANNOTATION_WARNING in output,
         annotation_errors=annotation_errors,
-        annotation_notes=annotation_notes,
+        annotation_notes=list(dict.fromkeys(notes + update_notes)),
         annotation_references=annotation_refs,
         annotation_unannotated=unannotated,
+        update_blocked=update_blocked,
         reasons=reasons,
         libraries={footprint: files[footprint][0] for footprint in items},
         items=items,

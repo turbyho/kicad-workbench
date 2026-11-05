@@ -124,6 +124,15 @@ Common issues:
 2. The `cwd` path in your config points to the correct directory
 3. Python can import the package (`python -c "import kicad_workbench"`)
 
+### Release Notices
+
+The server tells the agent about a newer release on PyPI, and about an upgrade while the server runs. The agent gives each notice to you one time in a session:
+
+- **Newer release**: when the server starts, a background thread gets the newest version from PyPI. When the last request that succeeded is younger than 24 hours, the server sends no request. The tools read only the stored result, thus no tool waits for the network.
+- **Restart**: the installed package has a different version than the running server. The MCP client starts the server, thus a restart of the client starts the new code.
+
+To stop the request to PyPI, set the environment variable `KICAD_WORKBENCH_NO_UPDATE_CHECK=1` in the MCP configuration of the server. An editable install (`pip install -e`) gets no notices.
+
 ## Usage
 
 Once configured, you can interact with your KiCad projects through natural language in your AI assistant. Below are common workflows.

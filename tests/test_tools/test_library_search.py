@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.tools import library as library_tools
-from kicad_workbench.utils import library_index, library_tables
+from kicad_workbench.utils import library_index, library_tables, user_files
 from kicad_workbench.utils.kicad_cli import get_kicad_version
 from kicad_workbench.utils.library_index import LibraryItem, library_items, search
 from kicad_workbench.utils.library_tables import LibraryRow
@@ -336,7 +336,7 @@ async def test_library_that_cannot_be_read(tmp_path, tables):
 class TestCacheDir:
     def test_linux(self, monkeypatch, tmp_path):
         monkeypatch.undo()  # The real cache_dir().
-        monkeypatch.setattr(library_index.sys, "platform", "linux")
+        monkeypatch.setattr(user_files.sys, "platform", "linux")
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         assert library_index.cache_dir() == tmp_path / "kicad-workbench" / "library-index"
         monkeypatch.delenv("XDG_CACHE_HOME")
@@ -346,10 +346,10 @@ class TestCacheDir:
 
     def test_windows_and_macos(self, monkeypatch, tmp_path):
         monkeypatch.undo()
-        monkeypatch.setattr(library_index.sys, "platform", "win32")
+        monkeypatch.setattr(user_files.sys, "platform", "win32")
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
         assert library_index.cache_dir() == tmp_path / "kicad-workbench" / "library-index"
-        monkeypatch.setattr(library_index.sys, "platform", "darwin")
+        monkeypatch.setattr(user_files.sys, "platform", "darwin")
         assert library_index.cache_dir() == (
             Path.home() / "Library" / "Caches" / "kicad-workbench" / "library-index"
         )

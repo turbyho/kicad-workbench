@@ -26,9 +26,6 @@ of one of its files changed.
 
 import hashlib
 import json
-import os
-import sys
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +34,7 @@ from ..parsers.lib_symbols import files_stamp, library_files, parent_name, symbo
 from ..parsers.sexpr import Node, SExprError, parse, property_field
 from .kicad_text import KiCadEncodingError, read_as_kicad
 from .library_tables import LibraryRow
+from .user_files import cache_home, write_atomic
 
 # Change the version when the content of an index entry changes.
 _INDEX_VERSION = 3
@@ -76,13 +74,7 @@ class LibraryItem:
 
 def cache_dir() -> Path:
     """The cache directory of the index, in the cache directory of the user."""
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Caches"
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return base / "kicad-workbench" / "library-index"
+    return cache_home() / "library-index"
 
 
 def _files(kind: str, path: Path) -> list[Path]:
@@ -221,17 +213,7 @@ def _save_cache(file: Path, path: Path, stamp: list, entries: list, problems: li
         "problems": problems,
     }
     try:
-        file.parent.mkdir(parents=True, exist_ok=True)
-        # A unique temporary file: an other server process can write the same index.
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=file.parent, suffix=".tmp", delete=False
-        ) as temp:
-            temp.write(json.dumps(data))
-        try:
-            os.replace(temp.name, file)
-        except OSError:
-            os.unlink(temp.name)
-            raise
+        write_atomic(file, json.dumps(data))
     except OSError:
         pass
 

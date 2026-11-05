@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kicad-workbench"
-version = "0.1.0"
+# The version is __version__ of the package: one source for the metadata and the
+# release check (version_check.py).
+dynamic = ["version"]
 description = "Model Context Protocol server for KiCad schematic/PCB analysis and validation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +38,8 @@ dependencies = [
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
     "jinja2>=3.1.0",
+    # The version comparison of the release check (version_check).
+    "packaging>=22",
     # Draws the SVG of kicad-cli as PNG (render_library_item). 0.x: the API can change.
     "resvg-py>=0.5.0,<0.6",
 ]
@@ -71,6 +75,9 @@ kicad-workbench = "kicad_workbench.__main__:main"
 Homepage = "https://github.com/turbyho/kicad-workbench"
 Documentation = "https://github.com/turbyho/kicad-workbench#readme"
 Issues = "https://github.com/turbyho/kicad-workbench/issues"
+
+[tool.hatch.version]
+path = "src/kicad_workbench/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kicad_workbench"]

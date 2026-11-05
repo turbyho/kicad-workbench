@@ -3,6 +3,7 @@
 from fastmcp import FastMCP
 
 from .config import config
+from .version_check import VersionNotes
 
 # Create MCP server
 mcp = FastMCP(
@@ -22,6 +23,10 @@ mcp = FastMCP(
     - Symbol and footprint library search
     """,
 )
+
+
+# The notes about a newer release and a restart of the client (version_check).
+mcp.add_middleware(VersionNotes())
 
 
 # Import and register tools

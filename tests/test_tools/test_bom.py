@@ -4,7 +4,10 @@ spike/kicad-versions/bom_check.py compares the tool with kicad-cli of KiCad
 8.0.9, 9.0.9 and 10.0.6.
 """
 
+import json
+import os
 import subprocess
+import unicodedata
 
 import pytest
 
@@ -51,11 +54,12 @@ def project(tmp_path, monkeypatch):
     def kicad_cli(args, timeout, english):
         state["calls"].append(args)
         output = args[args.index("--output") + 1]
-        if state["code"] == 0:
+        code = 255 if state.get("fail") in args else state["code"]
+        if code == 0:
             with open(output, "w", encoding="utf-8") as file:
                 file.write(state["csv"])
         stdout = f"Warning: schematic has annotation errors\nWrote bill of materials to '{output}'."
-        return subprocess.CompletedProcess(args, state["code"], stdout.encode(), b"")
+        return subprocess.CompletedProcess(args, code, stdout.encode(), b"")
 
     async def version():
         return state["version"]
@@ -303,3 +307,179 @@ class TestExportBom:
     async def test_not_a_schematic(self, project):
         out = await bom.export_bom(str(project["directory"] / "board.kicad_pro"))
         assert out.startswith("❌") and "is not a .kicad_sch file" in out
+
+
+class TestAllVariants:
+    async def test_one_file_for_each_variant(self, project):
+        directory = project["directory"]
+        (directory / "bom.csv").write_text("old", encoding="utf-8")
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        calls = project["state"]["calls"]
+        # The default variant first, with no --variant, then each variant.
+        assert ["--variant" in args for args in calls] == [False, True, True, True, True]
+        assert [args[args.index("--variant") + 1] for args in calls[1:]] == [
+            "Big",
+            "Empty",
+            "Lite",
+            "Sub only",
+        ]
+        files = ["bom.csv", "bom-Big.csv", "bom-Empty.csv", "bom-Lite.csv", "bom-Sub only.csv"]
+        for name in files:
+            assert (directory / name).read_text(encoding="utf-8") == CSV
+        assert (
+            "one run and one CSV file for each variant: the default variant and 4 variants." in out
+        )
+        assert (
+            f"## Default variant\n\n2 lines. The CSV file is replaced: `{directory / 'bom.csv'}`"
+            in out
+        )
+        assert (
+            f"## Variant 'Lite'\n\n2 lines. The CSV file is written: `{directory / 'bom-Lite.csv'}`"
+            in out
+        )
+        paths = ", ".join(json.dumps(str(directory / name)) for name in files)
+        assert f"bom=[{paths}] (the default variant first)" in out
+        assert "| R1 |" not in out  # no tables
+        assert out.count("⚠️ kicad-cli: Warning: schematic has annotation errors") == 5
+
+    async def test_no_variants(self, project):
+        directory = project["directory"]
+        (directory / "board.kicad_pro").write_text("{}", encoding="utf-8")
+        for name in ("board.kicad_sch", "sub.kicad_sch"):
+            text = (directory / name).read_text(encoding="utf-8")
+            (directory / name).write_text(text.replace("(variant", "(other"), encoding="utf-8")
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert "the project has no variants, thus one BOM file." in out
+        assert len(project["state"]["calls"]) == 1
+
+    async def test_failure_writes_no_file(self, project):
+        project["state"]["fail"] = "Lite"
+        directory = project["directory"]
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert out.startswith("❌ kicad-cli did not write the BOM of the variant 'Lite'")
+        assert (
+            "exit code 255: Warning: schematic has annotation errors. The tool changed no file."
+            in out
+        )
+        assert not list(directory.glob("bom*.csv"))
+
+    @pytest.mark.parametrize(
+        ("variants", "text"),
+        [
+            (["A/B"], "has the character '/'"),
+            (["A", "a"], "have the same path"),
+        ],
+    )
+    async def test_file_names(self, project, variants, text):
+        directory = project["directory"]
+        names = ", ".join(f'{{"name": "{v}"}}' for v in variants)
+        (directory / "board.kicad_pro").write_text(
+            '{"schematic": {"variants": [' + names + "]}}", encoding="utf-8"
+        )
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert out.startswith("❌") and text in out
+        assert project["state"]["calls"] == []
+
+    @pytest.mark.parametrize(
+        ("arguments", "text"),
+        [
+            ({"variant": "Lite"}, "Give variant or all_variants, not the two."),
+            ({"output_path": ""}, "give output_path"),
+        ],
+    )
+    async def test_refused(self, project, arguments, text):
+        args = {"output_path": "bom.csv", "all_variants": True, **arguments}
+        out = await bom.export_bom(str(project["directory"] / "board.kicad_sch"), **args)
+        assert out.startswith("❌") and text in out
+        assert project["state"]["calls"] == []
+
+    def write_variants(self, directory, variants):
+        """A project with only these variants (in the project file)."""
+        for name in ("board.kicad_sch", "sub.kicad_sch"):
+            text = (directory / name).read_text(encoding="utf-8")
+            (directory / name).write_text(text.replace("(variant", "(other"), encoding="utf-8")
+        (directory / "board.kicad_pro").write_text(
+            json.dumps({"schematic": {"variants": [{"name": v} for v in variants]}}),
+            encoding="utf-8",
+        )
+
+    async def test_group_by_gives_no_project_check(self, project):
+        directory = project["directory"]
+        self.write_variants(directory, ["Lite"])
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"),
+            output_path="bom.csv",
+            all_variants=True,
+            fields=["Reference", "Value"],
+            group_by=["Value"],
+        )
+        assert "⚠️ The lines are groups of symbols" in out
+        assert (
+            "For project_check" not in out and "variant: the default variant and 1 variant." in out
+        )
+
+    async def test_empty_variant_name(self, project):
+        directory = project["directory"]
+        self.write_variants(directory, ["", "Lite"])
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert len(project["state"]["calls"]) == 2 and "and 1 variant." in out
+        assert not (directory / "bom-.csv").exists()
+
+    async def test_unicode_forms(self, project):
+        directory = project["directory"]
+        self.write_variants(
+            directory, [unicodedata.normalize("NFC", "Café"), unicodedata.normalize("NFD", "Café")]
+        )
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert out.startswith("❌") and "have the same path" in out
+
+    async def test_variant_file_is_link_to_kicad_file(self, project):
+        directory = project["directory"]
+        self.write_variants(directory, ["Lite"])
+        (directory / "bom-Lite.csv").symlink_to(directory / "board.kicad_sch")
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert out.startswith("❌") and "is a KiCad file" in out
+        assert project["state"]["calls"] == []
+
+    async def test_write_failure_changes_no_file(self, project, monkeypatch):
+        directory = project["directory"]
+        self.write_variants(directory, ["Lite"])
+        (directory / "bom.csv").write_text("old", encoding="utf-8")
+        calls = []
+        fdopen = os.fdopen
+
+        def failing(handle, mode):
+            calls.append(handle)
+            if len(calls) == 2:
+                os.close(handle)
+                raise OSError("disk full")
+            return fdopen(handle, mode)
+
+        monkeypatch.setattr(bom.os, "fdopen", failing)
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert out == "❌ The BOM files cannot be written: disk full. The tool changed no file."
+        assert (directory / "bom.csv").read_text(encoding="utf-8") == "old"
+        assert sorted(p.name for p in directory.glob("*bom*")) == ["bom.csv"]
+
+    async def test_kicad9(self, project):
+        project["state"]["version"] = "9.0.9"
+        out = await bom.export_bom(
+            str(project["directory"] / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert out == "❌ kicad-cli of KiCad 9.0.9 has no variants. KiCad 10 and later have them."

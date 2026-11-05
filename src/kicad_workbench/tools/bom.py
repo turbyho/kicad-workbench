@@ -31,9 +31,12 @@ The rules of KiCad for the lines of the BOM:
 import asyncio
 import csv
 import io
+import json
 import os
 import re
+import tempfile
 import traceback
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -342,6 +345,47 @@ def _resolve_output(output_path: str, project: Path) -> Path:
     return path
 
 
+def _file_warnings(export: CliExport, rows: list[list[str]], fields: BomFields) -> list[str]:
+    """Return the messages of kicad-cli and the warnings about the columns of one BOM file."""
+    lines_out = [f"⚠️ kicad-cli: {message}" for message in export.messages]
+    columns = field_columns(rows[0], fields)
+    empty = empty_columns(rows, columns) if columns is not None else []
+    if columns is None:
+        lines_out.append(
+            "⚠️ The columns of the BOM are not the columns of fields, thus the tool did not "
+            "look for empty columns."
+        )
+    if empty:
+        lines_out.append(
+            "⚠️ No line has a value in these columns: "
+            + ", ".join(f"`{name}`" for name in empty)
+            + ". Make sure that the field names are the names of the symbol fields."
+        )
+    return lines_out
+
+
+def _group_warning(fields: BomFields) -> str:
+    """Return the warning about the lines of group_by."""
+    warning = (
+        "⚠️ The lines are groups of symbols. A cell of a field that is not in group_by "
+        "joins the different values of the symbols of its line."
+    )
+    if not fields.grouped("${DNP}"):
+        warning += " Thus a line can show DNP when only some of its symbols are DNP."
+    return (
+        warning + " For a list of the parts (for example for project_check of "
+        "datasheet-lens), export the BOM with no group_by."
+    )
+
+
+_BOM_NOTE = (
+    "KiCad does not put the power symbols and the symbols that are excluded from the "
+    "BOM into the BOM. A cell can hold the different values of the units of one "
+    "symbol: KiCad 9 and later join them with a comma, KiCad 8 writes "
+    '"-- mixed values --" in the language of KiCad.'
+)
+
+
 def _bom_text(
     root: Path,
     kicad: str,
@@ -364,44 +408,170 @@ def _bom_text(
         lines_out.append(f"The CSV file of kicad-cli is {state}: `{output}`")
     else:
         lines_out.append("No CSV file is kept. Give output_path to keep the CSV file of kicad-cli.")
-    for message in export.messages:
-        lines_out.append(f"⚠️ kicad-cli: {message}")
-    columns = field_columns(rows[0], fields)
-    empty = empty_columns(rows, columns) if columns is not None else []
-    if columns is None:
-        lines_out.append(
-            "⚠️ The columns of the BOM are not the columns of fields, thus the tool did not "
-            "look for empty columns."
-        )
-    if empty:
-        lines_out.append(
-            "⚠️ No line has a value in these columns: "
-            + ", ".join(f"`{name}`" for name in empty)
-            + ". Make sure that the field names are the names of the symbol fields."
-        )
+    lines_out += _file_warnings(export, rows, fields)
     if grouped:
-        warning = (
-            "⚠️ The lines are groups of symbols. A cell of a field that is not in group_by "
-            "joins the different values of the symbols of its line."
-        )
-        if not fields.grouped("${DNP}"):
-            warning += " Thus a line can show DNP when only some of its symbols are DNP."
-        lines_out.append(
-            warning + " For a list of the parts (for example for project_check of "
-            "datasheet-lens), export the BOM with no group_by."
-        )
+        lines_out.append(_group_warning(fields))
     lines_out += [
         "",
-        "KiCad does not put the power symbols and the symbols that are excluded from the "
-        "BOM into the BOM. A cell can hold the different values of the units of one "
-        "symbol: KiCad 9 and later join them with a comma, KiCad 8 writes "
-        '"-- mixed values --" in the language of KiCad.',
+        _BOM_NOTE,
         "",
         "| " + " | ".join(cell(label) for label in header) + " |",
         "|" + "---|" * len(header),
     ]
     for line in lines:
         lines_out.append("| " + " | ".join(cell(value) for value in line) + " |")
+    return "\n".join(lines_out)
+
+
+# The characters that a file name cannot have on Windows (the most strict of the
+# systems of KiCad), and the control characters.
+_NOT_IN_FILE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def variant_outputs(output: Path, variants: list[str]) -> list[tuple[str, Path]]:
+    """Return the BOM file of the default variant ("") and of each variant.
+
+    The file of the default variant is output. The file of a variant is next to
+    it: <stem>-<variant><suffix> (bom.csv, bom-Lite.csv). The tool does not change
+    a variant name to make a file name.
+
+    Raises:
+        ValueError: A variant name has a character that a file name cannot have,
+            or two files have the same path with no regard to case and to the
+            Unicode normalization (Windows and macOS).
+    """
+    targets = [("", output)]
+    for variant in variants:
+        bad = _NOT_IN_FILE_NAME.search(variant)
+        if bad:
+            raise ValueError(
+                f"The variant name {variant!r} has the character {bad.group()!r}, which a file "
+                "name cannot have. Rename the variant in KiCad, or export each variant with "
+                "variant and an output_path."
+            )
+        targets.append((variant, output.with_name(f"{output.stem}-{variant}{output.suffix}")))
+    seen: dict[str, str] = {}
+    for variant, path in targets:
+        key = unicodedata.normalize("NFC", str(path)).casefold()
+        if key in seen:
+            raise ValueError(
+                f"The BOM files of the variants {seen[key] or '(default)'!r} and "
+                f"{variant or '(default)'!r} have the same path {path} with no regard to case. "
+                "Rename a variant in KiCad, or give an other output_path."
+            )
+        seen[key] = variant
+    return targets
+
+
+def _write_set(files: list[tuple[Path, bytes]]) -> list[bool]:
+    """Write the files of one set, and return for each file if it was there before.
+
+    The function writes each file into a temporary file next to it first. Only
+    when all temporary files are complete, it replaces the files (os.replace in
+    one directory). Thus a failure of a write changes no file of the set.
+
+    Raises:
+        OSError: A file cannot be written. No file of the set is changed.
+    """
+    temporary: list[Path] = []
+    try:
+        for path, data in files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            temporary.append(Path(name))
+            with os.fdopen(handle, "wb") as file:
+                file.write(data)
+    except OSError:
+        for name in temporary:
+            name.unlink(missing_ok=True)
+        raise
+    replaced = []
+    for (path, _data), name in zip(files, temporary, strict=True):
+        replaced.append(path.exists())
+        os.replace(name, path)
+    return replaced
+
+
+async def _export_all_variants(
+    root: Path,
+    project: Path,
+    kicad: str,
+    names: list[str],
+    group_by: list[str],
+    exclude_dnp: bool,
+    columns: BomFields,
+    output: Path,
+    variants: list[str],
+) -> str:
+    """Export the BOM of the default variant and of each variant of the project.
+
+    kicad-cli exports the default variant only with no --variant
+    (EESCHEMA_JOBS_HANDLER::JobExportBom), thus the tool runs kicad-cli one time
+    for each variant, one after the other. It writes the files only after all
+    exports, and a failure changes no file of the set (_write_set).
+    """
+    # The same checks as for the file of the default variant (also a symbolic link
+    # to a KiCad file).
+    targets = [
+        (variant, _resolve_output(str(target), project))
+        for variant, target in variant_outputs(output, variants)
+    ]
+    results = []
+    for variant, target in targets:
+        args = bom_args(names, group_by, exclude_dnp, variant)
+        try:
+            export = await asyncio.to_thread(
+                export_with_kicad_cli,
+                ["sch", "export", "bom", *args],
+                root,
+                "bom.csv",
+                _BOM_TIMEOUT,
+            )
+        except RuntimeError as e:
+            name = f"the variant {variant!r}" if variant else "the default variant"
+            return (
+                f"❌ kicad-cli did not write the BOM of {name} of {root}: {str(e).rstrip('.')}. "
+                "The tool changed no file."
+            )
+        results.append((variant, target, export, read_bom(export.data)))
+    try:
+        replaced = await asyncio.to_thread(
+            _write_set, [(target, export.data) for _variant, target, export, _rows in results]
+        )
+    except OSError as e:
+        return f"❌ The BOM files cannot be written: {e}. The tool changed no file."
+    count = len(variants)
+    lines_out = [
+        f"# BOM of {root.name}, all variants",
+        "",
+        f"kicad-cli of KiCad {kicad} (`sch export bom`), one run and one CSV file for each "
+        + (
+            f"variant: the default variant and {count} variant{'s' if count > 1 else ''}."
+            if count
+            else "variant: the project has no variants, thus one BOM file."
+        ),
+    ]
+    for (variant, target, export, rows), was in zip(results, replaced, strict=True):
+        name = f"Variant {variant!r}" if variant else "Default variant"
+        state = "replaced" if was else "written"
+        lines_out += [
+            "",
+            f"## {name}",
+            "",
+            f"{len(rows) - 1} lines. The CSV file is {state}: `{target}`",
+        ]
+        lines_out += _file_warnings(export, rows, columns)
+    lines_out += ["", _BOM_NOTE, ""]
+    if group_by:
+        lines_out.append(_group_warning(columns))
+    else:
+        paths = ", ".join(json.dumps(str(target)) for _variant, target, _export, _rows in results)
+        lines_out.append(
+            f"For project_check of datasheet-lens: bom=[{paths}] (the default variant first)."
+        )
+    lines_out.append(
+        "The tool gives no tables for all variants. Give variant for the table of one variant."
+    )
     return "\n".join(lines_out)
 
 
@@ -412,15 +582,23 @@ async def _export_bom(
     group_by: list[str] | None,
     exclude_dnp: bool,
     variant: str,
+    all_variants: bool = False,
 ) -> str:
     path = Path(os.path.abspath(os.path.expanduser(schematic_path)))
     if path.suffix != ".kicad_sch" or not path.is_file():
         return f"❌ The schematic {path} does not exist or is not a .kicad_sch file."
+    if variant and all_variants:
+        return "❌ Give variant or all_variants, not the two."
+    if all_variants and not output_path:
+        return (
+            "❌ all_variants writes one CSV file for each variant: give output_path (the file "
+            "of the default variant)."
+        )
     kicad = await get_kicad_version()
     if kicad is None:
         return f"❌ {NO_KICAD_CLI}"
     major = bom_rules(kicad)
-    if variant and major < 10:
+    if (variant or all_variants) and major < 10:
         return f"❌ kicad-cli of KiCad {kicad} has no variants. KiCad 10 and later have them."
     names = list(DEFAULT_FIELDS) if fields is None else fields
     args = bom_args(names, group_by or [], exclude_dnp, variant)
@@ -430,11 +608,27 @@ async def _export_bom(
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
     root, _tops = await asyncio.to_thread(netlist_root, project, kicad, "BOM")
-    if variant:
+    if variant or all_variants:
         try:
             known = await asyncio.to_thread(variant_names, project)
         except (OSError, KiCadEncodingError, SExprError) as e:
             return f"❌ The variants of the project {project} cannot be read: {e}"
+        if all_variants:
+            output = _resolve_output(output_path, project)
+            # An empty name is the default variant (SCHEMATIC::SetCurrentVariant). KiCad
+            # does not let the user give it ("Variant name cannot be empty.",
+            # DIALOG_SYMBOL_FIELDS_TABLE), but a file that a person edits can have it.
+            return await _export_all_variants(
+                root,
+                project,
+                kicad,
+                names,
+                group_by or [],
+                exclude_dnp,
+                columns,
+                output,
+                sorted(name for name in known if name),
+            )
         if variant not in known:
             # JobExportBom uses the default variant for an unknown name, with no message.
             listed = ", ".join(repr(name) for name in sorted(known)) or "none"
@@ -470,6 +664,7 @@ async def export_bom(
     group_by: list[str] | None = None,
     exclude_dnp: bool = False,
     variant: str = "",
+    all_variants: bool = False,
 ) -> str:
     """Give the bill of materials (BOM) of a schematic, as KiCad makes it.
 
@@ -479,7 +674,9 @@ async def export_bom(
     symbols that are excluded from the BOM into the BOM.
 
     For project_check of datasheet-lens, give output_path and no group_by.
-    Then give the path of the CSV file to project_check (argument bom).
+    Then give the path of the CSV file to project_check (argument bom). For a
+    project with variants (KiCad 10), also give all_variants: then give the
+    list of the files that the tool names to project_check.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The BOM is the BOM
@@ -498,14 +695,21 @@ async def export_bom(
         exclude_dnp: True to remove the symbols that have DNP.
         variant: The name of a variant of the project (KiCad 10 and later).
             Empty: the default variant.
+        all_variants: True to export the default variant and each variant of
+            the project (KiCad 10 and later), one kicad-cli run and one CSV
+            file for each: the default variant into output_path, the variant X
+            into <stem>-X<suffix> next to it (bom.csv: bom-X.csv). It needs
+            output_path, and gives no tables. Not with variant.
 
     Returns:
         The number of lines, the path of the CSV file, the messages of
-        kicad-cli, the warnings, and the table of the BOM.
+        kicad-cli, the warnings, and the table of the BOM. With all_variants:
+        for each variant the number of lines, the path and the warnings, and
+        the list of the files for project_check.
     """
     try:
         return await _export_bom(
-            schematic_path, output_path, fields, group_by, exclude_dnp, variant
+            schematic_path, output_path, fields, group_by, exclude_dnp, variant, all_variants
         )
     except ValueError as e:
         return f"❌ {e}"

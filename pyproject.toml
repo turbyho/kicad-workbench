@@ -8,7 +8,7 @@ name = "kicad-workbench"
 # The version is __version__ of the package: one source for the metadata and the
 # release check (version_check.py).
 dynamic = ["version"]
-description = "Model Context Protocol server for KiCad schematic/PCB analysis and validation"
+description = "MCP server that lets an AI agent work with KiCad 8, 9 and 10 projects: schematics, boards, libraries, ERC and DRC, BOM and edits"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -16,7 +16,7 @@ authors = [
     { name = "Turbyho" },
     { name = "Seeed Studio" },
 ]
-keywords = ["kicad", "mcp", "schematic", "pcb", "eda"]
+keywords = ["kicad", "mcp", "schematic", "pcb", "eda", "bom", "erc", "drc"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

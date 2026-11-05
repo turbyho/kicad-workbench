@@ -13,7 +13,14 @@ from pathlib import Path
 
 from fastmcp.utilities.types import Image
 
-from ..parsers.annotation import AnnotationCheck, AnnotationError, check_annotation
+from ..parsers.annotation import (
+    UNANNOTATED_NOTE,
+    UNANNOTATED_ROWS,
+    AnnotationCheck,
+    AnnotationError,
+    AnnotationItem,
+    check_annotation,
+)
 from ..parsers.board_netlist import NetlistComponent, NetlistPin, read_board_netlist
 from ..parsers.kicad_versions import (
     KICAD8,
@@ -1328,17 +1335,18 @@ _ANNOTATION_ROWS = 20
 
 async def _netlist_annotation(
     root: Path, kicad: str
-) -> tuple[list[AnnotationError] | None, list[str], set[str] | None]:
+) -> tuple[list[AnnotationError] | None, list[str], set[str] | None, list[AnnotationItem]]:
     """The annotation errors of the netlist job of kicad-cli for a schematic (view
-    "cli", all symbols), or None when the check cannot run, the notes, and the
-    references that the errors change (annotation_references)."""
+    "cli", all symbols), or None when the check cannot run, the notes, the
+    references that the errors change (annotation_references), and each symbol
+    that is not annotated."""
     try:
         check = await asyncio.to_thread(
             check_annotation, root.with_suffix(".kicad_pro"), kicad, "cli", "all"
         )
     except (ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError) as e:
-        return None, [f"The server cannot list the annotation errors: {e}"], None
-    return check.errors, check.problems, annotation_references(check)
+        return None, [f"The server cannot list the annotation errors: {e}"], None, []
+    return check.errors, check.problems, annotation_references(check), check.unannotated
 
 
 def annotation_references(check: AnnotationCheck) -> set[str]:
@@ -1400,6 +1408,12 @@ def annotation_lines(found: "SchematicFootprints", kicad: str, effect: str) -> l
         ]
         if len(errors) > _ANNOTATION_ROWS:
             lines.append(f"- {len(errors) - _ANNOTATION_ROWS} more annotation errors")
+    if found.annotation_unannotated:
+        items = found.annotation_unannotated
+        lines.append(f"Symbols that are not annotated ({len(items)}). {UNANNOTATED_NOTE}")
+        lines += [f"- {cell(item.text)}" for item in items[:UNANNOTATED_ROWS]]
+        if len(items) > UNANNOTATED_ROWS:
+            lines.append(f"- {len(items) - UNANNOTATED_ROWS} more symbols")
     if warning and errors == []:
         lines.append(
             "❌ The annotation check of the server finds no error: the server cannot list "
@@ -1656,6 +1670,8 @@ class SchematicFootprints:
     # than one symbol, or not all pins of a symbol (annotation_references); None
     # when the check did not run.
     annotation_references: set[str] | None
+    # Each symbol of the netlist job that is not annotated (check_annotation).
+    annotation_unannotated: list[AnnotationItem]
     reasons: dict[str, str]  # Footprint ID: why KiCad does not find or load it.
     libraries: dict[str, Path]  # Footprint ID: the .pretty directory.
     items: dict[str, FootprintItems]  # Footprint ID: the footprint that pcbnew loaded.
@@ -1692,7 +1708,7 @@ async def schematic_footprints(
     )
     if isinstance(annotation, BaseException):
         raise annotation
-    annotation_errors, annotation_notes, annotation_refs = annotation
+    annotation_errors, annotation_notes, annotation_refs, unannotated = annotation
     try:
         if isinstance(netlist, BaseException):
             raise netlist
@@ -1769,6 +1785,7 @@ async def schematic_footprints(
         annotation_errors=annotation_errors,
         annotation_notes=annotation_notes,
         annotation_references=annotation_refs,
+        annotation_unannotated=unannotated,
         reasons=reasons,
         libraries={footprint: files[footprint][0] for footprint in items},
         items=items,

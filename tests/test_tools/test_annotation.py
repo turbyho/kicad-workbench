@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.parsers.annotation import (
+    AnnotationItem,
     _merged,
     _orders,
     _Ref,
@@ -386,6 +387,16 @@ class TestReviewFindings:
         assert sum(1 for _ in _orders([[a, b, c]])) == 6  # type: ignore[list-item]
 
 
+class TestItemText:
+    def test_text(self):
+        item = AnnotationItem(
+            "U?", 2, "LM324", Path("a.kicad_sch"), "/P/", "/", None, (508000, 25400), "X", None, 4
+        )
+        assert item.text == "U? unit 2 of 4 (LM324, sheet /P/, at 50.80, 2.54 mm)"
+        single = AnnotationItem("R?", 1, "1k", Path("a"), "/", "/", None, (0, 0), "R", None)
+        assert single.text == "R? (1k, sheet /, at 0.00, 0.00 mm)"
+
+
 class TestErcDialog:
     UUIDS = ("aaaaaaaa-0000-0000-0000-000000000001", "aaaaaaaa-0000-0000-0000-000000000002")
 
@@ -405,7 +416,10 @@ class TestErcDialog:
     )
     def test_severity(self, tmp_path, severity, expected):
         erc = {"rule_severities": {"duplicate_reference": severity}} if severity else {}
-        violations, notes = erc_violations(self.project(tmp_path, erc), "10.0.6")
+        result = erc_violations(self.project(tmp_path, erc), "10.0.6")
+        violations, notes = result.violations, result.notes
+        # The info bar of the dialog does not depend on the severity.
+        assert result.not_fully_annotated and result.unannotated == []
         assert [v.severity for v in violations] == ([expected] if expected else [])
         if violations:
             assert violations[0].description == "Duplicate items R1"
@@ -417,7 +431,8 @@ class TestErcDialog:
         # kicad-cli gives an exclusion as an excluded violation: the tool does not add it.
         text = f"duplicate_reference|0|0|{self.UUIDS[0]}|{self.UUIDS[1]}|||"
         project = self.project(tmp_path, {"erc_exclusions": [[text, "a comment"]]})
-        assert erc_violations(project, "10.0.6") == ([], [])
+        result = erc_violations(project, "10.0.6")
+        assert (result.violations, result.notes, result.not_fully_annotated) == ([], [], True)
         # KiCad 8 reads only texts: it stops at the list, and ignores the exclusion.
         project = write_project(tmp_path, "", version=VERSION_8)
         project.write_text(json.dumps({"erc": {"erc_exclusions": [None, "x", [text, ""]]}}))

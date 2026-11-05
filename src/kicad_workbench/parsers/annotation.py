@@ -119,6 +119,24 @@ class AnnotationItem:
     position: Point  # IU
     lib_name: str  # the item name of the lib_id (LIB_ID::GetLibItemName)
     kiid: str | None  # KIID::AsString of the symbol; None: KiCad makes it at random
+    unit_count: int = 1  # the units of the library symbol
+
+    @property
+    def text(self) -> str:
+        """For example "R? (1k, sheet /, at 50.80, 50.80 mm)" or "U? unit 2 of 4 (...)"."""
+        unit = f" unit {self.unit} of {self.unit_count}" if self.unit_count > 1 else ""
+        x, y = (value / IU_PER_MM for value in self.position)
+        return f"{self.reference}{unit} ({self.value}, sheet {self.sheet}, at {x:.2f}, {y:.2f} mm)"
+
+
+# The text about the list of the symbols that are not annotated.
+UNANNOTATED_NOTE = (
+    "KiCad stops loop 1 of CheckAnnotation at its first error: it gives one error for the "
+    "first symbol that is not annotated or has a unit larger than the unit count, and no "
+    "error for the others. The server lists each symbol that is not annotated."
+)
+# The most symbols of the list of the symbols that are not annotated.
+UNANNOTATED_ROWS = 50
 
 
 @dataclass(frozen=True)
@@ -138,8 +156,8 @@ class AnnotationCheck:
     errors: list[AnnotationError]
     problems: list[str]  # why the result can be different from KiCad
     # Each item that is not annotated, and each item with a unit larger than the
-    # unit count. CheckAnnotation gives only the first of them as an error (loop 1
-    # stops).
+    # unit count. Loop 1 of CheckAnnotation gives an error only for the first item of
+    # the two lists, in the order of its sort.
     unannotated: list[AnnotationItem] = field(default_factory=list)
     extra_units: list[AnnotationItem] = field(default_factory=list)
 
@@ -651,6 +669,7 @@ def _item(ref: _Ref, reference: str) -> AnnotationItem:
         ref.symbol.position,
         ref.symbol.lib_name,
         kiid_text(ref.symbol.kiid),
+        ref.symbol.unit_count,
     )
 
 
@@ -1027,9 +1046,28 @@ def _erc_item(item: AnnotationItem) -> ERCItem:
     )
 
 
-def erc_violations(project_file: Path, version: str) -> tuple[list[ERCError], list[str]]:
+# The info bar of the ERC dialog when CheckAnnotate finds an error
+# (DIALOG_ERC::UpdateAnnotationWarning, KiCad 8.0.9, 9.0.9 and 10.0.6).
+NOT_FULLY_ANNOTATED = "Schematic is not fully annotated. ERC results will be incomplete."
+
+
+@dataclass
+class ErcAnnotation:
+    """The annotation check of the ERC dialog (erc_violations)."""
+
+    violations: list[ERCError]  # the errors that kicad-cli does not give
+    notes: list[str]
+    # True when the dialog shows NOT_FULLY_ANNOTATED: CheckAnnotate finds an error,
+    # with no regard to the severities and the exclusions.
+    not_fully_annotated: bool
+    # Each symbol that is not annotated (UNANNOTATED_NOTE).
+    unannotated: list[AnnotationItem]
+
+
+def erc_violations(project_file: Path, version: str) -> ErcAnnotation:
     """Return the annotation errors that the ERC dialog of the schematic editor shows
-    and kicad-cli does not give, and the notes about the result.
+    and kicad-cli does not give, the notes about the result, the info bar of the
+    dialog, and each symbol that is not annotated.
 
     The dialog runs CheckAnnotate (view "erc" of check_annotation) and makes a
     marker at the first symbol of each error. A marker gets the severity of the
@@ -1091,4 +1129,6 @@ def erc_violations(project_file: Path, version: str) -> tuple[list[ERCError], li
             "of them, in an order that the tool does not know. The tool shows the first "
             "one as excluded and the others as violations."
         )
-    return violations, list(dict.fromkeys(notes))
+    return ErcAnnotation(
+        violations, list(dict.fromkeys(notes)), bool(check.errors), check.unannotated
+    )

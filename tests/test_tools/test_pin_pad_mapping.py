@@ -509,6 +509,26 @@ class TestCheckSchematicPinPadMapping:
         assert "the server does not know the symbols that they change" in out
         assert "❌" not in out.split("**Annotation**")[1]
 
+    async def test_symbols_that_are_not_annotated(self, board):
+        board["state"]["stderr"] = b"Warning: schematic has annotation errors\n"
+        uuid = "11111111-1111-1111-1111-111111111111"
+        symbols = "".join(
+            f'  (symbol (lib_id "Device:R") (at {x} 0 0) (unit 1)\n'
+            '    (property "Reference" "R?" (at 0 0 0)) (property "Value" "1k" (at 0 0 0))\n'
+            f'    (instances (project "board" (path "/{uuid}" (reference "R?") (unit 1)))))\n'
+            for x in (0, 10)
+        )
+        board["schematic"].write_text(
+            f'(kicad_sch (version 20260306) (generator "eeschema") (uuid "{uuid}")\n'
+            '  (lib_symbols (symbol "Device:R" (symbol "R_1_1")))\n'
+            f"{symbols})\n",
+            encoding="utf-8",
+        )
+        out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]))
+        assert "- unannotated: Item not annotated: R? (sheet /)" in out
+        assert "Symbols that are not annotated (2). KiCad stops loop 1 of CheckAnnotation" in out
+        assert "- R? (1k, sheet /, at 0.00, 0.00 mm)\n- R? (1k, sheet /, at 10.00, 0.00 mm)" in out
+
     async def test_annotation_errors_are_listed(self, board):
         board["state"]["stderr"] = b"Warning: schematic has annotation errors\n"
         uuid = "11111111-1111-1111-1111-111111111111"

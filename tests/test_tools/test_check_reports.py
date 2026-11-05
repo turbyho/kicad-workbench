@@ -57,6 +57,19 @@ class TestErcItem:
         item = parse_erc_item({"description": "Pin 1 [???, ?]"})
         assert (item.reference, item.pin_number) == ("", "1")
 
+    @pytest.mark.parametrize("reference", ["C?", "#PWR?", "C"])
+    def test_symbol_that_is_not_annotated(self, reference):
+        # The English text has the Reference field as it is (SCH_SYMBOL::GetItemDescription):
+        # also "C?" (UTIL::GetRefDesUnannotated) or "C" (no number: SCH_REFERENCE::Split).
+        item = parse_erc_item({"description": f"Symbol {reference} [CP]"})
+        assert (item.reference, item.value) == (reference, "CP")
+        item = parse_erc_item({"description": f"Symbol {reference} Pin 1 [Passive, Line]"})
+        assert (item.reference, item.pin_number) == (reference, "1")
+
+    def test_localized_symbol_that_is_not_annotated(self):
+        item = parse_erc_item({"description": "Symbol R? Vývod 1 [~, Pasivní, Čára]"})
+        assert (item.reference, item.pin_number) == ("R?", "1")
+
     def test_symbol(self):
         item = parse_erc_item({"description": "Symbol U3 [ABC-123]"})
         assert (item.reference, item.value, item.pin_number) == ("U3", "ABC-123", "")
@@ -237,6 +250,35 @@ class TestKicadCliIntegration:
         assert "no verified rules of the annotation check for KiCad 10.99.0" in out
         out = await validation.get_erc_violations(str(sch))
         assert out.startswith("⚠️ **No violation in the report of kicad-cli**")
+
+    async def test_symbols_that_are_not_annotated(self, tmp_path):
+        """The ERC dialog gives an error only for the first symbol that is not annotated,
+        and the info bar. The tool gives the two, and lists each symbol."""
+        uuid = "11111111-1111-1111-1111-111111111111"
+        symbols = "".join(
+            f'  (symbol (lib_id "Device:R") (at {x} 50.8 0) (unit 1)\n'
+            f'    (uuid "aaaaaaaa-0000-0000-0000-00000000000{n}")\n'
+            '    (property "Reference" "R?" (at 0 0 0)) (property "Value" "1k" (at 0 0 0))\n'
+            f'    (instances (project "r" (path "/{uuid}" (reference "R?") (unit 1)))))\n'
+            for n, x in ((1, 50.8), (2, 76.2))
+        )
+        sch = tmp_path / "r.kicad_sch"
+        sch.write_text(
+            f'(kicad_sch (version 20231120) (generator "eeschema") (uuid "{uuid}")\n'
+            '  (lib_symbols (symbol "Device:R" (symbol "R_1_1")))\n'
+            f"{symbols})\n",
+            encoding="utf-8",
+        )
+        out = await validation.run_erc(str(sch))
+        assert "| ❌ error | unannotated | Item not annotated: R? |" in out
+        assert (
+            "⚠️ **KiCad**: Schematic is not fully annotated. ERC results will be incomplete." in out
+        )
+        assert "## Symbols that are not annotated (2)" in out
+        assert "| R? | - | 1k | / | (50.80, 50.80) |" in out
+        assert "| R? | - | 1k | / | (76.20, 50.80) |" in out
+        out = await validation.get_erc_violations(str(sch), "warning")
+        assert "## Symbols that are not annotated (2)" in out and "✅" not in out
 
     async def test_get_erc_violations_gives_table_not_run_summary(self, tmp_path):
         sch = tmp_path / "dangling_label.kicad_sch"

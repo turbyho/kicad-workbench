@@ -19,6 +19,9 @@ from ..utils.kicad_text import TOKEN, KiCadEncodingError, read_as_kicad
 # A reference designator: "U13", "AN-GNSS1", "#PWR055", "R1A".
 _REF = r"#?[A-Za-z][\w+-]*\d\w*"
 _REF_RE = re.compile(rf"^{_REF}$")
+# The reference of a symbol that is not annotated: the prefix and "?"
+# (UTIL::GetRefDesUnannotated), for example "R?" or "#PWR?".
+_UNANNOTATED_RE = re.compile(r"^#?[A-Za-z][\w+-]*\?$")
 
 # "Symbol U13 Pin D6 [P0.00/XL1, Tri-state, Line]", or "Pin 1 [???, ?]" when
 # the library symbol is missing.
@@ -55,7 +58,9 @@ def _attrs_to_pin(attrs: str) -> tuple[str, str]:
 
 
 def _valid_ref(ref: str | None) -> str:
-    return ref if ref and _REF_RE.match(ref) else ""
+    """The reference of a localized item text, or "": the structure of the text is not
+    known, thus only a text with the form of a reference is one."""
+    return ref if ref and (_REF_RE.match(ref) or _UNANNOTATED_RE.match(ref)) else ""
 
 
 def parse_erc_item(item: dict[str, Any], position_scale: float = 1.0) -> ERCItem:
@@ -68,15 +73,18 @@ def parse_erc_item(item: dict[str, Any], position_scale: float = 1.0) -> ERCItem
         out.x_mm = round(float(pos["x"]) * position_scale, 4)
         out.y_mm = round(float(pos["y"]) * position_scale, 4)
 
+    # The English item text of a symbol and of its pin has the text of the Reference
+    # field as it is (SCH_SYMBOL::GetItemDescription, SCH_PIN::GetItemDescription):
+    # also "R?" or "R" of a symbol that is not annotated.
     m = _ERC_PIN_EN.match(desc)
     if m:
-        out.reference = _valid_ref(m["ref"])
+        out.reference = m["ref"] or ""
         out.pin_number = m["pin"]
         out.pin_name, out.pin_type = _attrs_to_pin(m["attrs"])
         return out
 
     m = _ERC_SYMBOL_EN.match(desc)
-    if m and _valid_ref(m["ref"]):
+    if m:
         out.reference = m["ref"]
         out.value = m["value"]
         return out

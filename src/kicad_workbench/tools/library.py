@@ -1886,10 +1886,8 @@ async def _check_schematic(schematic_path: str, references: list[str] | None) ->
     annotation = annotation_lines(
         found,
         kicad,
-        '"Update PCB from Schematic" does not run until the annotation errors are repaired '
-        "(the schematic editor first annotates the power symbols itself). With a duplicate "
-        "reference, the netlist has the pins of two symbols in one component, thus a result "
-        "can be wrong.",
+        "With a duplicate reference, the netlist has the pins of two symbols in one "
+        "component, thus a result can be wrong.",
     )
     text = _schematic_mapping_text(path, kicad, checks, annotation, found)
     return "\n".join(text + problem_lines(found.problems))

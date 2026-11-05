@@ -11,9 +11,11 @@ from pathlib import Path
 from ..parsers.bus_names import is_bus_label
 from ..parsers.kicad_fields import rules_for_version
 from ..parsers.kicad_versions import (
+    KICAD8,
     RELEASES,
     KicadFileError,
     is_release_schematic,
+    kicad_release,
     release_of_schematic,
     release_of_symbol_library,
     symbol_library_problem,
@@ -67,12 +69,18 @@ from ..utils.kicad_lock import file_stamp, writable_schematic_version, write_sch
 from ..utils.kicad_text import read_for_write
 from ..utils.library_lookup import LibraryLookupError, find_library_symbol
 from ..utils.sch_hierarchy import (
+    PRO_SUFFIX,
     AmbiguousRootError,
     SheetPath,
     schematic_project_file,
     sheet_paths,
 )
-from ..utils.schematic_settings import SchematicSettings, schematic_settings
+from ..utils.schematic_settings import (
+    SchematicSettings,
+    Severity,
+    off_grid_severity,
+    schematic_settings,
+)
 
 
 def _get_date_string() -> str:
@@ -339,32 +347,73 @@ def _project_settings(path: Path) -> SchematicSettings | _NoGrid:
     """Return the settings of the project of a schematic, or the error.
 
     A schematic in more than one project has the settings of these projects
-    when they are the same. Else its connection grid is not known.
+    when they have the same connection grid. Else its connection grid is not
+    known. off_grid_severity reads the ERC severities of each project.
     """
     try:
         return schematic_settings(schematic_project_file(path))
     except AmbiguousRootError as e:
-        found = [schematic_settings(root.with_suffix(".kicad_pro")) for root in e.roots]
+        found = [schematic_settings(root.with_suffix(PRO_SUFFIX)) for root in e.roots]
         # The wire widths of the net classes give a range (sch_junctions), thus the
         # range of all the projects applies.
         widths = (
             min(item.wire_widths[0] for item in found),
             max(item.wire_widths[1] for item in found),
         )
-        # The problem texts name the files: only the values must be the same.
-        if len({(item.connection_grid, item.off_grid_severity) for item in found}) == 1:
-            return dataclasses.replace(found[0], wire_widths=widths)
-        return _NoGrid(
-            f"{e} These projects have different connection grids or ERC severities, thus "
-            "the connection grid of the schematic is not known. With snap_to_grid=False "
-            "the tool writes the positions as they are.",
-            widths,
+        if len({item.connection_grid for item in found}) > 1:
+            return _NoGrid(
+                f"{e} These projects have different connection grids, thus the connection "
+                "grid of the schematic is not known. With snap_to_grid=False the tool "
+                "writes the positions as they are.",
+                widths,
+            )
+        problems = dict.fromkeys(item.problem for item in found if item.problem)
+        return SchematicSettings(
+            connection_grid=found[0].connection_grid,
+            problem=" ".join(problems) or None,
+            wire_widths=widths,
+            erc_severities=tuple(pair for item in found for pair in item.erc_severities),
         )
 
 
 async def _settings_of(path: Path) -> SchematicSettings | _NoGrid:
     """Return the settings of the project of a schematic, or the error (_project_settings)."""
     return await asyncio.to_thread(_project_settings, path)
+
+
+async def _installed_off_grid(
+    settings: SchematicSettings, kicad: str | None, version: int
+) -> Severity:
+    """Return the severity of endpoint_off_grid in the KiCad that runs ERC.
+
+    The key order of the installed KiCad applies when it can open the file.
+    Get the severity before the write of the file: an error of kicad-cli then
+    changes no file.
+
+    Args:
+        kicad: The installed KiCad version, when the caller has it. Else the tool
+            runs kicad-cli for it, but only when the order changes the result. An
+            error of kicad-cli goes into the reason: the edit does not need KiCad.
+        version: The file version of the schematic.
+    """
+    severity = off_grid_severity(settings, None)
+    if severity.value is not None:
+        return severity  # The same in each order.
+    if kicad is None:
+        try:
+            kicad = await get_kicad_version()
+        except OSError as e:
+            return off_grid_severity(settings, None, f"the installed KiCad (kicad-cli: {e})")
+    release = kicad_release(kicad) if kicad else None
+    if release is not None and release.schematic < version:
+        # KiCad does not open a file of a newer version: a newer KiCad runs ERC.
+        return off_grid_severity(
+            settings,
+            None,
+            f"the KiCad that opens the file (the installed KiCad {kicad} cannot open "
+            f"version {version})",
+        )
+    return off_grid_severity(settings, kicad)
 
 
 def _locked_axes(point: Point, existing: ConnectionPoints) -> set[int]:
@@ -591,31 +640,54 @@ def _symbol_position(requested: Placement, pins: list[LibraryPin], grid: int) ->
     return Placement(position[0], position[1])
 
 
-def _off_grid_warning(
-    items: list[str], settings: SchematicSettings, no_connect: list[str] | None = None
-) -> str:
+def _off_grid_text(items: list[str], settings: SchematicSettings, installed: Severity) -> str:
     """Return the warning about pins or wire ends off the connection grid, or "".
 
     ERC finds them (endpoint_off_grid), except when the project ignores this
-    check. Only KiCad 8 checks the pins of the type no_connect.
+    check.
+
+    Args:
+        installed: The severity in the KiCad that runs ERC (_installed_off_grid).
     """
-    if settings.off_grid_severity == "ignore":
+    if not items or installed.value == "ignore":
         return ""
-    grid = _mm(to_mm(settings.connection_grid))
-    severity = settings.off_grid_severity
-    text = ""
-    if items:
-        text += (
-            f"\n**Warning:** these points are not on the connection grid of {grid} mm: "
-            f"{', '.join(items)}. ERC of the project gives endpoint_off_grid ({severity}).\n"
-        )
-    if no_connect:
-        text += (
-            f"\n**Warning:** these pins of the type no_connect are not on the connection grid "
-            f"of {grid} mm: {', '.join(no_connect)}. ERC of KiCad 8 gives endpoint_off_grid "
-            f"({severity}). KiCad 9 and later do not check these pins.\n"
-        )
-    return text
+    projects = "projects" if len(settings.erc_severities) > 1 else "project"
+    return (
+        f"\n⚠️ **Warning:** these points are not on the connection grid of "
+        f"{_mm(to_mm(settings.connection_grid))} mm: {', '.join(items)}. ERC of the "
+        f"{projects} {_gives(installed)}.\n"
+    )
+
+
+def _no_connect_text(no_connect: list[str], settings: SchematicSettings, version: int) -> str:
+    """Return the warning about the pins of the type no_connect off the connection grid,
+    or "".
+
+    Only KiCad 8 checks these pins, and only a file of KiCad 8 opens in KiCad 8
+    (the file version, not the installed KiCad).
+    """
+    if not no_connect or version > KICAD8.schematic:
+        return ""
+    kicad8 = off_grid_severity(settings, KICAD8.name)
+    if kicad8.value == "ignore":
+        return ""
+    return (
+        f"\n⚠️ **Warning:** these pins of the type no_connect are not on the connection "
+        f"grid of {_mm(to_mm(settings.connection_grid))} mm: {', '.join(no_connect)}. ERC "
+        f"of KiCad 8 {_gives(kicad8)}. KiCad 9 and later do not check these pins.\n"
+    )
+
+
+def _gives(severity: Severity) -> str:
+    """Return what ERC gives for the points off the grid, with a severity that is not
+    "ignore"."""
+    if severity.value is not None:
+        return f"gives endpoint_off_grid ({severity.value})"
+    known = f"its severity is not known: {severity.reason}"
+    given = " or ".join(value for value in severity.possible if value != "ignore")
+    if "ignore" in severity.possible:
+        return f"can give endpoint_off_grid ({given}, or no violation; {known})"
+    return f"gives endpoint_off_grid ({given}; {known})"
 
 
 def _grid_note(settings: SchematicSettings | _NoGrid) -> str:
@@ -1003,6 +1075,7 @@ async def add_component_from_library(
 
         # A definition in lib_symbols is in the format of the schematic: use it.
         symbol_block = _symbol_def_block(_lib_symbols_block(content), lib_id)
+        kicad = None
         if symbol_block is not None:
             definition = "already in lib_symbols"
         else:
@@ -1123,6 +1196,12 @@ async def add_component_from_library(
                 f"connection point of the sheet, thus they connect there: {', '.join(connects)}."
             )
 
+        off_grid_text = ""
+        if off_grid:
+            installed = await _installed_off_grid(settings, kicad, version)
+            off_grid_text = _off_grid_text(off_grid, settings, installed)
+        off_grid_text += _no_connect_text(off_grid_nc, settings, version)
+
         open_error = write_schematic(path, content, stamp)
         if open_error:
             return open_error
@@ -1156,7 +1235,7 @@ async def add_component_from_library(
 **Sheet:** {sheet.shown}
 **Symbol definition:** {definition}
 **Pins:** {len(pins)} pins detected
-{_junction_report(items)}{_off_grid_warning(off_grid, settings, off_grid_nc)}{_grid_note(settings)}{shared}
+{_junction_report(items)}{off_grid_text}{_grid_note(settings)}{shared}
 """
 
     except Exception as e:
@@ -1266,6 +1345,16 @@ async def add_wire(
                 "wire with the ends of an other wire)."
             )
         content = _apply_sheet(content, sheet)
+        off_grid_text = ""
+        if not isinstance(settings, _NoGrid):
+            off_grid = [
+                _shown(point)
+                for point in dict.fromkeys(final)
+                if not on_grid(point, settings.connection_grid)
+            ]
+            if off_grid:
+                installed = await _installed_off_grid(settings, None, version)
+                off_grid_text = _off_grid_text(off_grid, settings, installed)
         open_error = write_schematic(path, content, stamp)
         if open_error:
             return open_error
@@ -1330,8 +1419,7 @@ async def add_wire(
                 "connection point of the sheet, thus the wire connects there: "
                 f"{', '.join(_shown(point) for point in connects)}.\n"
             )
-        off_grid = [_shown(point) for point in dict.fromkeys(final) if not on_grid(point, grid)]
-        return text + _off_grid_warning(off_grid, settings) + _grid_note(settings)
+        return text + off_grid_text + _grid_note(settings)
     except Exception as e:
         import traceback
 

@@ -78,11 +78,11 @@ from ..utils.schematic_settings import (
     erc_exclusions,
     rule_severities,
     subpart_settings,
+    unknown_severity_reason,
 )
 from .kicad_fields import symbol_field_nodes
 from .kicad_versions import EMPTY_TEXT_MARKER, kicad_release, version_triple
 from .lib_symbols import SUB_SYMBOL, unit_count
-from .rule_severity_keys import severity_keys
 from .sch_geometry import IU_PER_MM, Point, definition_key, node_point, placed_symbols
 from .sexpr import Node
 from .sheet_list import (
@@ -1269,22 +1269,26 @@ def erc_violations(project_file: Path, version: str) -> ErcAnnotation:
         project,
         ("erc", "rule_severities"),
         dict.fromkeys(ANNOTATION_TYPES, "error"),
-        severity_keys("erc", version),
+        "erc",
+        version,
     )
     exclusions = erc_exclusions(project, kicad)
     if exclusions.problem:
         notes.append(exclusions.problem)
     excluded: dict[str, int] = {}
     violations = []
+    unknown: set[str] = set()  # The checks with a note about their severity.
     for error in check.errors:
         severity = severities[error.code]
         if severity == "ignore":
             continue
         if severity is None:
-            notes.append(
-                f"The severity of the check {error.code} is not known: the project file has "
-                "a severity that is not a text. The tool shows it as an error."
-            )
+            if error.code not in unknown:
+                unknown.add(error.code)
+                notes.append(
+                    f"The severity of the check {error.code} is not known: "
+                    f"{unknown_severity_reason(version)}. The tool shows it as an error."
+                )
             severity = "error"
         text = marker_text(error)
         if text is not None and text in exclusions.comments:

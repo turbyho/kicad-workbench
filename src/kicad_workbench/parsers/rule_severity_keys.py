@@ -404,6 +404,14 @@ DRC_KEYS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# The keys that ERC_SETTINGS reads before the loop: none in the known versions.
+ERC_PRE_KEYS: dict[str, tuple[tuple[str, str], ...]] = {
+    "8": (),
+    "9": (),
+    "10.0.0": (),
+    "10.0.7": (),
+}
+
 # The keys that BOARD_DESIGN_SETTINGS reads before the loop: (the JSON key, the check
 # whose severity it sets).
 DRC_PRE_KEYS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -413,6 +421,13 @@ DRC_PRE_KEYS: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 SeverityKeys = tuple[tuple[tuple[str, str], ...], tuple[str, ...]]
+
+
+def all_pre_keys(kind: str) -> tuple[tuple[str, str], ...]:
+    """Return the keys that a known KiCad version reads before the loop, of all
+    versions: for a version with no known order, each of them can apply."""
+    table = ERC_PRE_KEYS if kind == "erc" else DRC_PRE_KEYS
+    return tuple(dict.fromkeys(item for keys in table.values() for item in keys))
 
 
 def severity_keys(kind: str, version: str) -> SeverityKeys | None:
@@ -430,5 +445,5 @@ def severity_keys(kind: str, version: str) -> SeverityKeys | None:
             return None
         label = "10.0.7" if numbers == (10, 0, 7) and kind == "erc" else "10.0.0"
     if kind == "erc":
-        return (), ERC_KEYS[label]
+        return ERC_PRE_KEYS[label], ERC_KEYS[label]
     return DRC_PRE_KEYS[label], DRC_KEYS[label]

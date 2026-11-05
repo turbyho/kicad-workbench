@@ -35,7 +35,11 @@ from kicad_workbench.parsers.sheet_list import (
     to_long,
 )
 from kicad_workbench.utils.sch_hierarchy import TopLevelSheet
-from kicad_workbench.utils.schematic_settings import erc_exclusions, subpart_settings
+from kicad_workbench.utils.schematic_settings import (
+    erc_exclusions,
+    subpart_settings,
+    unknown_severity_reason,
+)
 
 # The KiCad releases of the rules: the major version gives the version text.
 RELEASE = {8: "8.0.9", 9: "9.0.9", 10: "10.0.6"}
@@ -434,6 +438,23 @@ class TestErcDialog:
             assert [i.description for i in violations[0].items] == ["Symbol R1 [R]"] * 2
             assert violations[0].items[1].x_mm == 5.0
         assert notes == []
+
+    def test_severity_that_is_not_known(self, tmp_path):
+        # The server has no order of the keys of KiCad 10.0.8: a value that is not a text
+        # can stop the read before duplicate_reference. One note for each check.
+        symbols = "".join(
+            symbol("R1", uuid=f"aaaaaaaa-0000-0000-0000-00000000000{i}", at=(5 * i, 0))
+            for i in range(1, 4)
+        )
+        project = write_project(tmp_path, symbols)
+        severities = {"pin_not_connected": 5, "duplicate_reference": "warning"}
+        project.write_text(json.dumps({"erc": {"rule_severities": severities}}), encoding="utf-8")
+        result = erc_violations(project, "10.0.8")
+        assert [v.severity for v in result.violations] == ["error", "error"]
+        assert result.notes == [
+            "The severity of the check duplicate_reference is not known: "
+            f"{unknown_severity_reason('10.0.8')}. The tool shows it as an error."
+        ]
 
     def test_exclusion(self, tmp_path):
         # kicad-cli gives an exclusion as an excluded violation: the tool does not add it.

@@ -130,21 +130,37 @@ class TestSymbol:
             "the pins of the symbol cannot all be on the connection grid" in result
         ), result
         assert (
-            "**Warning:** these points are not on the connection grid of 1.27 mm: pin 1 at "
+            "⚠️ **Warning:** these points are not on the connection grid of 1.27 mm: pin 1 at "
             "(100.33, 48.53), pin 2 at (100.33, 50.53). ERC of the project gives "
             "endpoint_off_grid (warning)." in result
         ), result
 
     def test_no_connect_pins_do_not_decide(self, sch):
+        # A file of KiCad 10: no KiCad that opens it checks these pins.
         result = add(sch, "NC")
         assert "**Position:** (100.33, 49.53)" in result, result
-        assert (
-            "**Warning:** these pins of the type no_connect are not on the connection grid of "
-            "1.27 mm: pin 2 at (100.63, 49.53). ERC of KiCad 8 gives endpoint_off_grid (warning). "
-            "KiCad 9 and later do not check these pins." in result
-        ), result
-        assert "these points are not on the connection grid" not in result
+        assert "Warning" not in result, result
         assert off_grid_pins(sch) == ["2"]
+
+    def test_no_connect_pins_in_a_file_of_kicad_8(self, tmp_path, monkeypatch):
+        library = tmp_path / "Device.kicad_sym"
+        library.write_text(
+            LIBRARY.replace("(version 20251024)", "(version 20231120)"), encoding="utf-8"
+        )
+        use_global_table(tmp_path, monkeypatch, row("Device", library))
+        sch = write_schematic(tmp_path, 20231120)
+        result = add(sch, "NC")
+        assert (
+            "⚠️ **Warning:** these pins of the type no_connect are not on the connection grid "
+            "of 1.27 mm: pin 2 at (100.63, 49.53). ERC of KiCad 8 gives endpoint_off_grid "
+            "(warning). KiCad 9 and later do not check these pins." in result
+        ), result
+        # KiCad 8 has no key single_global_label: it reads "ignore". KiCad 10 stops the
+        # read before endpoint_off_grid, but it does not check these pins.
+        severities = {"single_global_label": 5, "endpoint_off_grid": "ignore"}
+        set_project(sch, {"erc": {"rule_severities": severities}})
+        result = add(sch, "NC", reference="N2", x=120)
+        assert "Warning" not in result, result
 
     def test_symbol_with_no_pins(self, sch):
         result = add(sch, "Logo")
@@ -154,7 +170,7 @@ class TestSymbol:
         result = add(sch, snap_to_grid=False)
         assert "**Position:** (100, 50)\n" in result, result
         assert (
-            "**Warning:** these points are not on the connection grid of 1.27 mm: pin 1 at "
+            "⚠️ **Warning:** these points are not on the connection grid of 1.27 mm: pin 1 at "
             "(100, 46.19), pin 2 at (100, 53.81)." in result
         )
         assert symbol_at(sch) == ["100", "50", "0"]
@@ -285,13 +301,71 @@ class TestWire:
         result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
         assert wire_points(sch) == [["10 10", "20 10"]]
         assert (
-            "**Warning:** these points are not on the connection grid of 1.27 mm: (10, 10), "
+            "⚠️ **Warning:** these points are not on the connection grid of 1.27 mm: (10, 10), "
             "(20, 10). ERC of the project gives endpoint_off_grid (warning)." in result
         ), result
 
     def test_no_warning_when_the_project_ignores_the_check(self, sch):
         set_project(sch, {"erc": {"rule_severities": {"endpoint_off_grid": "ignore"}}})
         assert "Warning" not in wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
+
+    def test_severity_in_the_order_of_kicad(self, sch, monkeypatch):
+        # KiCad 10.0.6 reads bus_entry_needed before endpoint_off_grid: a value that is
+        # not a text stops the read, thus endpoint_off_grid keeps its default.
+        async def kicad_version():
+            return "10.0.6"
+
+        monkeypatch.setattr(schematic_editor, "get_kicad_version", kicad_version)
+        severities = {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}
+        set_project(sch, {"erc": {"rule_severities": severities}})
+        result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
+        assert "ERC of the project gives endpoint_off_grid (warning)." in result, result
+
+    def test_kicad_cli_error(self, sch, monkeypatch):
+        async def broken():
+            raise PermissionError("kicad-cli")
+
+        monkeypatch.setattr(schematic_editor, "get_kicad_version", broken)
+        # The severity is the same in each order: the tool does not run kicad-cli.
+        assert wire(sch, [(10, 10), (20, 10)], snap_to_grid=False).startswith("✅")
+        # The order changes the result: the error of kicad-cli is in the reason, and
+        # the edit, which does not need KiCad, is done.
+        severities = {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}
+        set_project(sch, {"erc": {"rule_severities": severities}})
+        result = wire(sch, [(30, 10), (40, 10)], snap_to_grid=False)
+        assert result.startswith("✅ Wire added"), result
+        assert (
+            "can give endpoint_off_grid (warning, or no violation; its severity is not known: "
+            "the server does not know which keys the installed KiCad (kicad-cli: kicad-cli) "
+            "reads in which order" in result
+        ), result
+
+    def test_installed_kicad_that_cannot_open_the_file(self, sch, monkeypatch):
+        # KiCad 9 does not open a file of KiCad 10: its key order does not apply.
+        async def kicad9():
+            return "9.0.9"
+
+        monkeypatch.setattr(schematic_editor, "get_kicad_version", kicad9)
+        severities = {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}
+        set_project(sch, {"erc": {"rule_severities": severities}})
+        result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
+        assert (
+            "can give endpoint_off_grid (warning, or no violation; its severity is not known: "
+            "the server does not know which keys the KiCad that opens the file (the installed KiCad 9.0.9 cannot open "
+            "version 20260306) reads in which order" in result
+        ), result
+
+    def test_severity_that_is_not_known(self, sch, monkeypatch):
+        monkeypatch.setattr(schematic_editor, "get_kicad_version", no_version)
+        severities = {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}
+        set_project(sch, {"erc": {"rule_severities": severities}})
+        result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
+        assert (
+            "(20, 10). ERC of the project can give endpoint_off_grid (warning, or no "
+            "violation; its severity is not known: the server does not know which keys the installed KiCad (the version is "
+            "not known) reads in which order, and the severities of the project file give a "
+            "different result for a different order)." in result
+        ), result
 
     def test_pin_on_a_connection_point_does_not_move_to_an_other_point(self, sch):
         # Pin 1 at (100, 46.19) is on a wire end. The grid position of the symbol puts
@@ -416,6 +490,65 @@ def test_projects_with_the_same_settings(sch, monkeypatch):
     monkeypatch.setattr(schematic_editor, "schematic_project_file", project_file)
     result = wire(sch, [(10, 10), (20, 10)])
     assert "Points moved to the connection grid of 2.54 mm" in result, result
+
+
+async def no_version():
+    return None
+
+
+def shared_sheet(sch: Path, monkeypatch, *projects: str) -> None:
+    """The schematic is in two projects with these project files."""
+    roots = [sch.parent / "a.kicad_sch", sch.parent / "b.kicad_sch"]
+    for root, text in zip(roots, projects, strict=True):
+        root.with_suffix(".kicad_pro").write_text(text, encoding="utf-8")
+
+    def project_file(path):
+        raise AmbiguousRootError(path, roots)
+
+    monkeypatch.setattr(schematic_editor, "schematic_project_file", project_file)
+
+
+def test_projects_with_different_severities(sch, monkeypatch):
+    # The grid is the same: the tool can snap. The severity of the check is not known.
+    ignore = {"erc": {"rule_severities": {"endpoint_off_grid": "ignore"}}}
+    a, b = sch.parent / "a.kicad_pro", sch.parent / "b.kicad_pro"
+    shared_sheet(sch, monkeypatch, json.dumps(ignore), "{}")
+    result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
+    assert result.startswith("✅ Wire added"), result
+    assert (
+        "(20, 10). ERC of the projects can give endpoint_off_grid (warning, or no violation; "
+        f"its severity is not known: the projects have different severities ({a}: ignore; "
+        f"{b}: warning))." in result
+    ), result
+    # A severity that is not known in one project: the reason is in the text.
+    unknown = {"erc": {"rule_severities": {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}}}
+    shared_sheet(sch, monkeypatch, json.dumps(ignore), json.dumps(unknown))
+    monkeypatch.setattr(schematic_editor, "get_kicad_version", no_version)
+    result = wire(sch, [(50, 10), (60, 10)], snap_to_grid=False)
+    assert (
+        "can give endpoint_off_grid (warning, or no violation; its severity is not known: the "
+        f"projects have different severities ({a}: ignore; {b}: not known); the server does "
+        "not know which keys" in result
+    ), result
+    # The same severity in the two projects is known.
+    shared_sheet(sch, monkeypatch, json.dumps(ignore), json.dumps(ignore))
+    assert "Warning" not in wire(sch, [(30, 10), (40, 10)], snap_to_grid=False)
+    # No project ignores the check: ERC gives it.
+    error = {"erc": {"rule_severities": {"endpoint_off_grid": "error"}}}
+    shared_sheet(sch, monkeypatch, json.dumps(error), "{}")
+    result = wire(sch, [(30, 20), (40, 20)], snap_to_grid=False)
+    assert (
+        "ERC of the projects gives endpoint_off_grid (error or warning; its severity is not "
+        f"known: the projects have different severities ({a}: error; {b}: warning))." in result
+    ), result
+
+
+def test_projects_with_a_file_that_is_not_json(sch, monkeypatch):
+    # KiCad uses the defaults for project b: the grid is the same, and the note tells it.
+    shared_sheet(sch, monkeypatch, "{}", "{ not json")
+    result = wire(sch, [(10, 10), (20, 10)])
+    assert "Points moved to the connection grid of 1.27 mm" in result, result
+    assert f"**Note:** The project file {sch.parent / 'b.kicad_pro'} cannot be read" in result
 
 
 class TestUnknownProject:

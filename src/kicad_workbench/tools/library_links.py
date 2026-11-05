@@ -27,7 +27,6 @@ from pathlib import Path
 from ..parsers.board_models import board_models
 from ..parsers.check_report_parser import parse_drc_report, parse_erc_report
 from ..parsers.kicad_versions import version_numbers
-from ..parsers.rule_severity_keys import SeverityKeys, severity_keys
 from ..parsers.sexpr import SExprError
 from ..server import mcp
 from ..utils.kicad_cli import decode_output, get_kicad_version, run_kicad_cli_sync
@@ -41,7 +40,7 @@ from ..utils.library_tables import (
 )
 from ..utils.model_paths import ModelFile, resolve_model
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
-from ..utils.schematic_settings import rule_severities
+from ..utils.schematic_settings import rule_severities, unknown_severity_reason
 from .library import (
     NO_KICAD_CLI,
     SchematicFootprints,
@@ -132,19 +131,27 @@ def _check_lines(
     types: tuple[str, ...],
     project: Path,
     keys: tuple[str, ...],
-    order: SeverityKeys | None,
+    kind: str,
+    kicad: str,
 ) -> tuple[list[str], int]:
-    """The section of the ERC or DRC violations of some types, and their count (not excluded)."""
+    """The section of the ERC or DRC violations of some types, and their count (not excluded).
+
+    kind is "erc" or "drc", kicad the installed KiCad version (rule_severities).
+    """
     lines = ["", f"## {title}", ""]
     defaults = dict.fromkeys(types, _DEFAULT_SEVERITY)
-    for name, severity in rule_severities(project, keys, defaults, order).items():
+    unknown = []
+    for name, severity in rule_severities(project, keys, defaults, kind, kicad).items():
         if severity == "ignore":
             lines.append(f"_The project ignores the check {name}: KiCad does not run it._")
         elif severity is None:
-            lines.append(
-                f"_The severity of the check {name} is not known: the project file has a "
-                "severity that is not a text._"
-            )
+            unknown.append(name)
+    if unknown:
+        if len(unknown) > 1:
+            checks = f"The severities of the checks {', '.join(unknown)} are"
+        else:
+            checks = f"The severity of the check {unknown[0]} is"
+        lines.append(f"_{checks} not known: {unknown_severity_reason(kicad)}._")
     found = [error for error in errors if error.type in types]
     if not found:
         lines.append("✅ KiCad reports no problem.")
@@ -383,7 +390,7 @@ async def _schematic_part(schematic: Path, kicad: str) -> _Part:
     else:
         lines, part.counts["symbols with a library problem"] = _check_lines(
             "Schematic symbols (ERC of KiCad)", parse_erc_report(report), _ERC_TYPES, project,
-            _ERC_KEYS, severity_keys("erc", kicad),
+            _ERC_KEYS, "erc", kicad,
         )  # fmt: skip
         part.body += lines
     if isinstance(found, str):
@@ -446,7 +453,7 @@ async def _board_part(board: Path, kicad: str) -> _Part:
     else:
         lines, part.counts["board footprints with a library problem"] = _check_lines(
             "Board footprints (DRC of KiCad)", parse_drc_report(report), _DRC_TYPES, project,
-            _DRC_KEYS, severity_keys("drc", kicad),
+            _DRC_KEYS, "drc", kicad,
         )  # fmt: skip
         part.body += lines
     if isinstance(models, str):

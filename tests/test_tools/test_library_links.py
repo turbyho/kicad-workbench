@@ -8,12 +8,11 @@ import pytest
 
 from kicad_workbench.parsers.board_models import BoardFootprint, board_models
 from kicad_workbench.parsers.board_netlist import NetlistComponent
-from kicad_workbench.parsers.rule_severity_keys import severity_keys
 from kicad_workbench.tools import library as library_tools
 from kicad_workbench.tools import library_links
 from kicad_workbench.utils import kicad_cli as kicad_cli_module
 from kicad_workbench.utils.library_footprint import FootprintItems, PadNumber
-from kicad_workbench.utils.schematic_settings import rule_severities
+from kicad_workbench.utils.schematic_settings import rule_severities, unknown_severity_reason
 
 from .test_library_footprint import make_footprints
 from .test_library_search import table_rows
@@ -88,13 +87,13 @@ class TestSeverity:
         if text is not None:
             project.write_text(text, encoding="utf-8")
         defaults = {"lib_symbol_issues": "warning"}
-        order = severity_keys("erc", "10.0.6")
-        assert rule_severities(project, library_links._ERC_KEYS, defaults, order) == {
+        assert rule_severities(project, library_links._ERC_KEYS, defaults, "erc", "10.0.6") == {
             "lib_symbol_issues": severity
         }
-        # A version with keys that the server does not know: any value that is not a text
-        # makes the severity not known.
-        found = rule_severities(project, library_links._ERC_KEYS, defaults, None)
+        # A version with keys that the server does not know: a value that is not a text
+        # makes the severity of a check with a text not known, except when the text gives
+        # the default.
+        found = rule_severities(project, library_links._ERC_KEYS, defaults, "erc", "10.99.0")
         expected = None if text and '": 1' in text else severity
         assert found == {"lib_symbol_issues": expected}
 
@@ -266,6 +265,22 @@ class TestCheckLibraryLinks:
         # KiCad cannot read the value 1: the check keeps its default severity.
         assert "lib_footprint_issues is not known" not in out
         assert "lib_footprint_issues: KiCad does not run it" not in out
+
+    def test_checks_with_a_severity_that_is_not_known(self, tmp_path):
+        # A nightly build: one note for all checks whose severity depends on the order.
+        path = tmp_path / "p.kicad_pro"
+        severities = {"lib_symbol_issues": "ignore", "lib_symbol_mismatch": "error", "x": 1}
+        path.write_text(json.dumps({"erc": {"rule_severities": severities}}), encoding="utf-8")
+        lines, count = library_links._check_lines(
+            "ERC", [], library_links._ERC_TYPES, path, library_links._ERC_KEYS, "erc", "10.99.0"
+        )
+        reason = unknown_severity_reason("10.99.0")
+        assert lines[3:] == [
+            "_The severities of the checks lib_symbol_issues, lib_symbol_mismatch are not "
+            f"known: {reason}._",
+            "✅ KiCad reports no problem.",
+        ]
+        assert count == 0
 
     async def test_board_only(self, project):
         (project["directory"] / "board.kicad_sch").unlink()

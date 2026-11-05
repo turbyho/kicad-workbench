@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastmcp.utilities.types import Image
 
-from ..parsers.annotation import AnnotationError, check_annotation
+from ..parsers.annotation import AnnotationCheck, AnnotationError, check_annotation
 from ..parsers.board_netlist import NetlistComponent, NetlistPin, read_board_netlist
 from ..parsers.kicad_versions import (
     KICAD8,
@@ -1328,16 +1328,52 @@ _ANNOTATION_ROWS = 20
 
 async def _netlist_annotation(
     root: Path, kicad: str
-) -> tuple[list[AnnotationError] | None, list[str]]:
+) -> tuple[list[AnnotationError] | None, list[str], set[str] | None]:
     """The annotation errors of the netlist job of kicad-cli for a schematic (view
-    "cli", all symbols), or None when the check cannot run, and the notes."""
+    "cli", all symbols), or None when the check cannot run, the notes, and the
+    references that the errors change (annotation_references)."""
     try:
         check = await asyncio.to_thread(
             check_annotation, root.with_suffix(".kicad_pro"), kicad, "cli", "all"
         )
     except (ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError) as e:
-        return None, [f"The server cannot list the annotation errors: {e}"]
-    return check.errors, check.problems
+        return None, [f"The server cannot list the annotation errors: {e}"], None
+    return check.errors, check.problems, annotation_references(check)
+
+
+def annotation_references(check: AnnotationCheck) -> set[str]:
+    """The references (lower case) of the netlist components that an annotation error
+    changes.
+
+    The netlist exporter (``NETLIST_EXPORTER_XML::makeSymbols``) sorts the symbols
+    of a sheet by their reference with no case: two symbols of one sheet with one
+    reference give one component, and the nets have the pins of the two. The
+    symbols of two sheets give two components with one reference, and
+    read_board_netlist uses the first component with the pins of the two. A unit
+    that the library symbol does not have gives no pins. Thus these components can
+    have the pins of more than one symbol, or not all pins:
+
+    - each reference of a duplicate_reference error (also different unit counts);
+    - each reference that is not annotated ("R?") and that more than one item has
+      (CheckAnnotation does not compare different units of "U?");
+    - each item with a unit larger than the unit count.
+
+    A reference that is not annotated and that one item has gives an exact component.
+    """
+    references = {
+        item.reference.lower()
+        for error in check.errors
+        if error.code == "duplicate_reference"
+        for item in (error.first, error.second)
+        if item is not None
+    }
+    unannotated: dict[str, int] = {}
+    for item in check.unannotated:
+        key = item.reference.lower()
+        unannotated[key] = unannotated.get(key, 0) + 1
+    references |= {reference for reference, count in unannotated.items() if count > 1}
+    references |= {item.reference.lower() for item in check.extra_units}
+    return references
 
 
 def annotation_lines(found: "SchematicFootprints", kicad: str, effect: str) -> list[str]:
@@ -1420,23 +1456,108 @@ def _pad_cell(numbers: tuple[str, ...]) -> str:
     return cell(", ".join(f"{n} ({c} pads)" if c > 1 else n for n, c in counts.items()))
 
 
+def annotation_state(found: "SchematicFootprints") -> tuple[bool, bool]:
+    """Return (the netlist has annotation errors, the server knows the components
+    that they change: annotation_references).
+
+    When kicad-cli reports errors and the server check finds none, or the check
+    did not run, the server does not know the changed components.
+    """
+    errors = found.annotation_errors
+    present = found.annotation or bool(errors)
+    known = found.annotation_references is not None and not (found.annotation and not errors)
+    return present, known
+
+
+def _symbols(count: int, adjective: str = "") -> str:
+    """For example "1 symbol" or "3 other symbols"."""
+    words = [str(count), adjective, "symbol" if count == 1 else "symbols"]
+    return " ".join(word for word in words if word)
+
+
+def _annotation_result(
+    result: str | None, others: int, changed: int, present: bool, known: bool
+) -> str | None:
+    """The result line when annotation errors change the netlist, else result.
+
+    result: The result line of the counts of all checked symbols (_result_line).
+    others: The symbols that the tool checked and no annotation error changes.
+    changed: The symbols that an annotation error changes (annotation_references).
+    present, known: see annotation_state.
+    """
+    if not present:
+        return result
+    if not known:
+        note = (
+            "the netlist has annotation errors, and the server does not know the symbols that "
+            "they change: the result can be not complete."
+        )
+    elif changed:
+        note = (
+            f"{_symbols(changed)} {'has' if changed == 1 else 'have'} an annotation error: the "
+            f"result of {'this symbol' if changed == 1 else 'these symbols'} is not complete."
+        )
+    else:
+        return result
+    if result:
+        return f"{result}; {note}"
+    if not others:
+        return f"**Result**: ⚠️ {note[0].upper()}{note[1:]}"
+    other = "other" if known else ""
+    return f"**Result**: ⚠️ No error in the {_symbols(others, other)}; {note}"
+
+
+def _mapping_table(checks: list[_ComponentCheck], empty: str = "") -> list[str]:
+    """The table of the pin and pad errors and warnings of some symbols.
+
+    empty: The text of a cell with no error.
+    """
+    lines = [
+        "| Reference | Value | Footprint | Pin numbers with no pad | Pins with no number "
+        "| Pads with no pin |",
+        "|-----------|-------|-----------|-------------------------|---------------------"
+        "|------------------|",
+    ]
+    for check in checks:
+        component = check.component
+        no_number = cell(", ".join(p.function or p.type for p in check.no_number))
+        no_pad = _pin_cell(component, check.no_pad) or empty
+        no_pin = _pad_cell(check.no_pin) or empty
+        lines.append(
+            f"| {cell(component.reference)} | {cell(component.value)} "
+            f"| {cell(component.footprint)} | {no_pad} | {no_number or empty} | {no_pin} |"
+        )
+    return lines
+
+
 def _schematic_mapping_text(
-    path: Path, root: Path, tops: int, kicad: str, checks: list[_ComponentCheck],
-    annotation: list[str], absent: list[str],
+    path: Path, kicad: str, checks: list[_ComponentCheck], annotation: list[str],
+    found: "SchematicFootprints",
 ) -> list[str]:  # fmt: skip
-    problems, skipped, good = [], [], []
+    root, tops, absent = found.root, found.tops, found.absent
+    changed_references = found.annotation_references or set()
+    problems, skipped, good, changed = [], [], [], []
     for check in checks:
         if check.reason:
             skipped.append(check)
+        elif check.component.reference.lower() in changed_references:
+            changed.append(check)
         elif check.no_pad or check.no_number or check.no_pin:
             problems.append(check)
         else:
             good.append(check)
-    result = _result_line(
-        sum(len(c.no_pad) for c in problems),
-        sum(len(c.no_number) for c in problems),
-        sum(len(c.no_pin) for c in problems),
-        len(skipped),
+    # The errors of a changed symbol are errors of the netlist too: they count.
+    counted = problems + changed
+    result = _annotation_result(
+        _result_line(
+            sum(len(c.no_pad) for c in counted),
+            sum(len(c.no_number) for c in counted),
+            sum(len(c.no_pin) for c in counted),
+            len(skipped),
+        ),
+        len(problems) + len(good),
+        len(changed),
+        *annotation_state(found),
     )
     lines = [
         f"# Pins and pads of the schematic {root.name}",
@@ -1474,19 +1595,20 @@ def _schematic_mapping_text(
             'pins with no number", and "No net found for component <reference> pad <number> '
             '(no pin <number> in symbol)" for a pad with no pin (the pad gets no net)._',
             "",
-            "| Reference | Value | Footprint | Pin numbers with no pad | Pins with no number "
-            "| Pads with no pin |",
-            "|-----------|-------|-----------|-------------------------|---------------------"
-            "|------------------|",
+            *_mapping_table(problems),
         ]
-        for check in problems:
-            component = check.component
-            no_number = cell(", ".join(p.function or p.type for p in check.no_number))
-            lines.append(
-                f"| {cell(component.reference)} | {cell(component.value)} "
-                f"| {cell(component.footprint)} | {_pin_cell(component, check.no_pad)} "
-                f"| {no_number} | {_pad_cell(check.no_pin)} |"
-            )
+    if changed:
+        lines += [
+            "",
+            f"## Symbols with an annotation error ({len(changed)})",
+            "",
+            "_The netlist component of each reference can have the pins of more than one "
+            "symbol (a duplicate reference, symbols that are not annotated), or not all pins "
+            "(a unit that the library symbol does not have). Thus the result of these symbols "
+            "is not complete. Repair the annotation, then run the check again._",
+            "",
+            *_mapping_table(changed, "none"),
+        ]
     if skipped:
         lines += [
             "",
@@ -1530,6 +1652,10 @@ class SchematicFootprints:
     # when the check did not run. The notes tell why the list can be incomplete.
     annotation_errors: list[AnnotationError] | None
     annotation_notes: list[str]
+    # The references (lower case) whose netlist component can hold the pins of more
+    # than one symbol, or not all pins of a symbol (annotation_references); None
+    # when the check did not run.
+    annotation_references: set[str] | None
     reasons: dict[str, str]  # Footprint ID: why KiCad does not find or load it.
     libraries: dict[str, Path]  # Footprint ID: the .pretty directory.
     items: dict[str, FootprintItems]  # Footprint ID: the footprint that pcbnew loaded.
@@ -1566,7 +1692,7 @@ async def schematic_footprints(
     )
     if isinstance(annotation, BaseException):
         raise annotation
-    annotation_errors, annotation_notes = annotation
+    annotation_errors, annotation_notes, annotation_refs = annotation
     try:
         if isinstance(netlist, BaseException):
             raise netlist
@@ -1642,6 +1768,7 @@ async def schematic_footprints(
         annotation=_ANNOTATION_WARNING in output,
         annotation_errors=annotation_errors,
         annotation_notes=annotation_notes,
+        annotation_references=annotation_refs,
         reasons=reasons,
         libraries={footprint: files[footprint][0] for footprint in items},
         items=items,
@@ -1699,9 +1826,7 @@ async def _check_schematic(schematic_path: str, references: list[str] | None) ->
         "reference, the netlist has the pins of two symbols in one component, thus a result "
         "can be wrong.",
     )
-    text = _schematic_mapping_text(
-        path, found.root, found.tops, kicad, checks, annotation, found.absent
-    )
+    text = _schematic_mapping_text(path, kicad, checks, annotation, found)
     return "\n".join(text + problem_lines(found.problems))
 
 

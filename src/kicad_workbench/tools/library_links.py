@@ -46,6 +46,7 @@ from .library import (
     NO_KICAD_CLI,
     SchematicFootprints,
     annotation_lines,
+    annotation_state,
     cell,
     netlist_root,
     not_found_reason,
@@ -62,6 +63,36 @@ _ERC_KEYS = ("erc", "rule_severities")
 _DRC_KEYS = ("board", "design_settings", "rule_severities")
 # The default severity of the four checks in KiCad 8, 9 and 10.
 _DEFAULT_SEVERITY = "warning"
+
+
+# The flags of the result (the value 1): the result gives them with no number.
+_FLAGS = {
+    "schematic not checked",
+    "schematic symbols not checked",
+    "schematic footprints not checked",
+    "schematic 3D models not checked",
+    "board footprints not checked",
+    "board 3D models not checked",
+    "annotation errors (the server does not know the number)",
+}
+# The singular form of a count of the result.
+_SINGULAR = {
+    "symbols with a library problem": "symbol with a library problem",
+    "annotation errors": "annotation error",
+    "symbols whose footprint KiCad does not find": "symbol whose footprint KiCad does not find",
+    "3D models of the schematic footprints not found": (
+        "3D model of the schematic footprints not found"
+    ),
+    "board footprints with a library problem": "board footprint with a library problem",
+    "3D models of the board footprints not found": "3D model of the board footprints not found",
+}
+
+
+def _count_text(name: str, count: int) -> str:
+    """A count of the result, for example "1 annotation error" or "schematic not checked"."""
+    if name in _FLAGS:
+        return name
+    return f"{count} {_SINGULAR.get(name, name) if count == 1 else name}"
 
 
 def _run_check(args: list[str], source: Path) -> dict:
@@ -141,8 +172,26 @@ class _Model:
     found: ModelFile
 
 
-def _model_lines(title: str, models: list[_Model], owner: str, users: dict[str, str]) -> list[str]:
-    """The section of the 3D models that KiCad does not find."""
+_JOINED = (
+    "The annotation errors change the netlist (one component for more than one symbol, "
+    "or a unit that the library symbol does not have): the {item} of a symbol can be not "
+    "checked."
+)
+
+
+def _annotation_changes(found: SchematicFootprints) -> bool:
+    """True when annotation errors can change the components of the netlist."""
+    present, known = annotation_state(found)
+    return present and (not known or bool(found.annotation_references))
+
+
+def _model_lines(
+    title: str, models: list[_Model], owner: str, users: dict[str, str], joined: bool = False
+) -> list[str]:
+    """The section of the 3D models that KiCad does not find.
+
+    joined: Annotation errors can join symbols in one netlist component.
+    """
     lines = ["", f"## {title}", ""]
     if not models:
         lines.append("_The footprints have no 3D model._")
@@ -153,8 +202,16 @@ def _model_lines(title: str, models: list[_Model], owner: str, users: dict[str, 
     lines.append("Models: " + ", ".join(f"{count} {state}" for state, count in states.items()))
     bad = [model for model in models if model.found.state in ("not found", "no file name")]
     if not bad:
-        lines += ["", "✅ KiCad finds the file of each 3D model."]
+        if joined:
+            lines += [
+                "",
+                "⚠️ KiCad finds the file of each 3D model. " + _JOINED.format(item="3D model"),
+            ]
+        else:
+            lines += ["", "✅ KiCad finds the file of each 3D model."]
         return lines
+    if joined:
+        lines += ["", "⚠️ " + _JOINED.format(item="3D model")]
     lines += [
         "",
         "_The 3D viewer and the STEP export show no model for these files. A model that is "
@@ -259,12 +316,18 @@ def _footprint_lines(found: SchematicFootprints) -> tuple[list[str], int, dict[s
         "",
     ]
     if by_reason:
+        if _annotation_changes(found):
+            lines += ["⚠️ " + _JOINED.format(item="footprint"), ""]
         lines += ["| Reason | Symbols |", "|--------|---------|"]
         lines += [
             f"| {cell(reason)} | {cell(', '.join(refs))} |" for reason, refs in by_reason.items()
         ]
     else:
-        lines.append(f"✅ KiCad finds the footprint of each symbol ({len(users)} footprints).")
+        found_text = f"KiCad finds the footprint of each symbol ({len(users)} footprints)."
+        if _annotation_changes(found):
+            lines.append(f"⚠️ {found_text} " + _JOINED.format(item="footprint"))
+        else:
+            lines.append(f"✅ {found_text}")
     count = sum(len(refs) for refs in by_reason.values())
     return lines, count, {footprint: ", ".join(refs) for footprint, refs in users.items()}
 
@@ -336,7 +399,7 @@ async def _schematic_part(schematic: Path, kicad: str) -> _Part:
     if found.annotation_errors:
         part.counts["annotation errors"] = len(found.annotation_errors)
     elif found.annotation:
-        part.counts["annotation errors (the number is not known)"] = 1
+        part.counts["annotation errors (the server does not know the number)"] = 1
     lines, part.counts["symbols whose footprint KiCad does not find"], users = _footprint_lines(
         found
     )
@@ -348,7 +411,13 @@ async def _schematic_part(schematic: Path, kicad: str) -> _Part:
         part.counts["schematic 3D models not checked"] = 1
     else:
         part.counts["3D models of the schematic footprints not found"] = _missing(models)
-        part.body += _model_lines("3D models of the schematic footprints", models, "Symbols", users)
+        part.body += _model_lines(
+            "3D models of the schematic footprints",
+            models,
+            "Symbols",
+            users,
+            _annotation_changes(found),
+        )
     part.problems += found.problems
     return part
 
@@ -412,7 +481,7 @@ async def _check_links(project_path: str) -> str:
         if isinstance(part, BaseException):
             raise part
     counts = {name: n for part in parts for name, n in part.counts.items()}
-    wrong = [f"{count} {name}" for name, count in counts.items() if count]
+    wrong = [_count_text(name, count) for name, count in counts.items() if count]
     result = (
         "**Result**: ❌ " + ", ".join(wrong)
         if wrong

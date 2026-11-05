@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -201,7 +202,7 @@ class TestCheckLibraryLinks:
         assert (
             "**Result**: ❌ 2 symbols with a library problem, 4 symbols whose footprint KiCad "
             "does not find, 2 3D models of the schematic footprints not found, 1 board "
-            "footprints with a library problem, 2 3D models of the board footprints not found"
+            "footprint with a library problem, 2 3D models of the board footprints not found"
         ) in out
         # One row for each problem text. An excluded violation is not counted.
         assert table_rows(section(out, "Schematic symbols (ERC of KiCad)")) == [
@@ -287,7 +288,8 @@ class TestCheckLibraryLinks:
         # A failed check stops only its section.
         assert "❌ ERC failed: kicad-cli stopped with the exit code 3: Failed to load" in out
         assert "❌ DRC failed: kicad-cli stopped with the exit code 3: Failed to load" in out
-        assert "1 schematic symbols not checked" in out and "1 board footprints not checked" in out
+        assert "schematic symbols not checked" in out and "board footprints not checked" in out
+        assert "1 schematic symbols" not in out  # a flag, not a count
         assert "## 3D models of the board footprints" in out
 
     async def test_schematic_error_stops_only_the_schematic(self, project):
@@ -306,3 +308,36 @@ class TestCheckLibraryLinks:
         out = await library_links.check_library_links(str(other))
         assert f"**Board**: {other}" in out
         assert "_The footprints have no 3D model._" in out
+
+
+class TestAnnotationChanges:
+    """Annotation errors can join symbols in one netlist component."""
+
+    @pytest.mark.parametrize(
+        "warning, errors, references, changes",
+        [
+            (False, [], set(), False),  # no annotation error
+            (True, None, None, True),  # kicad-cli warns, and the server check did not run
+            (True, ["e"], {"r1"}, True),
+            (False, ["e"], set(), False),  # only units with different values
+            # kicad-cli warns, and the server finds no error: the changes are not known.
+            (True, [], set(), True),
+        ],
+    )
+    def test_annotation_changes(self, warning, errors, references, changes):
+        found = SimpleNamespace(
+            annotation=warning, annotation_errors=errors, annotation_references=references
+        )
+        assert library_links._annotation_changes(found) is changes
+
+    def test_models_with_joined_symbols(self):
+        assert library_links._model_lines("T", [], "Symbols", {}, True)[-1] == (
+            "_The footprints have no 3D model._"
+        )
+        model = library_links._Model(
+            "R1", "Lib:Two", "m.step", True, SimpleNamespace(state="found")
+        )
+        lines = library_links._model_lines("T", [model], "Symbols", {}, True)
+        assert lines[-1].startswith("⚠️ KiCad finds the file of each 3D model. The annotation")
+        lines = library_links._model_lines("T", [model], "Symbols", {}, False)
+        assert lines[-1] == "✅ KiCad finds the file of each 3D model."

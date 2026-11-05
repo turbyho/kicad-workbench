@@ -57,7 +57,7 @@ Limits:
 import itertools
 import math
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cmp_to_key
 from pathlib import Path
 
@@ -137,6 +137,11 @@ class AnnotationCheck:
 
     errors: list[AnnotationError]
     problems: list[str]  # why the result can be different from KiCad
+    # Each item that is not annotated, and each item with a unit larger than the
+    # unit count. CheckAnnotation gives only the first of them as an error (loop 1
+    # stops).
+    unannotated: list[AnnotationItem] = field(default_factory=list)
+    extra_units: list[AnnotationItem] = field(default_factory=list)
 
 
 # --- The symbols after the load ---------------------------------------------
@@ -669,9 +674,11 @@ def _sort_refs(a: _Ref, b: _Ref) -> int:
 
 def _check(
     refs: list[_Ref], kicad: int, settings: SubpartSettings
-) -> tuple[list[AnnotationError], list[str]]:
-    """``SCH_REFERENCE_LIST::CheckAnnotation``. Return the errors, and a problem
-    when the order of two items of an error is not known."""
+) -> tuple[list[AnnotationError], list[str], tuple[list[AnnotationItem], list[AnnotationItem]]]:
+    """``SCH_REFERENCE_LIST::CheckAnnotation``. Return the errors, a problem when the
+    order of two items of an error is not known, and (each item that is not
+    annotated, each item with a unit larger than the unit count): loop 1 gives only
+    the first of them."""
     for ref in refs:
         ref.item = _item(ref, ref.ref)
     refs = sorted(refs, key=cmp_to_key(_sort_refs))
@@ -685,6 +692,14 @@ def _check(
     }
     for ref in refs:
         ref.split()
+    loop_one = (
+        [ref.item for ref in refs if ref.item is not None and ref.is_new],
+        [
+            ref.item
+            for ref in refs
+            if ref.item is not None and not ref.is_new and max(ref.symbol.unit_count, 1) < ref.unit
+        ],
+    )
     errors: list[AnnotationError] = []
     error_refs: list[_Ref] = []
 
@@ -752,7 +767,7 @@ def _check(
             "reference, value, unit, sheet number and position, and the same UUID or a "
             "UUID that KiCad makes at random): the first item of an error can be different."
         )
-    return errors, problems
+    return errors, problems, loop_one
 
 
 class _Pages:
@@ -790,7 +805,7 @@ def _run(
     project: str,
     settings: SubpartSettings,
     rank: dict[int, int],
-) -> tuple[list[AnnotationError], list[str]]:
+) -> tuple[list[AnnotationError], list[str], tuple[list[AnnotationItem], list[AnnotationItem]]]:
     """Run the load fixes and the check for one order of the paths with an unknown order."""
     problems: list[str] = []
     symbols = {file: [_copy(symbol) for symbol in items] for file, items in loaded.items()}
@@ -819,9 +834,9 @@ def _run(
             if _in_list(symbol, symbol.get_ref(path.kiids), symbols_filter):
                 refs.append(_new_ref(symbol, path, kicad, numbers[id(path)]))
     if not refs:
-        return [], problems
-    errors, check_problems = _check(refs, kicad, settings)
-    return errors, problems + check_problems
+        return [], problems, ([], [])
+    errors, check_problems, loop_one = _check(refs, kicad, settings)
+    return errors, problems + check_problems, loop_one
 
 
 def _merged(groups: list[list[SheetPath]]) -> list[list[SheetPath]]:
@@ -859,12 +874,12 @@ def kicad_major(version: str) -> int:
     release = kicad_release(version)
     major = int(release.name.split(".")[0]) if release is not None else None
     # The rules of kicad-cli 10 change in 10.0.7 (_tops): the patch must be known.
-    if major not in KICAD_VERSIONS or version_triple(version) is None:
+    if major is None or major not in KICAD_VERSIONS or version_triple(version) is None:
         raise ValueError(
             f"The server has no verified rules of the annotation check for KiCad {version}: "
             "only the releases of KiCad 8, 9 and 10."
         )
-    return major  # type: ignore[return-value]
+    return major
 
 
 def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> list[TopLevelSheet]:
@@ -962,7 +977,7 @@ def check_annotation(
         _run(sheet_list, loaded, kicad, view, symbols, project, settings, rank)
         for rank in itertools.islice(_orders(groups), _MAX_ORDERS)
     ]
-    errors, run_problems = results[0]
+    errors, run_problems, loop_one = results[0]
     problems += run_problems
     if total > _MAX_ORDERS or any(result[0] != errors for result in results[1:]):
         names = "; ".join(", ".join(path.shown for path in group) for group in groups)
@@ -972,7 +987,7 @@ def check_annotation(
             f"sheet path, or two texts of one page number): {names}. The errors can be "
             f"different in KiCad.{tried}"
         )
-    return AnnotationCheck(errors, list(dict.fromkeys(problems)))
+    return AnnotationCheck(errors, list(dict.fromkeys(problems)), *loop_one)
 
 
 # --- The markers of the ERC dialog -------------------------------------------

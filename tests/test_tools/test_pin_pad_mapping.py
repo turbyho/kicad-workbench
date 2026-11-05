@@ -1,9 +1,11 @@
 """Tests for utils/pin_pad_mapping.py, parsers/board_netlist.py and the pin and pad tools."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
+from kicad_workbench.parsers.annotation import AnnotationCheck, AnnotationError, AnnotationItem
 from kicad_workbench.parsers.board_netlist import NetlistPin, read_board_netlist
 from kicad_workbench.parsers.symbol_info import SymbolPin
 from kicad_workbench.tools import library as library_tools
@@ -408,6 +410,45 @@ def board(tmp_path, monkeypatch):
     return footprints
 
 
+def _item(reference: str, unit: int = 1) -> AnnotationItem:
+    return AnnotationItem(
+        reference, unit, "", Path("a.kicad_sch"), "/", "/", None, (0, 0), "R", None
+    )
+
+
+class TestAnnotationReferences:
+    def test_changed_references(self):
+        duplicate = AnnotationError(
+            "duplicate_reference", "Duplicate items R1", _item("R1"), _item("r1")
+        )
+        mismatch = AnnotationError("unit_value_mismatch", "x", _item("U1"), _item("U1", 2))
+        check = AnnotationCheck(
+            [duplicate, mismatch],
+            [],
+            # Two items of "C?" share one component; one item of "L?" has its own.
+            unannotated=[_item("C?"), _item("C?", 2), _item("L?")],
+            extra_units=[_item("U5", 3)],
+        )
+        assert library_tools.annotation_references(check) == {"r1", "c?", "u5"}
+
+    def test_result_lines(self):
+        result = library_tools._annotation_result
+        # The errors of a changed symbol keep the result line of the counts.
+        assert result("**Result**: ❌ 1 pin number with no pad", 3, 1, True, True) == (
+            "**Result**: ❌ 1 pin number with no pad; 1 symbol has an annotation error: the "
+            "result of this symbol is not complete."
+        )
+        assert result(None, 3, 2, True, True) == (
+            "**Result**: ⚠️ No error in the 3 other symbols; 2 symbols have an annotation "
+            "error: the result of these symbols is not complete."
+        )
+        assert result(None, 3, 0, True, False).startswith(
+            "**Result**: ⚠️ No error in the 3 symbols;"
+        )
+        assert result(None, 3, 0, True, True) is None  # only units with different values
+        assert result(None, 3, 0, False, True) is None
+
+
 class TestCheckSchematicPinPadMapping:
     async def test_result(self, board):
         out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]))
@@ -465,6 +506,7 @@ class TestCheckSchematicPinPadMapping:
         assert "kicad-cli (KiCad 10.0.6) reports annotation errors in the netlist." in out
         # The schematic of the fixture is not a schematic: the check of the server does not run.
         assert "⚠️ The server cannot list the annotation errors: KiCad cannot load" in out
+        assert "the server does not know the symbols that they change" in out
         assert "❌" not in out.split("**Annotation**")[1]
 
     async def test_annotation_errors_are_listed(self, board):
@@ -485,6 +527,18 @@ class TestCheckSchematicPinPadMapping:
         out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]))
         assert "- duplicate_reference: Duplicate items R1 (sheet /)" in out
         assert "❌" not in out.split("**Annotation**")[1].split("\n\n")[0]
+        # The netlist component R1 can have the pins of the two symbols: its result is
+        # not complete, and it is not a symbol with no error.
+        assert (
+            "; 1 symbol has an annotation error: the result of this symbol is not complete." in out
+        )
+        assert table_rows(section(out, "Symbols with an annotation error (1)")) == [
+            ["R1", "1k", "Lib:Two", "none", "none", "none"]
+        ]
+        assert "Symbols with no error and no warning" not in out
+        out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]), ["R1"])
+        assert "**Result**: ⚠️ 1 symbol has an annotation error: the result of this symbol" in out
+        assert "✅" not in out
 
     async def test_footprint_that_kicad_cannot_load(self, board):
         board["state"]["pads"] = {"Two": None}

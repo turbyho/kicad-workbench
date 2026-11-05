@@ -141,6 +141,23 @@ def schematic_text_version(text: str) -> int:
     return check_schematic_version(header_version(text, "kicad_sch"))
 
 
+def file_text(text: str, version: int | None) -> str:
+    """Return a field value, a pin name or a pin number of a file as KiCad reads it.
+
+    "~" of a file before EMPTY_TEXT_MARKER is an empty text: the parser of KiCad
+    10 reads it as empty (parseSchField, parseProperty, parseSymbolPin). KiCad 8
+    and 9 keep "~" of a pin, but GetShownName and GetShownNumber give an empty
+    text (the netlist uses them). The caller decides where KiCad 8 and 9 keep "~"
+    (for example the (pin "N") that KiCad writes with GetNumber).
+
+    Args:
+        version: The file version, or None when it is not known (the text stays).
+    """
+    if text == "~" and version is not None and version < EMPTY_TEXT_MARKER:
+        return ""
+    return text
+
+
 def is_release_schematic(version: int) -> bool:
     """Return True if a release writes this schematic version, False for a nightly build."""
     return any(release.schematic == version for release in RELEASES)

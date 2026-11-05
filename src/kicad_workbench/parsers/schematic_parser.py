@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..utils.file_handlers import validate_kicad_file
@@ -14,8 +15,8 @@ from .kicad_fields import (
     sheet_fields,
     symbol_fields,
 )
-from .kicad_versions import KicadFileError
-from .lib_symbols import pin_number
+from .kicad_versions import KicadFileError, file_text
+from .lib_symbols import LibrarySymbol, pin_number, sub_symbols, symbol_name
 from .sch_geometry import definition_key as _lib_key
 from .sexpr import Node, parse
 
@@ -191,33 +192,31 @@ def _shown_text(text: str) -> str:
     return "".join(result)
 
 
-_SUB_SYMBOL_UNIT = re.compile(r"_(\d+)_(\d+)$")
-
-
-def _definition_pins(definition: Node) -> list[dict[str, Any]]:
+def _definition_pins(definition: Node, file: Path, version: int) -> list[dict[str, Any]]:
     """Return the pins of a symbol definition, with their unit and body style.
 
-    The pins of a unit are in the sub-symbol "<name>_<unit>_<style>". Unit 0
-    and style 0 are common to all units and styles.
+    The pins of a unit are in the sub-symbol "<name>_<unit>_<style>" (the name
+    rule of lib_symbols.sub_symbols). A pin outside a sub-symbol is in unit 1
+    with body style 1 (parseLibSymbol of KiCad 8, 9 and 10). Unit 0 and style 0
+    are common to all units and styles. A pin with no (number ...) has an empty
+    number. The name and the number are the texts of the netlist (file_text: KiCad
+    8 and 9 give "~" as an empty text with GetShownName and GetShownNumber).
+
+    Raises:
+        KicadFileError: KiCad cannot read the name of a sub-symbol.
     """
-    units = [(definition, 0, 0)]
-    for sub_symbol in definition.children("symbol"):
-        match = _SUB_SYMBOL_UNIT.search(sub_symbol.value(0, ""))
-        unit, style = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
-        units.append((sub_symbol, unit, style))
+    symbol = LibrarySymbol(symbol_name(definition.value(0, "")), definition, file, version)
     pins = []
-    for unit_symbol, unit, style in units:
+    for unit, style, group in [(1, 1, definition), *sub_symbols(symbol)]:
         # (pin <electrical type> <graphic style> ... (name "X") (number "N"))
-        for pin in unit_symbol.children("pin"):
+        for pin in group.children("pin"):
             name = pin.first("name")
             number = pin.first("number")
-            if number is None:
-                continue
             pins.append({
                 "unit": unit,
                 "style": style,
-                "number": pin_number(number.value(0, "")),
-                "name": name.value(0, "") if name else "",
+                "number": pin_number(file_text(number.value(0, "") if number else "", version)),
+                "name": file_text(name.value(0, "") if name else "", version),
                 "electrical_type": pin.value(0, ""),
             })
     return pins
@@ -347,7 +346,12 @@ class SchematicParser:
         for lib_symbols in self._top("lib_symbols"):
             for definition in lib_symbols.children("symbol"):
                 key = definition.value(0, "")
-                pins = _definition_pins(definition)
+                try:
+                    pins = _definition_pins(
+                        definition, Path(self.file_path), self.field_rules.file_version
+                    )
+                except KicadFileError as e:
+                    raise KicadFileError(f"{self.file_path}: {e}") from e
                 self._lib_pins[key] = pins
                 if definition.first("power") is not None:
                     self._power_keys.add(key)
@@ -415,7 +419,9 @@ class SchematicParser:
             lib_pin_data = self._instance_pins(symbol)
             pins = []
             for pin in symbol.children("pin"):
-                pin_num = pin.value(0, "")
+                # The (pin "N") of the file has the number of GetNumber: the netlist
+                # number is file_text, as for the pins of the definition.
+                pin_num = file_text(pin.value(0, ""), self.field_rules.file_version)
                 pin_info = lib_pin_data.get(pin_num, {})
                 pins.append({
                     "number": pin_num,
@@ -596,8 +602,6 @@ class SchematicParser:
         Returns:
             List of matching components
         """
-        import re
-
         regex = re.compile(pattern, re.IGNORECASE)
         results = []
 

@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from functools import cmp_to_key
 
 from .kicad_fields import SYMBOL_FIELD_NAMES
-from .kicad_versions import DECLARED_BODY_STYLES, EMPTY_TEXT_MARKER, KicadFileError
+from .kicad_versions import DECLARED_BODY_STYLES, KicadFileError, file_text
 from .lib_symbols import (
     LibrarySymbol,
     flattened_fields,
@@ -220,11 +220,8 @@ def _body_styles(root: LibrarySymbol, groups: list[tuple[int, int, Node]]) -> li
 
 
 def _text(root: LibrarySymbol, node: Node | None) -> str:
-    """Read the text of a (name ...) or (number ...) of a pin."""
-    text = node.value(0, "") if node is not None else ""
-    if text == "~" and root.version is not None and root.version < EMPTY_TEXT_MARKER:
-        return ""
-    return text
+    """Read the text of a (name ...) or (number ...) of a pin (file_text)."""
+    return file_text(node.value(0, "") if node is not None else "", root.version)
 
 
 def _pin_type(root: LibrarySymbol, text: str | None) -> str:

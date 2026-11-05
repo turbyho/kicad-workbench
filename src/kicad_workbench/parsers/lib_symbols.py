@@ -35,7 +35,7 @@ from pathlib import Path
 from ..utils.kicad_text import read_as_kicad
 from .bus_names import unescape_string
 from .kicad_fields import SYMBOL_FIELD_NAMES
-from .kicad_versions import EMPTY_TEXT_MARKER, KicadFileError, header_version
+from .kicad_versions import KicadFileError, file_text, header_version
 from .sexpr import Node, edited, parse, property_atoms, quote
 
 _FLAGS = ("exclude_from_sim", "in_bom", "on_board", "in_pos_files")
@@ -262,8 +262,7 @@ def _fields(symbol: LibrarySymbol, kicad: int) -> list[_Field]:
             continue
         name = atoms[0].value
         value = atoms[1].value if len(atoms) > 1 else ""
-        if value == "~" and symbol.version is not None and symbol.version < EMPTY_TEXT_MARKER:
-            value = ""
+        value = file_text(value, symbol.version)
         mandatory = _mandatory_name(name)
         id_node = prop.first("id")
         if id_node is not None:
@@ -621,6 +620,10 @@ def library_pins(
     body styles) or its own body style (SCH_SYMBOL::UpdatePins). A pin
     outside a sub-symbol is in unit 1 with body style 1. A unit shows its own
     pins and the pins of unit 0 (SCH_SYMBOL::GetPins).
+
+    The number is the number of the file (GetNumber): KiCad writes it in the
+    (pin "N") of a placed symbol, also "~" in a file before 20250318. file_text
+    gives the number of the netlist.
 
     Args:
         symbol: The (symbol ...) of a flattened symbol.

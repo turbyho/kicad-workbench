@@ -24,7 +24,10 @@ _LEADING_INT = re.compile(r"\s*[+-]?\d+")
 @dataclass(frozen=True)
 class NetlistPin:
     number: str
-    function: str  # The pin name, or "<name>_<number>" for a stacked pin.
+    # The (pinfunction ...) of the node: the pin name in KiCad 8 and 9; in KiCad 10
+    # "<name>_<number>", or the number of a stacked pin with no name
+    # (NETLIST_EXPORTER_XML). "" for a pin with no name.
+    function: str
     type: str  # The electrical type, for example "passive".
 
 

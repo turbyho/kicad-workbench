@@ -1,7 +1,10 @@
 """Tests for the text parser of KiCad schematics on the S-expression parser."""
 
+from pathlib import Path
+
 import pytest
 
+from kicad_workbench.parsers.kicad_versions import KicadFileError, file_text
 from kicad_workbench.parsers.schematic_parser import (
     SchematicParser,
     _definition_pins,
@@ -268,7 +271,65 @@ def test_pins_of_the_unit_and_of_the_body_style(units):
     }
 
 
+def definition_pins(text: str, version: int = 20260306) -> list[tuple]:
+    pins = _definition_pins(parse(text), Path("a.kicad_sch"), version)
+    return [(p["unit"], p["style"], p["number"], p["name"]) for p in pins]
+
+
 def test_pin_number_of_a_definition_has_no_spaces():
     # SCH_PIN::SetNumber replaces each space with "_".
-    definition = parse('(symbol "Lib:U" (symbol "U_1_1" (pin input line (number "A 1"))))')
-    assert [pin["number"] for pin in _definition_pins(definition)] == ["A_1"]
+    text = '(symbol "Lib:U" (symbol "U_1_1" (pin input line (number "A 1"))))'
+    assert definition_pins(text) == [(1, 1, "A_1", "")]
+
+
+@pytest.mark.parametrize("version, text", [(20250114, ""), (20250318, "~"), (20260306, "~")])
+def test_tilde_pin_texts(version, text):
+    # Before 20250318 "~" is an empty name or number: the parser of KiCad 10, and
+    # GetShownName and GetShownNumber of KiCad 8 and 9 (the netlist).
+    definition = '(symbol "Lib:U" (symbol "U_1_1" (pin input line (name "~") (number "~"))))'
+    assert definition_pins(definition, version) == [(1, 1, text, text)]
+
+
+def test_pins_outside_a_sub_symbol_and_with_no_number():
+    # parseLibSymbol: a pin outside a sub-symbol is in unit 1 with body style 1.
+    # A pin with no (number ...) has an empty number.
+    text = (
+        '(symbol "Lib:U" (pin input line (number "1"))'
+        ' (symbol "U_0_1" (pin input line (number "2")))'
+        ' (symbol "U_2_1" (pin input line (name "X"))))'
+    )
+    assert definition_pins(text) == [(1, 1, "1", ""), (0, 1, "2", ""), (2, 1, "", "X")]
+
+
+def test_sub_symbol_name_that_kicad_cannot_read():
+    text = '(symbol "Lib:U" (symbol "Other_1_1" (pin input line (number "1"))))'
+    with pytest.raises(KicadFileError, match="must be"):
+        definition_pins(text)
+
+
+def test_tilde_pin_of_a_placed_symbol(tmp_path):
+    # KiCad 9 writes (pin "~") with GetNumber; the netlist number is "" (GetShownNumber).
+    path = tmp_path / "a.kicad_sch"
+    path.write_text(
+        '(kicad_sch (version 20250114) (generator "eeschema") (uuid "a0")\n'
+        '  (lib_symbols (symbol "Lib:U" (symbol "U_1_1"'
+        ' (pin input line (name "IN") (number "~")))))\n'
+        '  (symbol (lib_id "Lib:U") (at 0 0 0) (unit 1)\n'
+        '    (property "Reference" "U1" (at 0 0 0)) (property "Value" "U" (at 0 0 0))\n'
+        '    (pin "~" (uuid "p1"))))\n',
+        encoding="utf-8",
+    )
+    (component,) = SchematicParser(str(path)).get_components()
+    assert [(p["number"], p["name"], p["electrical_type"]) for p in component.pins] == [
+        ("", "IN", "input")
+    ]
+
+
+@pytest.mark.parametrize(
+    "text, version, expected",
+    [("~", 20250114, ""), ("~", 20250318, "~"), ("~", None, "~"), ("x", 20231120, "x")],
+)
+def test_file_text(text, version, expected):
+    # "~" of a file before EMPTY_TEXT_MARKER is an empty text; an unknown version
+    # keeps the text.
+    assert file_text(text, version) == expected

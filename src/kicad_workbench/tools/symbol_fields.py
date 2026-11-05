@@ -44,6 +44,7 @@ from ..parsers.kicad_versions import (
     SCHEMATIC_FIELD_FLAGS,
     SCHEMATIC_VARIANTS,
     KicadFileError,
+    file_text,
 )
 from ..parsers.sch_geometry import (
     IU_PER_MIL,
@@ -124,8 +125,7 @@ def _field_text(prop: Node, version: int) -> str:
     """Return the text of a field: "~" is empty only in a file older than
     EMPTY_TEXT_MARKER (parseSchField)."""
     field = property_field(prop)
-    text = field[1] if field else ""
-    return "" if text == "~" and version < EMPTY_TEXT_MARKER else text
+    return file_text(field[1] if field else "", version)
 
 
 def default_text_size(project: Path, kicad: str | None) -> float:

@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .annotation import split_reference
-from .kicad_versions import EMPTY_TEXT_MARKER
+from .kicad_versions import file_text
 from .sch_instances import placed_instances
 from .sexpr import Node, property_field
 from .symbol_info import letter_reference
@@ -125,14 +125,11 @@ def _symbol_fields(symbol: Node, value: str, version: int) -> dict[str, str]:
         also from the (value ...) of an instance.
     """
 
-    def text(value: str) -> str:
-        return "" if value == "~" and version < EMPTY_TEXT_MARKER else value
-
     fields = {"Value": value}
     for prop in symbol.children("property"):
         field = property_field(prop)
         if field is not None and (is_mpn_field(field[0]) or is_confirmed_field(field[0])):
-            fields.setdefault(field[0], text(field[1]))
+            fields.setdefault(field[0], file_text(field[1], version))
     return fields
 
 

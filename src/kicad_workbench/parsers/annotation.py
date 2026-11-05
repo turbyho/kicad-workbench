@@ -81,7 +81,7 @@ from ..utils.schematic_settings import (
     unknown_severity_reason,
 )
 from .kicad_fields import symbol_field_nodes
-from .kicad_versions import EMPTY_TEXT_MARKER, kicad_release, version_triple
+from .kicad_versions import file_text, kicad_release, version_triple
 from .lib_symbols import SUB_SYMBOL, unit_count
 from .sch_geometry import IU_PER_MM, Point, definition_key, node_point, placed_symbols
 from .sexpr import Node
@@ -297,9 +297,6 @@ def _load_symbol(screen: Screen, node: Node, kicad: int) -> _Symbol:
         [],
     )
 
-    def text(value: str) -> str:
-        return "" if value == "~" and screen.version < EMPTY_TEXT_MARKER else value
-
     fields = symbol_field_nodes(node, screen.rules)
     events: list[tuple[int, str, object]] = []
     if "Reference" in fields:
@@ -314,10 +311,10 @@ def _load_symbol(screen: Screen, node: Node, kicad: int) -> _Symbol:
                 events.append((path.start, "path", (project.value(0, ""), path)))
     for _start, kind, data in sorted(events, key=lambda e: e[0]):
         if kind == "reference":
-            symbol.reference_field = text(str(data))
+            symbol.reference_field = file_text(str(data), screen.version)
             symbol.prefix = _update_prefix(symbol.reference_field) or symbol.prefix
         elif kind == "value":
-            symbol.value = text(str(data))
+            symbol.value = file_text(str(data), screen.version)
         elif kind == "unit":
             symbol.unit = int(data)  # type: ignore[call-overload]
         else:
@@ -332,7 +329,7 @@ def _load_symbol(screen: Screen, node: Node, kicad: int) -> _Symbol:
                     # KiCad 10 reads "~" of a file before EMPTY_TEXT_MARKER as empty;
                     # KiCad 8 and 9 keep it (SetValueFieldText).
                     value = item.value(0, "")
-                    symbol.value = text(value) if kicad >= 10 else value
+                    symbol.value = file_text(value, screen.version) if kicad >= 10 else value
                 if kicad <= 9:
                     symbol.add_instance(replace(instance))
             if kicad >= 10:

@@ -1,5 +1,6 @@
 [build-system]
-requires = ["hatchling"]
+# only-include of the sdist needs hatchling 1.4.0 or later.
+requires = ["hatchling>=1.4.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -46,6 +47,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
+    # tests/test_build_content.py builds the sdist and the wheel.
+    "hatchling>=1.4.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
@@ -81,6 +84,25 @@ path = "src/kicad_workbench/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kicad_workbench"]
+
+# The sdist has only the files of this list. The repository also has private files
+# (plans/, spike/, CLAUDE.md, docs/kicad-ipc/ and the other paths of
+# .git/github-ignore), and these must not go to PyPI. tests/test_build_content.py
+# builds the sdist and the wheel and does a check of their files.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src",
+    "tests",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "requirements-test.txt",
+    ".env.example",
+]
+exclude = ["docs/kicad-ipc"]
 
 [tool.black]
 line-length = 100

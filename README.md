@@ -131,7 +131,7 @@ The server tells the agent about a newer release on PyPI, and about an upgrade w
 - **Newer release**: when the server starts, a background thread gets the newest version from PyPI. When the last request that succeeded is younger than 24 hours, the server sends no request. The tools read only the stored result, thus no tool waits for the network.
 - **Restart**: the installed package has a different version than the running server. The MCP client starts the server, thus a restart of the client starts the new code.
 
-To stop the request to PyPI, set the environment variable `KICAD_WORKBENCH_NO_UPDATE_CHECK=1` in the MCP configuration of the server. An editable install (`pip install -e`) gets no notices.
+To stop the request to PyPI, set the environment variable `KICAD_WORKBENCH_NO_UPDATE_CHECK=1` in the MCP configuration of the server. An editable install (`pip install -e`) and a source tree in `PYTHONPATH` get no notices. A defect of the check does not stop a tool or the server: the agent gets the line "The version check of kicad-workbench failed (...)" one time for each different defect, and the log gets the details. A cache directory that the server cannot write is such a defect: the server then sends a request at each start.
 
 ## Usage
 

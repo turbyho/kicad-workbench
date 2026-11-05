@@ -19,24 +19,31 @@ installed code (the method of datasheet-lens and fw-context-mcp).
 The network check is on by default. A value in DISABLE_ENV stops it. An
 editable install (PEP 610 direct_url.json) gets no check: its metadata does not
 follow the source tree, and a comparison with PyPI can report a release that
-the source tree has already. A server with no package metadata (a source tree
-in PYTHONPATH) gets no check: it has no installed version to compare.
+the source tree has already. A process with no package metadata, or a source
+tree in PYTHONPATH in front of an installed package, gets no check: the
+metadata does not tell about the code that runs.
 
 VersionNotes adds the notes to the result of each tool, each note one time for
-each server process. After a note, the server does not do its check again.
+each server process. A defect of a part of the check does not stop a tool or
+the start of the server, and does not stop the other parts: the log gets a
+warning, and the agent gets one note for each part.
 """
 
 from __future__ import annotations
 
 import asyncio
+import http.client
 import importlib.metadata
 import json
 import logging
 import os
 import threading
+import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TypeVar
 
 import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -56,10 +63,14 @@ DISABLE_ENV = "KICAD_WORKBENCH_NO_UPDATE_CHECK"
 CHECK_INTERVAL = timedelta(hours=24)
 TIMEOUT = 5.0
 STATE_FILE = "update_check.json"
-# The errors of a request to PyPI: no network or an HTTP error (OSError), a
-# document that is not JSON or has no valid version (ValueError, KeyError,
-# TypeError), a cache directory that is not writable (OSError).
-_REQUEST_ERRORS = (OSError, ValueError, KeyError, TypeError)
+
+T = TypeVar("T")
+
+
+class RequestError(Exception):
+    """The request to PyPI failed: no network, an HTTP error, a connection that
+    stopped in the answer, or an answer with no valid version. A fact about the
+    network, not a defect: it goes to the debug log only."""
 
 
 def installed_version() -> str | None:
@@ -69,6 +80,23 @@ def installed_version() -> str | None:
         return importlib.metadata.version(DISTRIBUTION)
     except importlib.metadata.PackageNotFoundError:
         return None
+
+
+def runs_installed_code() -> bool:
+    """True when the metadata on sys.path belongs to the code that runs: its
+    package folder is the folder of this module. A source tree in PYTHONPATH
+    can run in front of an installed package: then the metadata tells about a
+    different version, and the check does not apply."""
+    try:
+        distribution = importlib.metadata.distribution(DISTRIBUTION)
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    try:
+        return os.path.samefile(str(distribution.locate_file(__package__)), Path(__file__).parent)
+    # The folder of the metadata does not exist (an editable install), the code is in
+    # a zip file, or the distribution has no files on disk (NotImplementedError).
+    except (OSError, NotImplementedError):
+        return False
 
 
 def _same_version(a: str, b: str) -> bool:
@@ -84,7 +112,12 @@ def restart_reason(running: str = __version__) -> str | None:
     installed version is not the version that this process loaded. Not for an
     editable install: its metadata does not follow the source tree."""
     installed = installed_version()
-    if installed is None or _same_version(installed, running) or is_editable_install() is not False:
+    if (
+        installed is None
+        or _same_version(installed, running)
+        or is_editable_install() is not False
+        or not runs_installed_code()
+    ):
         return None
     return (
         f"The installed kicad-workbench is {installed}, but this MCP server runs {running}, "
@@ -96,11 +129,11 @@ def restart_reason(running: str = __version__) -> str | None:
 def is_editable_install() -> bool | None:
     """True for an editable install (PEP 610). None when the install type is not
     known (no check): the package has no metadata, or direct_url.json is not
-    JSON. The function reads the metadata at each call: the user can change the
-    install while the server runs."""
+    UTF-8 or not JSON. The function reads the metadata at each call: the user
+    can change the install while the server runs."""
     try:
         text = importlib.metadata.distribution(DISTRIBUTION).read_text("direct_url.json")
-    except importlib.metadata.PackageNotFoundError:
+    except (importlib.metadata.PackageNotFoundError, UnicodeDecodeError):
         return None
     if text is None:
         return False
@@ -114,10 +147,10 @@ def is_editable_install() -> bool | None:
 
 def check_enabled() -> bool:
     """True when the user lets kicad-workbench ask PyPI, and the install is from
-    an index (not editable, with metadata)."""
+    an index (not editable, with metadata, and its code runs)."""
     if os.environ.get(DISABLE_ENV, "") not in ("", "0"):
         return False
-    return is_editable_install() is False
+    return is_editable_install() is False and runs_installed_code()
 
 
 def state_path() -> Path:
@@ -132,41 +165,53 @@ def read_state() -> tuple[datetime, str] | None:
         checked = datetime.fromisoformat(data["checked_at"])
         latest = str(data["latest"])
         Version(latest)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, RecursionError, KeyError, TypeError):
         return None
     return (checked, latest) if checked.tzinfo is not None else None
 
 
 def refresh_latest_version(now: datetime | None = None) -> None:
     """Ask PyPI for the newest version and write it into the state file. No
-    request when the stored result is younger than CHECK_INTERVAL. The errors
-    go to the caller."""
+    request when the stored result is younger than CHECK_INTERVAL. A failed
+    request gives RequestError. A different error is a defect."""
     current = now or datetime.now(timezone.utc)
     state = read_state()
     # A time in the future (a clock that moved back) does not stop the check.
     if state is not None and timedelta(0) <= current - state[0] < CHECK_INTERVAL:
         return
     request = urllib.request.Request(PYPI_URL, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        latest = str(json.loads(response.read().decode("utf-8"))["info"]["version"])
-    Version(latest)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            body = response.read()
+    except urllib.error.HTTPError as e:  # it holds the open answer
+        e.close()
+        raise RequestError(f"PyPI gave HTTP {e.code}") from e
+    # No network, a stop in the answer, a proxy variable that is not a URL (ValueError).
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        raise RequestError(f"no answer from PyPI: {e}") from e
+    try:
+        latest = str(json.loads(body.decode("utf-8"))["info"]["version"])
+        Version(latest)
+    # Not UTF-8 or JSON, too deep for the parser, no "info", InvalidVersion.
+    except (ValueError, RecursionError, KeyError, TypeError) as e:
+        raise RequestError(f"PyPI gave no valid version: {e}") from e
+    # An error of the write is a defect of this machine, not of the network.
     write_atomic(state_path(), json.dumps({"checked_at": current.isoformat(), "latest": latest}))
 
 
 def _refresh_in_background() -> None:
     """A failed request is a fact about the network: it goes to the debug log,
-    never into a tool answer. A different error is a defect: the thread stops
-    with it, and threading.excepthook writes it to stderr (the log of the
-    client)."""
+    never into a tool answer. A different error is a defect: the log and a note
+    tell it."""
     try:
         refresh_latest_version()
-    except _REQUEST_ERRORS:
+    except RequestError:
         log.debug("update check failed", exc_info=True)
+    except Exception as error:  # a defect: the log and a note tell it
+        _record("request", error)
 
 
-def start_update_check() -> threading.Thread | None:
-    """Start the background request to PyPI when the check applies. The thread
-    never keeps the process alive (daemon)."""
+def _start() -> threading.Thread | None:
     if not check_enabled():
         return None
     thread = threading.Thread(
@@ -174,6 +219,13 @@ def start_update_check() -> threading.Thread | None:
     )
     thread.start()
     return thread
+
+
+def start_update_check() -> threading.Thread | None:
+    """Start the background request to PyPI when the check applies. The thread
+    never keeps the process alive (daemon). A defect does not stop the start of
+    the server: the log and a note tell it."""
+    return _checked("start", _start)
 
 
 def newer_release() -> tuple[str, str] | None:
@@ -191,42 +243,75 @@ def newer_release() -> tuple[str, str] | None:
     return (state[1], installed) if newer else None
 
 
-_told: set[str] = set()  # the kinds of note that this server process gave already
-_told_lock = threading.Lock()
+# The texts of the notes that this MCP server process gave already. A new text,
+# for example of a newer release, gives a new note.
+_told: set[str] = set()
+# Check name -> the text of its first defect. A later defect of the check gives no
+# note: a text that changes at each call gives one note only.
+_defects: dict[str, str] = {}
+# The MCP server runs the tools in more threads, and the request in one more.
+_lock = threading.Lock()
 
 
-def _once(notes: list[tuple[str, str]]) -> list[str]:
-    """The texts of the notes of a kind that this process did not give."""
-    with _told_lock:
-        new = [(kind, text) for kind, text in notes if kind not in _told]
-        _told.update(kind for kind, _text in new)
-    return [text for _kind, text in new]
+def _record(check: str, error: Exception) -> None:
+    """Keep the first defect of a check for its note and log it as a warning. A
+    later defect of the check goes to the debug log: a text that changes at each
+    call does not fill the log."""
+    with _lock:
+        first = check not in _defects
+        if first:
+            _defects[check] = f"{type(error).__name__}: {error}"
+    if first:
+        log.warning("version check %s failed", check, exc_info=error)
+    else:
+        log.debug("version check %s failed again", check, exc_info=error)
+
+
+def _checked(check: str, function: Callable[[], T]) -> T | None:
+    """The result of function(), or None after a defect (an exception that is not
+    an expected condition of the check). The log and the note of _defect_notes
+    tell the defect. Each check has its own guard: a defect of one check does not
+    stop the other checks."""
+    try:
+        return function()
+    except Exception as error:  # a defect: the log and a note tell it
+        _record(check, error)
+        return None
+
+
+def _defect_notes() -> list[str]:
+    """One note for each different first defect of the checks. Two checks with the
+    same defect (for example of check_enabled) give one note."""
+    with _lock:
+        texts = dict.fromkeys(_defects.values())
+    return [
+        f"⚠️ The version check of kicad-workbench failed ({text}). The result of the tool "
+        "is complete. Tell the user one time in this session."
+        for text in texts
+    ]
 
 
 def version_notes() -> list[str]:
-    """The lines for the LLM: a restart of the client, or a newer release. Each
-    kind of note one time for each server process: the agent tells the user one
-    time. After a note of a kind, the function does not do its check again."""
-    with _told_lock:
-        pending = {"restart", "release"} - _told
+    """The lines for the LLM: a restart of the client, a newer release, or a
+    defect of the check. Each note one time for each server process: the agent
+    tells the user one time."""
     notes = []
-    if "restart" in pending:
-        reason = restart_reason()
-        if reason:
-            notes.append(("restart", f"⚠️ {reason}"))
-    if "release" in pending:
-        found = newer_release()
-        if found:
-            notes.append(
-                (
-                    "release",
-                    f"ℹ️ kicad-workbench {found[0]} is available on PyPI, and this machine has "
-                    f"{found[1]}. Tell the user one time in this session. Do not upgrade it "
-                    "yourself: the user upgrades it with the tool that installed it, then "
-                    "restarts the LLM client.",
-                )
-            )
-    return _once(notes)
+    reason = _checked("restart", restart_reason)
+    if reason:
+        notes.append(f"⚠️ {reason}")
+    found = _checked("release", newer_release)
+    if found:
+        notes.append(
+            f"ℹ️ kicad-workbench {found[0]} is available on PyPI, and this machine has "
+            f"{found[1]}. Tell the user one time in this session. Do not upgrade it "
+            "yourself: the user upgrades it with the tool that installed it, then restarts "
+            "the LLM client."
+        )
+    notes += _defect_notes()
+    with _lock:
+        new = [n for n in notes if n not in _told]
+        _told.update(new)
+    return new
 
 
 def add_notes(result: ToolResult, notes: list[str]) -> ToolResult:
@@ -271,20 +356,12 @@ class VersionNotes(Middleware):
             # different request.
             return result
         try:
-            # version_notes reads the package metadata and the state file.
-            notes = await asyncio.to_thread(version_notes)
-        except Exception as error:
-            # A defect of the check must not stop the tool: the tool result is
-            # complete. The log and the note tell the user about the defect.
-            log.warning("release check failed", exc_info=True)
-            notes = _once(
-                [
-                    (
-                        "error",
-                        f"⚠️ The release check of kicad-workbench failed "
-                        f"({type(error).__name__}: {error}). The result of the tool is "
-                        "complete. Tell the user one time in this session.",
-                    )
-                ]
-            )
-        return add_notes(result, notes)
+            # version_notes reads the package metadata and the state file (about
+            # 0.4 ms). Each part of the check has its own guard (_checked).
+            return add_notes(result, await asyncio.to_thread(version_notes))
+        except Exception:
+            # A defect when the notes go into the result: the result of the tool
+            # is complete, thus it goes to the client with no notes. The log tells
+            # the defect.
+            log.warning("version notes failed", exc_info=True)
+            return result

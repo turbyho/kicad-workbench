@@ -29,8 +29,6 @@ The rules of KiCad for the lines of the BOM:
 """
 
 import asyncio
-import csv
-import io
 import json
 import os
 import re
@@ -40,17 +38,24 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..parsers.kicad_versions import KICAD8, KICAD9, KICAD10, KicadFileError, kicad_release
+from ..parsers.kicad_versions import KicadFileError
 from ..parsers.sexpr import SExprError
 from ..parsers.unit_fields import unit_conflicts
 from ..server import mcp
-from ..utils.kicad_cli import CliExport, export_with_kicad_cli, get_kicad_version
+from ..utils.kicad_bom import (
+    bom_args,
+    bom_rules,
+    export_bom_file,
+    other_variants,
+    unit_check_lines,
+    variant_label,
+)
+from ..utils.kicad_cli import CliExport, get_kicad_version
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.variants import variant_names
 from .library import NO_KICAD_CLI, cell, netlist_root
 
-_BOM_TIMEOUT = 300
 DEFAULT_FIELDS = ("Reference", "Value", "Footprint", "Datasheet", "${QUANTITY}", "${DNP}", "*")
 # IsGeneratedField of KiCad: a field name that is one text variable.
 _GENERATED = re.compile(r"\$\{\w*\}")
@@ -86,40 +91,6 @@ class BomFields:
 
     def grouped(self, name: str) -> bool:
         return any(f.name == name and f.group for f in self.before + self.after)
-
-
-def bom_rules(kicad: str) -> int:
-    """Return the major version of the BOM rules of the installed KiCad: 8, 9 or 10.
-
-    Raises:
-        ValueError: The server has no BOM rules for the version. JobExportBom of
-            the nightly builds 10.99 (branch master, 2026-11-04) reads --group-by
-            with other rules: it adds a field that --fields does not name.
-    """
-    release = kicad_release(kicad)
-    for known, major in ((KICAD8, 8), (KICAD9, 9), (KICAD10, 10)):
-        if release is known:
-            return major
-    raise ValueError(
-        f"The installed KiCad is {kicad}. This server knows the BOM rules of kicad-cli of "
-        "KiCad 8.0, 9.0 and 10.0."
-    )
-
-
-def _check_names(names: list[str], what: str) -> None:
-    """Refuse the field names that kicad-cli cannot get.
-
-    kicad-cli splits the lists of --fields and --group-by at each comma
-    (SCH_EXPORT_BOM_COMMAND::convertStringList).
-    """
-    for name in names:
-        if not name:
-            raise ValueError(f"An item of {what} is empty.")
-        if "," in name:
-            raise ValueError(
-                f"The field name {name!r} of {what} has a comma. kicad-cli splits the "
-                "list of fields at each comma, thus it cannot export this field."
-            )
 
 
 def _field(raw: str, group_by: list[str], major: int) -> BomField:
@@ -183,49 +154,6 @@ def bom_fields(fields: list[str], group_by: list[str], major: int) -> BomFields:
                 "A field that '*' adds does not group the symbols. Add the field to fields."
             )
     return BomFields(before, after, star)
-
-
-def bom_args(fields: list[str], group_by: list[str], exclude_dnp: bool, variant: str) -> list[str]:
-    """Return the options of kicad-cli sch export bom for the tool arguments.
-
-    The tool gives no labels: the label of a column is then the name of its
-    field, and the name with no "${}" for a generated field.
-
-    Raises:
-        ValueError: kicad-cli cannot do the export that the arguments ask for.
-    """
-    if not fields:
-        raise ValueError("fields is empty. Give the fields of the BOM, or no fields.")
-    _check_names(fields, "fields")
-    _check_names(group_by, "group_by")
-    args = ["--fields", ",".join(fields)]
-    if group_by:
-        args += ["--group-by", ",".join(group_by)]
-    if exclude_dnp:
-        args.append("--exclude-dnp")
-    if variant:
-        args += ["--variant", variant]
-    return args
-
-
-def read_bom(data: bytes) -> list[list[str]]:
-    """Read the CSV file of kicad-cli: the header line, then one list for each line.
-
-    kicad-cli writes UTF-8 (wxFile::Write with wxConvAuto), a comma between
-    the values and each value between double quotes
-    (FIELDS_EDITOR_GRID_DATA_MODEL::Export with the default options).
-
-    Raises:
-        ValueError: The file is not UTF-8, or it has no header line.
-    """
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise ValueError(f"The BOM of kicad-cli is not UTF-8: {e}") from e
-    rows = list(csv.reader(io.StringIO(text, newline="")))
-    if not rows:
-        raise ValueError("The BOM of kicad-cli has no header line.")
-    return rows
 
 
 def field_columns(header: list[str], fields: BomFields) -> dict[str, int] | None:
@@ -348,22 +276,7 @@ def _unit_check(project: Path, variants: list[str]) -> list[str]:
     except (OSError, KiCadEncodingError, SExprError, KicadFileError, ValueError) as e:
         # The BOM of kicad-cli is correct: only this check did not run.
         return [f"⚠️ The tool could not compare the fields of the units of the symbols: {e}"]
-    lines_out = []
-    if conflicts:
-        lines_out += [
-            "❌ ERROR IN THE DESIGN: the units of one package have different fields. One "
-            "package has one Value and one MPN. Correct the fields in KiCad. The line of "
-            'the package in the BOM joins the values: KiCad 9 and 10 write "A,B", which '
-            'looks like an MPN and its alternative, and KiCad 8 writes "-- mixed values --".',
-            *(f"- {conflict.text()}" for conflict in conflicts),
-            "",
-        ]
-    if problems:
-        lines_out.append(
-            "⚠️ The compare of the fields of the units did not read each sheet: "
-            + " ".join(problems)
-        )
-    return lines_out
+    return unit_check_lines(conflicts, problems)
 
 
 def _bom_text(
@@ -501,20 +414,13 @@ async def _export_all_variants(
     for variant, target in targets:
         args = bom_args(names, group_by, exclude_dnp, variant)
         try:
-            export = await asyncio.to_thread(
-                export_with_kicad_cli,
-                ["sch", "export", "bom", *args],
-                root,
-                "bom.csv",
-                _BOM_TIMEOUT,
-            )
+            export, rows = await asyncio.to_thread(export_bom_file, root, args)
         except RuntimeError as e:
-            name = f"the variant {variant!r}" if variant else "the default variant"
             return (
-                f"❌ kicad-cli did not write the BOM of {name} of {root}: {str(e).rstrip('.')}. "
-                "The tool changed no file."
+                f"❌ kicad-cli did not write the BOM of {variant_label(variant)} of {root}: "
+                f"{str(e).rstrip('.')}. The tool changed no file."
             )
-        results.append((variant, target, export, read_bom(export.data)))
+        results.append((variant, target, export, rows))
     try:
         replaced = await asyncio.to_thread(
             _write_set, [(target, export.data) for _variant, target, export, _rows in results]
@@ -598,10 +504,7 @@ async def _export_bom(
             return f"❌ The variants of the project {project} cannot be read: {e}"
         if all_variants:
             output = _resolve_output(output_path, project)
-            # An empty name is the default variant (SCHEMATIC::SetCurrentVariant). KiCad
-            # does not let the user give it ("Variant name cannot be empty.",
-            # DIALOG_SYMBOL_FIELDS_TABLE), but a file that a person edits can have it.
-            variants = sorted(name for name in known if name)
+            variants = other_variants(known)
             return await _export_all_variants(
                 root, project, kicad, names, group_by or [], exclude_dnp, columns, output, variants
             )
@@ -614,12 +517,9 @@ async def _export_bom(
             )
     output = _resolve_output(output_path, project) if output_path else None
     try:
-        export = await asyncio.to_thread(
-            export_with_kicad_cli, ["sch", "export", "bom", *args], root, "bom.csv", _BOM_TIMEOUT
-        )
+        export, rows = await asyncio.to_thread(export_bom_file, root, args)
     except RuntimeError as e:
         return f"❌ kicad-cli did not write the BOM of {root}: {e}"
-    rows = read_bom(export.data)
     replaced = False
     if output is not None:
         replaced = output.exists()
@@ -653,7 +553,7 @@ async def export_bom(
     symbols that are excluded from the BOM into the BOM.
 
     The units of one package (one reference, U1A and U1B) must have the same
-    Value and the same MPN. When they do not, the output starts with an error
+    Value, MPN and Value_Confirmed. When they do not, the output starts with an error
     of the design: the BOM line of the package joins the values, and the
     joined MPNs look like an MPN and its alternative. Tell the user, and
     correct the fields in KiCad.

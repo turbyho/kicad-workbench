@@ -12,6 +12,7 @@ import unicodedata
 import pytest
 
 from kicad_workbench.tools import bom
+from kicad_workbench.utils import kicad_bom
 from kicad_workbench.utils import kicad_cli as kicad_cli_module
 from kicad_workbench.utils.variants import variant_names
 
@@ -72,7 +73,7 @@ def project(tmp_path, monkeypatch):
 
 class TestBomArgs:
     def test_fields_and_options(self):
-        args = bom.bom_args(["Reference", "${DNP}"], ["Value"], True, "Lite")
+        args = kicad_bom.bom_args(["Reference", "${DNP}"], ["Value"], True, "Lite")
         assert args == [
             "--fields",
             "Reference,${DNP}",
@@ -94,21 +95,21 @@ class TestBomArgs:
     )
     def test_refused(self, fields, group_by, text):
         with pytest.raises(ValueError, match=text):
-            bom.bom_args(fields, group_by, False, "")
+            kicad_bom.bom_args(fields, group_by, False, "")
 
 
 class TestReadBom:
     def test_quotes_and_commas(self):
-        rows = bom.read_bom(CSV.encode())
+        rows = kicad_bom.read_bom(CSV.encode())
         assert rows[1] == ["R1", "10k", 'RC0603, "A"', "DNP"]
 
     def test_not_utf8(self):
         with pytest.raises(ValueError, match="not UTF-8"):
-            bom.read_bom(b'"R1","\xff"\n')
+            kicad_bom.read_bom(b'"R1","\xff"\n')
 
     def test_empty(self):
         with pytest.raises(ValueError, match="no header line"):
-            bom.read_bom(b"")
+            kicad_bom.read_bom(b"")
 
 
 class TestBomFields:
@@ -182,12 +183,12 @@ class TestColumns:
 class TestBomRules:
     @pytest.mark.parametrize(("kicad", "major"), [("8.0.9", 8), ("9.0.9", 9), ("10.0.6", 10)])
     def test_known(self, kicad, major):
-        assert bom.bom_rules(kicad) == major
+        assert kicad_bom.bom_rules(kicad) == major
 
     @pytest.mark.parametrize("kicad", ["10.99.0", "11.0.0", "7.0.11"])
     def test_unknown(self, kicad):
         with pytest.raises(ValueError, match="knows the BOM rules"):
-            bom.bom_rules(kicad)
+            kicad_bom.bom_rules(kicad)
 
 
 class TestVariantNames:

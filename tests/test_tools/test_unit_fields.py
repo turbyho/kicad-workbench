@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from kicad_workbench.parsers.unit_fields import is_mpn_field, unit_conflicts
+from kicad_workbench.parsers.unit_fields import (
+    is_confirmed_field,
+    is_mpn_field,
+    unit_conflicts,
+    variant_unit_conflicts,
+)
 
 VERSION = "20260306"  # KiCad 10: the variants
 
@@ -118,6 +123,24 @@ class TestUnitConflicts:
             "U5: MPN: A = 'P1', B = 'P2'",
             "U6: MPN: A = 'P1', B = 'P2'",
         ]
+
+    def test_value_confirmed(self, tmp_path):
+        """Value_Confirmed is the confirmed copy of Value: the BOM line joins it too."""
+        assert is_confirmed_field("value confirmed") and not is_confirmed_field("Value")
+        symbols = symbol("U1", 1, "/r", mpn_name="Value_Confirmed", mpn="LM324")
+        symbols += symbol("U1", 2, "/r", mpn_name="Value_Confirmed", mpn="LM324 (LM324DR)")
+        assert texts(write_project(tmp_path, symbols)) == [
+            "U1: Value_Confirmed: A = 'LM324', B = 'LM324 (LM324DR)'"
+        ]
+
+    def test_variant_that_repairs_a_conflict(self, tmp_path):
+        """variant_unit_conflicts gives the full set of each variant: a variant can
+        make the fields of the units equal."""
+        lite = '(variant (name "Lite") (field (name "MPN") (value "B")))'
+        symbols = symbol("U2", 1, "/r", mpn="A", variants=lite) + symbol("U2", 2, "/r", mpn="B")
+        check = variant_unit_conflicts(write_project(tmp_path, symbols), ["Lite"])
+        assert (check.hierarchy, check.duplicates, check.conflicts["Lite"]) == ([], [], [])
+        assert [c.text() for c in check.conflicts[""]] == ["U2: MPN: A = 'A', B = 'B'"]
 
     def test_variant(self, tmp_path):
         lite = '(variant (name "Lite") (field (name "MPN") (value "LM324N")))'

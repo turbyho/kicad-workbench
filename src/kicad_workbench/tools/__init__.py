@@ -6,6 +6,7 @@ Core KiCad operations - simplified and focused.
 from . import (
     bom,
     device_tree,
+    field_check,
     hierarchical_analysis,
     library,
     library_links,
@@ -41,4 +42,5 @@ __all__ = [
     "library",
     "library_links",
     "symbol_fields",
+    "field_check",
 ]

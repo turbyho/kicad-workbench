@@ -1,4 +1,5 @@
-"""The fields of the units of one symbol: one package has one Value and one MPN.
+"""The fields of the units of one symbol: one package has one Value, MPN and
+Value_Confirmed.
 
 The units of one reference (U301A and U301B) are one package and one line of
 the BOM. KiCad gives an ERC error when the units have different values
@@ -9,9 +10,11 @@ KiCad 9 and 10 join the different values of the units with a comma
 ("LM358NG,LM358P"), which looks like an MPN and its alternative, and KiCad 8
 writes "-- mixed values --" (FIELDS_EDITOR_GRID_DATA_MODEL::getValue).
 
-This module compares Value and the MPN fields of the units of each reference
-(decision of the user, 2026-11-05: an empty field in one unit is a difference
-too). It reads each schematic file of the sheet hierarchy:
+This module compares Value, the MPN fields and Value_Confirmed of the units of
+each reference (decision of the user, 2026-11-05: an empty field in one unit is a
+difference too). Value_Confirmed is the confirmed copy of Value (the model of the
+confirmed MPNs, parsers/confirmed_mpns.py): the BOM line joins its values too. It
+reads each schematic file of the sheet hierarchy:
 
 - KiCad keeps the reference and the unit of a placed symbol for each sheet
   path, in (instances (project ... (path "<sheet path>" (reference ...)
@@ -61,16 +64,25 @@ MPN_FIELDS = (
 )
 
 
-def _field_key(name: str) -> str:
+def field_key(name: str) -> str:
+    """Return the name of a field or a BOM column with no case, spaces, "_", "." and
+    "-", as datasheet-lens compares the column names (_column_key)."""
     return re.sub(r"[\s_.\-]", "", name).lower()
 
 
-_MPN_KEYS = {_field_key(name) for name in MPN_FIELDS}
+_MPN_KEYS = {field_key(name) for name in MPN_FIELDS}
+# The hidden field of the confirmed Value (parsers/confirmed_mpns.py).
+CONFIRMED_FIELD = "Value_Confirmed"
 
 
 def is_mpn_field(name: str) -> bool:
     """Return True for the name of an MPN field (see MPN_FIELDS)."""
-    return _field_key(name) in _MPN_KEYS
+    return field_key(name) in _MPN_KEYS
+
+
+def is_confirmed_field(name: str) -> bool:
+    """Return True for the name of the field Value_Confirmed (see field_key)."""
+    return field_key(name) == field_key(CONFIRMED_FIELD)
 
 
 @dataclass(frozen=True)
@@ -93,12 +105,13 @@ class _Unit:
     reference: str
     unit: int
     unit_count: int
-    fields: dict[str, str]  # Value and the MPN fields of the symbol
+    fields: dict[str, str]  # Value, the MPN fields and Value_Confirmed of the symbol
     variants: dict[str, dict[str, str]]  # variant name -> the fields that it sets
 
 
 def _symbol_fields(symbol: Node, rules: FieldRules, version: int) -> dict[str, str]:
-    """Return Value and the MPN fields of a placed symbol, as KiCad reads them."""
+    """Return Value, the MPN fields and Value_Confirmed of a placed symbol, as KiCad
+    reads them."""
 
     def text(value: str) -> str:
         return "" if value == "~" and version < EMPTY_TEXT_MARKER else value
@@ -106,13 +119,14 @@ def _symbol_fields(symbol: Node, rules: FieldRules, version: int) -> dict[str, s
     fields = {"Value": text(symbol_fields(symbol, rules).get("Value", ""))}
     for prop in symbol.children("property"):
         field = property_field(prop)
-        if field is not None and is_mpn_field(field[0]):
+        if field is not None and (is_mpn_field(field[0]) or is_confirmed_field(field[0])):
             fields.setdefault(field[0], text(field[1]))
     return fields
 
 
 def _variant_fields(path: Node | None) -> dict[str, dict[str, str]]:
-    """Return the fields of the variants of an instance: Value and the MPN fields."""
+    """Return the fields of the variants of an instance: Value, the MPN fields and
+    Value_Confirmed."""
     variants: dict[str, dict[str, str]] = {}
     for variant in path.children("variant") if path is not None else []:
         name = variant.first("name")
@@ -124,7 +138,7 @@ def _variant_fields(path: Node | None) -> dict[str, dict[str, str]]:
             if field_name is None or value is None:
                 continue
             text = field_name.value(0, "")
-            if text == "Value" or is_mpn_field(text):
+            if text == "Value" or is_mpn_field(text) or is_confirmed_field(text):
                 fields[text] = value.value(0, "")
     return variants
 
@@ -162,16 +176,35 @@ def _units(project: Path) -> tuple[dict[str, list[_Unit]], list[str]]:
     return units, problems
 
 
-def unit_conflicts(
-    project: Path, variants: list[str] | None = None
-) -> tuple[list[UnitConflict], list[str]]:
-    """Return the fields with different values in the units of one reference, and
-    the problems of the sheet hierarchy (a sheet that the check could not read).
+@dataclass
+class UnitCheck:
+    """The result of variant_unit_conflicts."""
 
-    The check uses the default variant, and each name of variants (KiCad 10).
-    It compares Value and each MPN field that a unit of the reference has. A
-    unit with no such field, or with an empty one, has the value "". A variant
-    gives only the conflicts that the default variant does not give.
+    # All conflicts of the default variant ("") and of each variant.
+    conflicts: dict[str, list[UnitConflict]]
+    hierarchy: list[str]  # the problems of the sheet hierarchy (a sheet not read)
+    duplicates: list[str]  # the duplicate references: their fields are not compared
+
+    @property
+    def problems(self) -> list[str]:
+        """The problems of the hierarchy and the duplicate references, as text."""
+        return self.hierarchy + [
+            f"{reference}: a duplicate reference (the same unit two times, or different unit "
+            "counts): KiCad ERC gives it, and the tool did not compare its fields."
+            for reference in self.duplicates
+        ]
+
+
+def variant_unit_conflicts(project: Path, variants: list[str] | None = None) -> UnitCheck:
+    """Return all fields with different values in the units of one reference for the
+    default variant ("") and for each name of variants (KiCad 10), the problems of
+    the sheet hierarchy (a sheet that the check could not read), and the duplicate
+    references.
+
+    It compares Value, each MPN field and Value_Confirmed that a unit of the reference
+    has. A unit with no such field, or with an empty one, has the value "". The
+    fields of a variant are the fields of the symbol with the fields of its variant:
+    a variant can also make the fields of the units equal.
 
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
@@ -179,19 +212,18 @@ def unit_conflicts(
         ValueError: A unit is not a number.
     """
     units, problems = _units(project)
-    conflicts: list[UnitConflict] = []
-    default: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
-    for key in sorted(units):
-        group = units[key]
-        if len(group) > 1 and (
+    duplicates = [
+        group[0].reference
+        for group in (units[key] for key in sorted(units))
+        if len(group) > 1
+        and (
             len({unit.unit for unit in group}) < len(group)
             or len({unit.unit_count for unit in group}) > 1
-        ):
-            problems.append(
-                f"{group[0].reference}: a duplicate reference (the same unit two times, or "
-                "different unit counts): KiCad ERC gives it, and the tool did not compare its fields."
-            )
+        )
+    ]
+    conflicts: dict[str, list[UnitConflict]] = {}
     for variant in ["", *(variants or [])]:
+        found = conflicts.setdefault(variant, [])
         for key in sorted(units):
             group = units[key]
             if (
@@ -211,12 +243,35 @@ def unit_conflicts(
                     (letter_reference(unit.unit), f.get(name, ""))
                     for unit, f in sorted(zip(group, fields, strict=True), key=lambda u: u[0].unit)
                 )
-                if len({value for _unit, value in values}) < 2:
-                    continue
-                key = (reference, name, values)
-                if not variant:
-                    default.add(key)
-                elif key in default:
-                    continue  # the variant gives the conflict of the default variant
-                conflicts.append(UnitConflict(reference, variant, name, values))
-    return conflicts, problems
+                if len({value for _unit, value in values}) > 1:
+                    found.append(UnitConflict(reference, variant, name, values))
+    return UnitCheck(conflicts, problems, duplicates)
+
+
+def unit_conflicts(
+    project: Path, variants: list[str] | None = None
+) -> tuple[list[UnitConflict], list[str]]:
+    """Return the fields with different values in the units of one reference, and
+    the problems of the sheet hierarchy (see variant_unit_conflicts).
+
+    The check uses the default variant, and each name of variants (KiCad 10). A
+    variant gives only the conflicts that the default variant does not give.
+
+    Raises:
+        KiCadEncodingError, SExprError, OSError: A file cannot be read.
+        KicadFileError: A file has a version that the server does not know.
+        ValueError: A unit is not a number.
+    """
+    check = variant_unit_conflicts(project, variants)
+    return distinct_conflicts(check.conflicts), check.problems
+
+
+def distinct_conflicts(by_variant: dict[str, list[UnitConflict]]) -> list[UnitConflict]:
+    """Return the conflicts of the default variant, then the conflicts of each
+    variant that the default variant does not give (see variant_unit_conflicts)."""
+    default = {(c.reference, c.field, c.values) for c in by_variant.get("", [])}
+    conflicts = list(by_variant.get("", []))
+    for variant, found in by_variant.items():
+        if variant:
+            conflicts += [c for c in found if (c.reference, c.field, c.values) not in default]
+    return conflicts

@@ -234,7 +234,8 @@ Uses `run_erc`, `run_drc`, and `detect_pin_conflicts`.
 
 | Tool | Description |
 |------|-------------|
-| `export_bom` | The BOM of the full project, as `kicad-cli sch export bom` of the installed KiCad makes it: the fields that the caller selects (default: all fields), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or all variants with one CSV file for each). It gives an error of the design when the units of one package have a different Value or MPN. It can keep the CSV file of kicad-cli, for example for `project_check` of [datasheet-lens](https://github.com/turbyho/datasheet-lens) |
+| `export_bom` | The BOM of the full project, as `kicad-cli sch export bom` of the installed KiCad makes it: the fields that the caller selects (default: all fields), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or all variants with one CSV file for each). It gives an error of the design when the units of one package have a different Value, MPN or Value_Confirmed. It can keep the CSV file of kicad-cli, for example for `project_check` of [datasheet-lens](https://github.com/turbyho/datasheet-lens) |
+| `check_symbol_fields` | The check of the MPNs of the symbols when datasheet-lens is not available, with the same messages as its `project_check`: Value holds the general value and the MPNs in one text in parentheses (`2N7002 (2N7002LT1G, BSS138LT1G)`), MPN is the confirmed copy of these MPNs, and the hidden field Value_Confirmed is the Value of the last confirmation. It reads the BOM of kicad-cli of the default variant and of each variant of KiCad 10, and gives the conflicts, the changes, the symbols that are not confirmed, the fields that complete a symbol, and the symbols with no part, each with the change for `set_symbol_fields` |
 
 ### Libraries
 

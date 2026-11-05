@@ -15,6 +15,7 @@ mcp = FastMCP(
     - PCB analysis (footprints, tracks, statistics)
     - Design rule checking (ERC/DRC)
     - Bill of materials (BOM) through kicad-cli
+    - The fields of placed symbols, and the check of their MPNs
     - Schematic summarization
     - Hierarchical sheet and net tracing
     - Pin/power/bus extraction and device tree generation
@@ -27,6 +28,7 @@ mcp = FastMCP(
 from .tools import (  # noqa: F401, E402
     bom,
     device_tree,
+    field_check,
     hierarchical_analysis,
     library,
     netlist,

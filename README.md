@@ -266,6 +266,7 @@ The library tools read the library tables of the installed KiCad and of the proj
 |------|-------------|
 | `create_kicad_project` | Create an empty project (default) or one from a KiCad template (`template="Arduino_Uno"`) |
 | `add_component_from_library` | Add a symbol of a library of the library tables (also a derived symbol) |
+| `set_symbol_fields` | Write the fields of placed symbols (for example MPN and Value_Confirmed of `project_check` of datasheet-lens): each unit of a reference, a new field hidden, the fields of a variant of KiCad 10, in the format of the file version. It checks all changes and all files first, and refuses a symbol of a shared sheet when the changes do not give each of its references the same fields |
 | `add_wire` | Add wire connection |
 | `add_label` | Add local label |
 | `setup_pcb_layout` | Initialize PCB with dimensions (does not replace an existing board without `overwrite=True`) |

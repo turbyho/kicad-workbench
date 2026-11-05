@@ -41,12 +41,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..parsers.kicad_versions import KICAD8, KICAD9, KICAD10, KicadFileError, kicad_release
-from ..parsers.sexpr import SExprError, parse
+from ..parsers.sexpr import SExprError
 from ..parsers.unit_fields import unit_conflicts
 from ..server import mcp
 from ..utils.kicad_cli import CliExport, export_with_kicad_cli, get_kicad_version
-from ..utils.kicad_text import KiCadEncodingError, read_as_kicad, read_kicad_json
-from ..utils.sch_hierarchy import AmbiguousRootError, project_files, schematic_project_file
+from ..utils.kicad_text import KiCadEncodingError
+from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.variants import variant_names
 from .library import NO_KICAD_CLI, cell, netlist_root
 
 _BOM_TIMEOUT = 300
@@ -119,54 +120,6 @@ def _check_names(names: list[str], what: str) -> None:
                 f"The field name {name!r} of {what} has a comma. kicad-cli splits the "
                 "list of fields at each comma, thus it cannot export this field."
             )
-
-
-def _file_variants(file: Path) -> set[str]:
-    """Return the variant names of the symbol and sheet instances of a schematic file
-    (SCH_SCREEN::GetVariantNames)."""
-    names = set()
-    root = parse(read_as_kicad(file))
-    for item in [*root.children("symbol"), *root.children("sheet")]:
-        for instances in item.children("instances"):
-            for variant in instances.walk("variant"):
-                name = variant.first("name")
-                if name is not None and name.value(0) is not None:
-                    names.add(name.value(0))
-    return names
-
-
-def _project_variants(project: Path) -> set[str]:
-    """Return the names of "schematic.variants" of a project file (SCHEMATIC_SETTINGS)."""
-    if not project.is_file():
-        return set()
-    try:
-        settings = read_kicad_json(project)
-    except ValueError:
-        # KiCad uses the default settings for a project file that is not JSON
-        # (JSON_SETTINGS::LoadFromFile): they have no variants.
-        return set()
-    schematic = settings.get("schematic") if isinstance(settings, dict) else None
-    variants = schematic.get("variants") if isinstance(schematic, dict) else None
-    return {
-        entry["name"]
-        for entry in (variants if isinstance(variants, list) else [])
-        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
-    }
-
-
-def variant_names(project: Path) -> set[str]:
-    """Return the variant names of a project, as SCHEMATIC::rebuildHierarchyState of KiCad 10.
-
-    The names are in the symbol and sheet instances of each schematic file of
-    the project, and in the project file.
-
-    Raises:
-        KiCadEncodingError, SExprError, OSError: A file cannot be read.
-    """
-    names = _project_variants(project)
-    for file in project_files(project):
-        names |= _file_variants(file)
-    return names
 
 
 def _field(raw: str, group_by: list[str], major: int) -> BomField:

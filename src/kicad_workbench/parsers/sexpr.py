@@ -362,7 +362,20 @@ def edited(node: Node, edits: list[tuple[int, int, str]]) -> str:
     Each edit is (start, end, text), with offsets of the parsed text, inside
     the list. Two insertions at one offset are in the text in the order of
     the edit list.
+
+    Raises:
+        ValueError: Two edits overlap: a replaced range holds the start of an
+            other edit, or an insertion is at the start of a replaced range.
+            The result would then depend on the order of the edits.
     """
+    by_start = sorted(edits, key=lambda e: (e[0], e[1]))
+    for (start_a, end_a, _), (start_b, end_b, _) in zip(by_start, by_start[1:], strict=False):
+        inside = start_b < end_a
+        at_start = start_a == end_a == start_b and end_b > start_b
+        if inside or at_start:
+            raise ValueError(
+                f"Two edits of the text overlap: {start_a}-{end_a} and {start_b}-{end_b}."
+            )
     text = node.source[node.start : node.end]
     order = sorted(range(len(edits)), key=lambda i: (edits[i][0], i), reverse=True)
     for start, end, replacement in (edits[i] for i in order):

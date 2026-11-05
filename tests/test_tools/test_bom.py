@@ -13,6 +13,7 @@ import pytest
 
 from kicad_workbench.tools import bom
 from kicad_workbench.utils import kicad_cli as kicad_cli_module
+from kicad_workbench.utils.variants import variant_names
 
 ROOT = """(kicad_sch (version 20250114) (generator "eeschema")
   (uuid "00000000-0000-0000-0000-000000000001")
@@ -191,12 +192,12 @@ class TestBomRules:
 
 class TestVariantNames:
     def test_files_and_project(self, project):
-        names = bom.variant_names(project["directory"] / "board.kicad_pro")
+        names = variant_names(project["directory"] / "board.kicad_pro")
         assert names == {"Lite", "Big", "Sub only", "Empty"}
 
     def test_project_file_not_json(self, project):
         (project["directory"] / "board.kicad_pro").write_text("{", encoding="utf-8")
-        names = bom.variant_names(project["directory"] / "board.kicad_pro")
+        names = variant_names(project["directory"] / "board.kicad_pro")
         assert names == {"Lite", "Big", "Sub only"}
 
 

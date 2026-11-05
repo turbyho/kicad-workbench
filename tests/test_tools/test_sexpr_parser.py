@@ -8,6 +8,7 @@ from kicad_workbench.parsers.sexpr import (
     Atom,
     Node,
     SExprError,
+    edited,
     indent,
     parse,
     property_atoms,
@@ -179,3 +180,16 @@ class TestProperty:
         prop = parse(text).first("property")
         assert prop.source is text
         assert property_field(prop) == ("N", "")
+
+
+class TestEditedOverlap:
+    def test_overlapping_edits_are_refused(self):
+        node = parse("(a (b) (c))")
+        b, c = node.children()
+        # Two insertions at one offset are in the order of the list.
+        assert edited(node, [(b.start, b.start, "X"), (b.start, b.start, "Y")]) == "(a XY(b) (c))"
+        assert edited(node, [(b.start, b.end, "(B)"), (c.start, c.end, "(C)")]) == "(a (B) (C))"
+        with pytest.raises(ValueError, match="overlap"):
+            edited(node, [(b.start - 1, c.end, ""), (c.start, c.start, "X")])  # inside
+        with pytest.raises(ValueError, match="overlap"):
+            edited(node, [(b.start, b.start, "X"), (b.start, b.end, "")])  # at the start

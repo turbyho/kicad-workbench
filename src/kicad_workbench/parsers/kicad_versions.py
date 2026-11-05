@@ -42,6 +42,13 @@ NEWEST_SCHEMATIC = 20261025
 # In a file before this version, "~" is an empty field value, pin name or pin
 # number (parseProperty and parseSymbolPin of KiCad 10).
 EMPTY_TEXT_MARKER = 20250318
+# From this version, a schematic has variants: (variant ...) in the instances of
+# a symbol (SEXPR_SCHEMATIC_FILE_VERSION 20250922, sch_file_versions.h).
+SCHEMATIC_VARIANTS = 20250922
+# From this version, KiCad writes hide, show_name and do_not_autoplace of a field
+# in the property; before it, the hidden state is in the effects
+# (SEXPR_SCHEMATIC_FILE_VERSION 20251028, "Updated properties formatting").
+SCHEMATIC_FIELD_FLAGS = 20251028
 # From this version, a symbol declares its body styles with (body_styles ...).
 # Before it, KiCad finds the body styles from the drawings (parseLibSymbol).
 DECLARED_BODY_STYLES = 20250827

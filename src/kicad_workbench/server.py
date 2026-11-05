@@ -38,6 +38,7 @@ from .tools import (  # noqa: F401, E402
     schematic,
     schematic_editor,
     schematic_search,
+    symbol_fields,
     validation,
     visualization,
 )

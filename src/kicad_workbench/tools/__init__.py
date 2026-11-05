@@ -18,6 +18,7 @@ from . import (
     schematic,
     schematic_editor,
     schematic_search,
+    symbol_fields,
     validation,
     visualization,
 )
@@ -39,4 +40,5 @@ __all__ = [
     "visualization",
     "library",
     "library_links",
+    "symbol_fields",
 ]

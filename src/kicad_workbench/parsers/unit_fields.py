@@ -40,13 +40,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..utils.kicad_text import read_as_kicad
-from ..utils.sch_hierarchy import sheet_paths
-from .kicad_fields import FieldRules, rules_for_file, symbol_fields
-from .kicad_versions import EMPTY_TEXT_MARKER, schematic_version
-from .lib_symbols import unit_count
-from .sch_geometry import definition_key, definitions, placed_symbols, symbol_unit
-from .sexpr import Node, parse, property_field
+from .kicad_fields import FieldRules, rules_for_version, symbol_fields
+from .kicad_versions import EMPTY_TEXT_MARKER
+from .sch_instances import placed_instances
+from .sexpr import Node, property_field
 from .symbol_info import letter_reference
 
 # The names of the MPN fields, as datasheet-lens reads the columns of a BOM
@@ -141,54 +138,27 @@ def _units(project: Path) -> tuple[dict[str, list[_Unit]], list[str]]:
         KicadFileError: A file has a version that the server does not know.
         ValueError: A unit is not a number.
     """
-    paths, problems = sheet_paths(project)
-    files: dict[Path, list[tuple[Node, dict[str, str], int]]] = {}
+    instances, files, problems = placed_instances(project)
+    fields: dict[tuple[Path, int], dict[str, str]] = {}  # each symbol one time
     units: dict[str, list[_Unit]] = {}
-    for sheet in paths:
-        if sheet.uuids is None:
-            continue  # KiCad gives the sheet new UUIDs at each load: no instance matches
-        if sheet.file not in files:
-            root = parse(read_as_kicad(sheet.file))
-            rules, version = rules_for_file(root), schematic_version(root)
-            library = definitions(root)
-            files[sheet.file] = [
-                (
-                    symbol,
-                    _symbol_fields(symbol, rules, version),
-                    unit_count(library[definition_key(symbol)])
-                    if definition_key(symbol) in library
-                    else 1,
-                )
-                for symbol in placed_symbols(root)
-            ]
-        for symbol, fields, count in files[sheet.file]:
-            instances = symbol.first("instances")
-            path = next(
-                (
-                    p
-                    for p in (instances.walk("path") if instances else [])
-                    if p.value(0) == sheet.path
-                ),
-                None,
+    for instance in instances:
+        text = instance.reference
+        if text.startswith("#") or text.endswith("?"):
+            continue
+        record = files[instance.file]
+        if instance.key not in fields:
+            fields[instance.key] = _symbol_fields(
+                instance.symbol, rules_for_version(record.version), record.version
             )
-            reference = path.first("reference") if path is not None else None
-            text = reference.value(0, "") if reference is not None else ""
-            if not text:  # SCH_SYMBOL::GetRef: the Reference field
-                text = next(
-                    (
-                        f[1]
-                        for p in symbol.children("property")
-                        if (f := property_field(p)) and f[0] == "Reference"
-                    ),
-                    "",
-                )
-            if not text or text.startswith("#") or text.endswith("?"):
-                continue
-            unit = path.first("unit") if path is not None else None
-            number = int(unit.number(0, 1)) if unit is not None else symbol_unit(symbol)
-            units.setdefault(text.upper(), []).append(
-                _Unit(text, number, count, fields, _variant_fields(path))
+        units.setdefault(text.upper(), []).append(
+            _Unit(
+                text,
+                instance.unit,
+                instance.unit_count,
+                fields[instance.key],
+                _variant_fields(instance.path),
             )
+        )
     return units, problems
 
 

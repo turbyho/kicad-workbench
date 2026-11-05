@@ -145,7 +145,8 @@ class TestSymbolFields:
             FieldChange(reference="U5", fields={"MPN": "X"}),
             FieldChange(reference="U6", fields={"MPN": "X"}),
         )
-        assert out.startswith("# Fields") and "| U6 | B | - | MPN | A | X | sub.kicad_sch |" in out
+        assert out.startswith("# Fields") and "| U5 | B | - | MPN | A | X | sub.kicad_sch |" in out
+        assert "| U6 | B | - | MPN | A | X | sub.kicad_sch (the symbol of U5) |" in out
         assert (tmp_path / "sub.kicad_sch").read_text(encoding="utf-8").count(
             '(property "MPN" "X"'
         ) == 2

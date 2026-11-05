@@ -243,7 +243,9 @@ class _Row:
     before: str
     after: str
     file: Path
-    shared: bool = False  # an other reference of a symbol that got the field already
+    # The reference whose symbol got the field already: this row is an other
+    # reference of the same symbol (a shared sheet).
+    shared: str = ""
 
 
 # The fields that KiCad removes at the load of a symbol: their text sets
@@ -434,7 +436,7 @@ def _plan(
             _check_shared(change, instance, references, by_key)
             if instance.key in done:
                 rows += [
-                    _Row(reference, unit_text, "", r.field, r.before, r.after, r.file, True)
+                    _Row(reference, unit_text, "", r.field, r.before, r.after, r.file, r.reference)
                     for r in done[instance.key]
                 ]
                 continue
@@ -637,7 +639,7 @@ def _output(project: Path, rows: list[_Row], written: list[Path], problems: list
             r.field,
             r.before or "(empty)",
             state or "(empty)",
-            r.file.name,
+            f"{r.file.name} (the symbol of {r.shared})" if r.shared else r.file.name,
         )
         lines.append("| " + " | ".join(cell(c) for c in cells) + " |")
     lines += [

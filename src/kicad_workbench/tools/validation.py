@@ -19,9 +19,10 @@ from ..parsers.annotation import (
     erc_violations,
 )
 from ..parsers.check_report_parser import (
-    erc_position_scale,
+    ErcReport,
+    ErcUnits,
     parse_drc_report,
-    parse_erc_report,
+    read_erc_report,
 )
 from ..parsers.kicad_versions import KicadFileError
 from ..parsers.sch_geometry import IU_PER_MM
@@ -30,8 +31,10 @@ from ..server import mcp
 from ..utils.kicad_cli import decode_output, get_kicad_version, run_kicad_cli
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import (
+    PRO_SUFFIX,
     AmbiguousRootError,
     find_root_schematic,
+    project_files,
     schematic_project_file,
     sheet_files,
 )
@@ -157,19 +160,16 @@ def _count_text(errors: list[ERCError] | list[DRCError]) -> str:
     return text
 
 
-def _parse_erc_report(
-    report_path: Path, schematic_files: list[Path] | None = None
-) -> list[ERCError]:
+def _parse_erc_report(report_path: Path, schematic_files: list[Path] | None = None) -> ErcReport:
     """Parse ERC report file (JSON or XML format).
 
     Args:
         report_path: Path to ERC report file
-        schematic_files: Schematic files of the project. They are used to
-            find the scale of the report positions (see
-            ``erc_position_scale``).
+        schematic_files: Schematic files of the project. They give the lengths
+            of the wires and buses for the item texts (read_erc_report).
 
     Returns:
-        List of ERC errors/warnings
+        The ERC errors/warnings, and the notes about the limits of the values.
     """
     errors = []
     content = report_path.read_text(encoding="utf-8", errors="replace")
@@ -177,8 +177,7 @@ def _parse_erc_report(
     try:
         data = json.loads(content)
         # KiCad 8-10 ERC JSON: sheets[].violations (see check_report_parser).
-        scale, _source = erc_position_scale(data, schematic_files or [])
-        return parse_erc_report(data, scale)
+        return read_erc_report(data, schematic_files or [])
     except (json.JSONDecodeError, KeyError):
         pass
 
@@ -214,7 +213,7 @@ def _parse_erc_report(
             )
         )
 
-    return errors
+    return ErcReport(errors)
 
 
 @dataclass
@@ -226,6 +225,7 @@ class _ErcResult:
     annotation_checked: bool  # False: the result has no annotation check
     not_fully_annotated: bool = False  # the info bar of the ERC dialog
     unannotated: list[AnnotationItem] = field(default_factory=list)
+    units: ErcUnits = field(default_factory=ErcUnits)  # the units of the JSON report
 
     @property
     def passed(self) -> bool:
@@ -298,12 +298,22 @@ def _unannotated_text(items: list[AnnotationItem]) -> str:
 async def _erc_result(report_path: Path, root: Path) -> _ErcResult:
     """The violations of the kicad-cli report and of the annotation check of the ERC
     dialog, and the notes about the annotation check."""
-    errors = await asyncio.to_thread(lambda: _parse_erc_report(report_path, sheet_files(root)))
+    # The files of all top-level sheets give the lines of the item texts.
+    report = await asyncio.to_thread(
+        lambda: _parse_erc_report(report_path, project_files(root.with_suffix(PRO_SUFFIX)))
+    )
+    errors = report.errors
     check, notes = await _annotation_errors(root)
+    notes = notes + [f"⚠️ {note}" for note in report.notes]
     if check is None:
-        return _ErcResult(errors, notes, False)
+        return _ErcResult(errors, notes, False, units=report.units)
     return _ErcResult(
-        check.violations + errors, notes, True, check.not_fully_annotated, check.unannotated
+        check.violations + errors,
+        notes,
+        True,
+        check.not_fully_annotated,
+        check.unannotated,
+        report.units,
     )
 
 
@@ -1009,6 +1019,14 @@ async def export_erc_report(
         shutil.copy(erc_report_path, output)
         result = results[0] if results else await _erc_result(erc_report_path, root)
         notes = list(result.notes)
+        if result.units.pcb_scale:
+            notes.insert(
+                0,
+                "⚠️ kicad-cli of this KiCad version writes the positions and the lengths of "
+                "the JSON report 100 times too small (ERC_REPORT::WriteJsonReport uses the "
+                "board units; KiCad 10.0.7 corrects it). run_erc and get_erc_violations give "
+                "the correct values.",
+            )
         active = [
             error
             for error in result.errors

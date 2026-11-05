@@ -9,12 +9,15 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.parsers.check_report_parser import (
-    erc_position_scale,
+    ErcUnits,
+    corrected_length_text,
+    erc_report_units,
     parse_drc_report,
     parse_erc_item,
     parse_erc_report,
-    top_level_positions,
+    read_erc_report,
 )
+from kicad_workbench.parsers.sch_geometry import iu
 from kicad_workbench.tools import validation
 from kicad_workbench.utils.kicad_cli import find_kicad_cli
 
@@ -84,10 +87,13 @@ class TestErcItem:
         # The localized pin type is not given as an English type.
         assert item.pin_type == ""
 
-    def test_position_scale(self):
+    def test_position_with_the_board_scale(self):
+        # KiCad 8, 9 and 10.0.0 to 10.0.6 write IU / 1e6 with schematic IU (100 nm).
         item = parse_erc_item(
-            {"description": "Global Label 'X'", "pos": {"x": 0.508, "y": -0.635}}, 100.0
+            {"description": "Global Label 'X'", "pos": {"x": 0.508, "y": -0.635}}, True
         )
+        assert (item.x_mm, item.y_mm) == (50.8, -63.5)
+        item = parse_erc_item({"description": "X", "pos": {"x": 50.8, "y": -63.5}})
         assert (item.x_mm, item.y_mm) == (50.8, -63.5)
 
     def test_no_position(self):
@@ -120,47 +126,175 @@ class TestErcReport:
         assert [i.pin_number for i in pin_to_pin.items] == ["5", "2"]
 
     def test_localized_report(self):
-        errors = parse_erc_report(_load("erc_kicad10_cs.json"), 100.0)
+        # KiCad 10.0.6: the positions get the board scale.
+        errors = parse_erc_report(_load("erc_kicad10_cs.json"))
         assert [e.components for e in errors] == [["U1"], ["U3"], []]
         assert errors[0].items[0].pin_number == "3"
         assert errors[2].items[0].label == "NET_A"
         assert (errors[2].items[0].x_mm, errors[2].items[0].y_mm) == (50.8, 63.5)
 
 
-class TestErcPositionScale:
-    def test_calibrated_from_schematic(self):
-        scale, source = erc_position_scale(_load("erc_kicad10_en.json"), [LABEL_SCH])
-        assert (scale, source) == (100.0, "calibrated")
+class TestErcUnits:
+    @pytest.mark.parametrize(
+        "version, pcb_scale, rules",
+        [
+            ("8.0.0", True, "8"),
+            ("8.0.9", True, "8"),
+            ("9.0.0", True, "9.0.0"),
+            ("9.0.3", True, "9.0.0"),
+            ("9.0.4", True, "9.0.4"),
+            ("9.0.9", True, "9.0.4"),
+            ("9.0.9.1", True, "9.0.4"),
+            ("10.0.0", True, "10.0.0"),
+            ("10.0.6", True, "10.0.0"),
+            # "Fix erc json report using wrong unit scale".
+            ("10.0.7", False, None),
+        ],
+    )
+    def test_known_versions(self, version, pcb_scale, rules):
+        units = erc_report_units({"kicad_version": version, "coordinate_units": "mm"})
+        assert units == ErcUnits(rules)
+        assert units.pcb_scale == pcb_scale
 
-    def test_calibration_detects_report_in_mm(self):
-        # A future KiCad version can write correct positions. The calibration
-        # must then select 1, not the version fallback.
-        data = _load("erc_kicad10_en.json")
-        for sheet in data["sheets"]:
-            for v in sheet["violations"]:
-                for item in v["items"]:
-                    item["pos"] = {k: val * 100 for k, val in item["pos"].items()}
-        assert erc_position_scale(data, [LABEL_SCH]) == (1.0, "calibrated")
+    @pytest.mark.parametrize("version", ["10.0.8", "11.0.0", "", "x"])
+    def test_versions_with_no_rules(self, version):
+        units = erc_report_units({"kicad_version": version, "coordinate_units": "mm"})
+        assert (units.pcb_scale, units.positions) == (False, False)
+        assert "The server has no rules for the ERC JSON report of KiCad" in units.note
 
-    def test_version_fallback(self):
-        assert erc_position_scale(_load("erc_kicad10_en.json"), []) == (100.0, "version")
+    def test_nightly_build(self):
+        units = erc_report_units({"kicad_version": "10.99.0-123-gabc", "coordinate_units": "mm"})
+        assert (units.pcb_scale, units.value_rules) == (False, None)
+        assert "rule of branch master" in units.note
 
-    def test_unknown_version_uses_report_units(self):
-        data = _load("erc_kicad10_en.json")
-        data["kicad_version"] = "9.0.0"
-        assert erc_position_scale(data, []) == (1.0, "report")
+    def test_report_not_in_mm(self):
+        units = erc_report_units({"kicad_version": "10.0.6", "coordinate_units": "in"})
+        assert not units.positions
+        report = {
+            "kicad_version": "10.0.6",
+            "coordinate_units": "in",
+            "sheets": [
+                {"violations": [{"items": [{"description": "X", "pos": {"x": 1, "y": 2}}]}]}
+            ],
+        }
+        (error,) = parse_erc_report(report)
+        assert (error.items[0].x_mm, error.items[0].y_mm) == (None, None)
 
 
-class TestTopLevelPositions:
-    def test_kicad10_format(self):
-        positions = top_level_positions(LABEL_SCH.read_text(encoding="utf-8"))
-        assert positions == {"00000000-0000-4000-8000-000000000106": (50.8, 63.5)}
+# The item texts of kicad-cli 8.0.9, 9.0.9 and 10.0.6 for wires from (0, 0) to these
+# ends in mm (spike/kicad-versions/erc_units_check.py): the JSON report (board scale)
+# and the text report (schematic scale), with the decimal point of the locale.
+MEASURED = [
+    ("8", (10, 0), "0.1000", "10.0000"),
+    ("8", (3, 4), "0.0500", "5.0000"),
+    ("8", (2.54, 2.54), "0.0359", "3.5921"),
+    ("8", (0, 0.0001), "0.0000", "0.0001"),
+    ("8", (0.005, 0), "0.0001", "0.0050"),
+    ("8", (0, 11.235), "0.1124", "11.2350"),
+    ("9.0.4", (10, 0), "0.1000", "10.00"),
+    ("9.0.4", (3, 4), "0.0500", "5.00"),
+    ("9.0.4", (2.54, 2.54), "0.0359", "3.592"),
+    ("9.0.4", (0, 0.0001), "0.0000", "0.00"),
+    ("9.0.4", (0.005, 0), "0.0001", "0.005"),
+    ("9.0.4", (0, 11.235), "0.1124", "11.235"),
+    ("10.0.0", (10, 0), "0,1000", "10,00"),
+    ("10.0.0", (12.7, 0), "0,1270", "12,70"),
+    ("10.0.0", (0, 0.0001), "1,000e-06", "1,000e-04"),
+    ("10.0.0", (2.54, 2.54), "0.0359", "3.592"),
+    # 9.0.0 to 9.0.3: "%.2f" with no trim (from the source).
+    ("9.0.0", (10, 0), "0.1000", "10.00"),
+    ("9.0.0", (2.54, 2.54), "0.0359", "3.59"),
+]
 
-    def test_compact_format_and_nested_uuids(self):
-        positions = top_level_positions((FIXTURES / "hier" / "root.kicad_sch").read_text())
-        # The symbol position, not the position of a property or a pin.
-        assert positions["aaaaaaaa-0000-0000-0000-000000000001"] == (100.0, 100.0)
-        assert "11111111-0000-0000-0000-111111111111" not in positions
+
+class TestLengthText:
+    @pytest.mark.parametrize("rules, end, wrong, right", MEASURED)
+    def test_measured_texts(self, rules, end, wrong, right):
+        units = ErcUnits(rules)
+        start, stop = (0, 0), (iu(end[0]), iu(end[1]))
+        text = corrected_length_text(f"Wire, length {wrong} mm", start, stop, units)
+        assert text == f"Wire, length {right} mm"
+
+    def test_text_that_is_not_the_text_of_kicad(self):
+        units = ErcUnits("10.0.0")
+        end = (iu(10), 0)
+        assert corrected_length_text("Wire, length 10.00 mm", (0, 0), end, units) is None
+        assert corrected_length_text("Wire, length 0.1000 mm", (0, 0), end, ErcUnits()) is None
+
+
+class TestReadErcReport:
+    def test_lines_of_the_schematic(self, tmp_path):
+        sch = tmp_path / "a.kicad_sch"
+        sch.write_text(
+            '(kicad_sch (version 20260306) (generator "eeschema") (uuid "a0")\n'
+            '  (wire (pts (xy 10 10) (xy 20 10)) (uuid "w1"))\n'
+            '  (bus (pts (xy 0 0) (xy 3 4)) (uuid "b1"))\n'
+            '  (wire (pts (xy 0 0) (xy 1 0)) (uuid "dup"))\n'
+            '  (wire (pts (xy 0 0) (xy 2 0)) (uuid "dup"))\n'
+            # KiCad cannot read "+5": the line is not known.
+            '  (wire (pts (xy +5 0) (xy 2 0)) (uuid "bad")))\n',
+            encoding="utf-8",
+        )
+
+        def item(uuid, text, x, y):
+            return {"uuid": uuid, "description": text, "pos": {"x": x, "y": y}}
+
+        report = {
+            "kicad_version": "10.0.6",
+            "coordinate_units": "mm",
+            "sheets": [
+                {
+                    "path": "/",
+                    "violations": [
+                        {
+                            "type": "wire_dangling",
+                            "severity": "error",
+                            "items": [
+                                item("w1", "Horizontal Wire, length 0.1000 mm", 0.1, 0.1),
+                                item("b1", "Bus, length 0.0500 mm", 0.0, 0.0),
+                                item("dup", "Horizontal Wire, length 0.0100 mm", 0.0, 0.0),
+                                item("other", "Horizontal Wire, length 0.0100 mm", 0.0, 0.0),
+                                item("bad", "Horizontal Wire, length 0.0100 mm", 0.0, 0.0),
+                                item("l1", "Global Label 'NET_A'", 0.508, 0.635),
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        result = read_erc_report(report, [sch])
+        items = result.errors[0].items
+        assert [i.description for i in items] == [
+            "Horizontal Wire, length 10.00 mm",
+            "Bus, length 5.00 mm",
+            # Two lines with one UUID: the line is not known.
+            "Horizontal Wire, length 0.0100 mm",
+            # Not a line of the files, or a line that KiCad cannot read: the text stays.
+            "Horizontal Wire, length 0.0100 mm",
+            "Horizontal Wire, length 0.0100 mm",
+            "Global Label 'NET_A'",
+        ]
+        assert (items[0].x_mm, items[0].y_mm) == (10.0, 10.0)
+        assert (items[-1].x_mm, items[-1].y_mm) == (50.8, 63.5)
+        assert result.notes == [
+            "KiCad 10.0.6 writes the lengths of the item texts 100 times too small: the "
+            "server could not correct 3 item text(s) (not a wire, a bus or a graphic line of "
+            "the schematic files, two lines with one UUID, or a text that is not the text of "
+            "KiCad). Their lengths stay 100 times too small."
+        ]
+        assert result.units == ErcUnits("10.0.0")
+
+    def test_corrected_version(self):
+        report = _load("erc_kicad10_en.json")
+        report["kicad_version"] = "10.0.7"
+        positions = [(i.x_mm, i.y_mm) for e in read_erc_report(report).errors for i in e.items]
+        raw = [
+            (float(i["pos"]["x"]), float(i["pos"]["y"]))
+            for s in report["sheets"]
+            for v in s["violations"]
+            for i in v["items"]
+        ]
+        assert positions == raw
 
 
 class TestDrcReport:
@@ -188,7 +322,7 @@ class TestDrcReport:
 
 class TestValidationFormatting:
     def test_erc_row_has_pin_data(self):
-        errors = parse_erc_report(_load("erc_kicad10_en.json"), 100.0)
+        errors = parse_erc_report(_load("erc_kicad10_en.json"))
         row = validation._erc_row(errors[0])
         assert "U1.3 SDA (Bidirectional)" in row
         assert "(101.60, 76.20)" in row

@@ -9,12 +9,16 @@ rules get the reference and the position, and the pin fields stay empty.
 
 import math
 import re
-import statistics
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..models.types import DRCError, DRCItem, ERCError, ERCItem
-from ..utils.kicad_text import TOKEN, KiCadEncodingError, read_as_kicad
+from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
+from .kicad_versions import kicad_release, version_triple
+from .sch_geometry import Point, node_point
+from .sexpr import SExprError, parse
 
 # A reference designator: "U13", "AN-GNSS1", "#PWR055", "R1A".
 _REF = r"#?[A-Za-z][\w+-]*\d\w*"
@@ -39,8 +43,9 @@ _DRC_BRACKETS = re.compile(r"\[[^\]]*\]")
 _DRC_OF_REF = re.compile(rf"\bof (?P<ref>{_REF})\b")
 _DRC_FOOTPRINT_REF = re.compile(rf"^Footprint (?P<ref>{_REF})\b")
 
-# Scale factors that the position calibration can select.
-_POSITION_SCALES = (1.0, 10.0, 100.0, 1000.0)
+# IU_PER_MM of schIUScale (100 nm) and of pcbIUScale (1 nm).
+_SCH_IU_PER_MM = 10_000
+_PCB_IU_PER_MM = 1_000_000
 
 
 def _attrs_to_pin(attrs: str) -> tuple[str, str]:
@@ -63,15 +68,198 @@ def _valid_ref(ref: str | None) -> str:
     return ref if ref and (_REF_RE.match(ref) or _UNANNOTATED_RE.match(ref)) else ""
 
 
-def parse_erc_item(item: dict[str, Any], position_scale: float = 1.0) -> ERCItem:
-    """Parse one item of an ERC violation."""
+@dataclass(frozen=True)
+class ErcUnits:
+    """How kicad-cli wrote the values of an ERC JSON report (ERC_REPORT::WriteJsonReport).
+
+    KiCad 8.0, 9.0 and 10.0.0 to 10.0.6 write the report with pcbIUScale, not
+    with schIUScale: the positions and the lengths in the item texts are 100
+    times too small. KiCad 10.0.7 corrects it ("Fix erc json report using wrong
+    unit scale"), and branch master too.
+    """
+
+    # The values have pcbIUScale: the rules of MessageTextFromValue of the
+    # version for the item texts (_value_text), "8", "9.0.0", "9.0.4" or
+    # "10.0.0". None: the values are in mm, or the rules are not known.
+    value_rules: str | None = None
+    # False: the positions are not known (not in mm, or no rules).
+    positions: bool = True
+    note: str | None = None  # The limit of the values, for the output.
+
+    @property
+    def pcb_scale(self) -> bool:
+        """True when the values have pcbIUScale (100 times too small)."""
+        return self.value_rules is not None
+
+
+_NO_RULES = (
+    "The server has no rules for the ERC JSON report of KiCad {version}, thus it gives "
+    "no positions, and the lengths in the item texts are as the report gives them. KiCad "
+    "8.0, 9.0 and 10.0.0 to 10.0.6 write them 100 times too small "
+    "(ERC_REPORT::WriteJsonReport)."
+)
+
+
+def erc_report_units(report: dict[str, Any]) -> ErcUnits:
+    """Return the units of the values of an ERC JSON report, from its KiCad version.
+
+    The rules come from the KiCad source of each release (ERC_REPORT,
+    EDA_UNIT_UTILS::UI::MessageTextFromValue): 8.0.0 to 8.0.9, 9.0.0 to 9.0.9
+    and 10.0.0 to 10.0.7. A nightly build gets the rule of branch master.
+    """
+    version = str(report.get("kicad_version", ""))
+    if report.get("coordinate_units", "mm") != "mm":
+        return ErcUnits(
+            positions=False,
+            note=f"The ERC report has the units {report.get('coordinate_units')!r}, not mm: "
+            "the server does not give its positions.",
+        )
+    numbers = version_triple(version)
+    if numbers is None:
+        return ErcUnits(positions=False, note=_NO_RULES.format(version=version or "(no version)"))
+    if kicad_release(version) is None:
+        if numbers[0] == 10 and numbers[1] == 99:
+            return ErcUnits(
+                note=f"KiCad {version} is a nightly build: the server reads its ERC report with "
+                "the rule of branch master (the values are in mm). A nightly build before the "
+                "correction of KiCad (2026-09) writes them 100 times too small.",
+            )
+        return ErcUnits(positions=False, note=_NO_RULES.format(version=version))
+    major, _minor, patch = numbers
+    if major == 8 and patch <= 9:
+        return ErcUnits("8")
+    if major == 9 and patch <= 9:
+        return ErcUnits("9.0.0" if patch <= 3 else "9.0.4")
+    if major == 10 and patch <= 6:
+        return ErcUnits("10.0.0")
+    if major == 10 and patch == 7:
+        return ErcUnits()
+    return ErcUnits(positions=False, note=_NO_RULES.format(version=version))
+
+
+def _value_text(value_iu: float, pcb_scale: bool, rules: str, point: str) -> str:
+    """Return a distance in mm as MessageTextFromValue gives it, with no unit.
+
+    The rules of each version:
+
+    - "8": "%.4f" (common is built with no EESCHEMA, thus also the schematic
+      scale gives 4 decimals).
+    - "9.0.0" (9.0.0 to 9.0.3): "%.2f" for schIUScale, "%.4f" for pcbIUScale.
+    - "9.0.4" (9.0.4 to 9.0.9): "%.3f" for schIUScale, and the last "0" of the
+      3 decimals goes away; "%.4f" for pcbIUScale.
+    - "10.0.0" (10.0.0 to 10.0.6): as "9.0.4", and a value that is not 0 but
+      gives only zeros has "%.3e".
+
+    Args:
+        point: The decimal point of the locale of KiCad.
+    """
+    value = value_iu / (_PCB_IU_PER_MM if pcb_scale else _SCH_IU_PER_MM)
+    short_form = not pcb_scale and rules != "8"
+    if rules == "8" or pcb_scale:
+        text = f"{value:.4f}"
+    elif rules == "9.0.0":
+        text = f"{value:.2f}"
+    else:
+        text = f"{value:.3f}"
+    if rules == "10.0.0" and value != 0.0 and not any("1" <= ch <= "9" for ch in text):
+        text = f"{value:.3e}"
+    if short_form and rules != "9.0.0" and len(text) > 4 and text[-4] == "." and text[-1] == "0":
+        text = text[:-1]
+    return text.replace(".", point)
+
+
+def _line_length(start: Point, end: Point, rules: str) -> float:
+    """Return the length (IU) of a SCH_LINE as SCH_LINE::GetItemDescription computes it.
+
+    KiCad 8: EuclideanNorm of trigo.h (hypot). KiCad 9 and 10: VECTOR2::Distance,
+    whose EuclideanNorm gives |x| * sqrt(2) at 45 degrees, |x| or |y| for a
+    horizontal or vertical line, else hypot.
+    """
+    dx, dy = float(end[0] - start[0]), float(end[1] - start[1])
+    if rules == "8":
+        return math.hypot(dx, dy)
+    if abs(dx) == abs(dy):
+        return abs(dx) * math.sqrt(2)
+    if dx == 0:
+        return abs(dy)
+    if dy == 0:
+        return abs(dx)
+    return math.hypot(dx, dy)
+
+
+def corrected_length_text(
+    description: str, start: Point, end: Point, units: ErcUnits
+) -> str | None:
+    """Return the item text of a wire, a bus or a graphic line with its correct length.
+
+    SCH_LINE::GetItemDescription ends with the length and " mm". The function
+    computes the text that KiCad wrote with pcbIUScale and replaces it with the
+    text of schIUScale. The decimal point is the point of the locale of KiCad:
+    "." or ",".
+
+    Returns:
+        The corrected text, or None when the text does not end with the length
+        that KiCad wrote for this line.
+    """
+    if units.value_rules is None:
+        return None
+    length = _line_length(start, end, units.value_rules)
+    for point in (".", ","):
+        wrong = f" {_value_text(length, True, units.value_rules, point)} mm"
+        if description.endswith(wrong):
+            right = f" {_value_text(length, False, units.value_rules, point)} mm"
+            return description[: -len(wrong)] + right
+    return None
+
+
+def schematic_lines(schematic_files: Iterable[Path]) -> dict[str, tuple[Point, Point] | None]:
+    """Return the ends (IU) of each wire, bus and graphic line by its UUID.
+
+    A UUID that two lines with different ends have gives None: the line of
+    the report is not known. A file that the server cannot read, and a line
+    with a point that KiCad cannot read, add no line.
+    """
+    lines: dict[str, tuple[Point, Point] | None] = {}
+    for path in schematic_files:
+        try:
+            root = parse(read_as_kicad(path))
+        except (OSError, KiCadEncodingError, SExprError):
+            continue
+        for head in ("wire", "bus", "polyline"):
+            for node in root.children(head):
+                pts = node.first("pts")
+                try:
+                    ends = [node_point(xy) for xy in pts.children("xy")] if pts else []
+                except ValueError:
+                    continue
+                uuid = node.first("uuid")
+                # A polyline with two points is a SCH_LINE (a graphic line).
+                if len(ends) != 2 or uuid is None:
+                    continue
+                key = uuid.value(0, "")
+                line = (ends[0], ends[1])
+                lines[key] = line if lines.get(key, line) == line else None
+    return lines
+
+
+def parse_erc_item(item: dict[str, Any], pcb_scale: bool = False) -> ERCItem:
+    """Parse one item of an ERC violation.
+
+    Args:
+        pcb_scale: The positions have pcbIUScale (ErcUnits).
+    """
     desc = item.get("description", "")
     out = ERCItem(description=desc, uuid=item.get("uuid", ""))
 
     pos = item.get("pos") or {}
     if "x" in pos and "y" in pos:
-        out.x_mm = round(float(pos["x"]) * position_scale, 4)
-        out.y_mm = round(float(pos["y"]) * position_scale, 4)
+        if pcb_scale:
+            # The value is IU / 1e6 with schematic IU: the IU are exact integers.
+            out.x_mm = round(float(pos["x"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
+            out.y_mm = round(float(pos["y"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
+        else:
+            out.x_mm = float(pos["x"])
+            out.y_mm = float(pos["y"])
 
     # The English item text of a symbol and of its pin has the text of the Reference
     # field as it is (SCH_SYMBOL::GetItemDescription, SCH_PIN::GetItemDescription):
@@ -122,12 +310,37 @@ def _erc_sheets(report: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"path": "", "violations": report.get("violations", [])}]
 
 
-def parse_erc_report(report: dict[str, Any], position_scale: float = 1.0) -> list[ERCError]:
-    """Parse the data of an ERC JSON report into ERC errors."""
+@dataclass
+class ErcReport:
+    """The violations of an ERC JSON report, and the limits of its values."""
+
+    errors: list[ERCError]
+    notes: list[str] = field(default_factory=list)
+    units: ErcUnits = field(default_factory=ErcUnits)
+
+
+def read_erc_report(report: dict[str, Any], schematic_files: Iterable[Path] = ()) -> ErcReport:
+    """Read the data of an ERC JSON report of kicad-cli.
+
+    The positions get the units of the KiCad version (erc_report_units). With
+    the board scale, an item text that ends with " mm" has a length: only
+    SCH_LINE::GetItemDescription gives a value in an ERC item text. The text of
+    a wire, a bus or a graphic line of the schematic files gets its correct
+    length (corrected_length_text); a note counts the other texts.
+    """
+    units = erc_report_units(report)
     errors = []
+    lengths = []  # The items whose text has a length in the board scale.
     for sheet in _erc_sheets(report):
         for v in sheet.get("violations", []):
-            items = [parse_erc_item(i, position_scale) for i in v.get("items", [])]
+            items = []
+            for raw in v.get("items", []):
+                item = parse_erc_item(raw, units.pcb_scale)
+                if not units.positions:
+                    item.x_mm = item.y_mm = None
+                if units.pcb_scale and item.description.endswith(" mm"):
+                    lengths.append(item)
+                items.append(item)
             errors.append(
                 ERCError(
                     severity=v.get("severity", "error"),
@@ -140,90 +353,31 @@ def parse_erc_report(report: dict[str, Any], position_scale: float = 1.0) -> lis
                     sheet=sheet.get("path", ""),
                 )
             )
-    return errors
+    not_corrected = 0
+    lines = schematic_lines(schematic_files) if lengths else {}
+    for item in lengths:
+        line = lines.get(item.uuid)
+        text = corrected_length_text(item.description, *line, units) if line else None
+        if text is None:
+            not_corrected += 1
+        else:
+            item.description = text
+    notes = [units.note] if units.note else []
+    if not_corrected:
+        notes.append(
+            f"KiCad {report.get('kicad_version')} writes the lengths of the item texts 100 "
+            f"times too small: the server could not correct {not_corrected} item text(s) "
+            "(not a wire, a bus or a graphic line of the schematic files, two lines with one "
+            "UUID, or a text that is not the text of KiCad). Their lengths stay 100 times "
+            "too small."
+        )
+    return ErcReport(errors, notes, units)
 
 
-def top_level_positions(text: str) -> dict[str, tuple[float, float]]:
-    """Map the UUID of each top-level schematic object to its position.
-
-    A top-level object is a direct child of ``kicad_sch`` (a symbol, a label,
-    a sheet and other objects). The function reads its direct ``at`` and
-    ``uuid`` children. It reads the token structure, not the indentation,
-    thus it accepts all KiCad file formats.
-    """
-    positions: dict[str, tuple[float, float]] = {}
-    # Each frame: [head, atoms, at, uuid]. Atoms are kept only for the
-    # children of top-level objects (depth 3).
-    stack: list[list[Any]] = []
-    for m in TOKEN.finditer(text):
-        tok = m.group()
-        if tok == "(":
-            stack.append([None, [], None, None])
-        elif tok == ")":
-            if not stack:
-                continue
-            head, atoms, at, uid = stack.pop()
-            if len(stack) == 2:
-                parent = stack[-1]
-                if head == "at" and parent[2] is None and len(atoms) >= 2:
-                    try:
-                        parent[2] = (float(atoms[0]), float(atoms[1]))
-                    except ValueError:
-                        pass
-                elif head == "uuid" and parent[3] is None and atoms:
-                    parent[3] = atoms[0].strip('"')
-            elif len(stack) == 1 and at is not None and uid:
-                positions[uid] = at
-        elif stack:
-            frame = stack[-1]
-            if frame[0] is None:
-                frame[0] = tok
-            elif len(stack) == 3:
-                frame[1].append(tok)
-    return positions
-
-
-def erc_position_scale(report: dict[str, Any], schematic_files: list[Path]) -> tuple[float, str]:
-    """Find the factor that changes the ERC report positions to mm.
-
-    KiCad 10.0.6 writes the ERC JSON positions 100 times too small, although
-    ``coordinate_units`` is "mm". The function compares the report positions
-    with the positions of the same objects (found by UUID) in the schematic
-    files. If no object is found, it uses the KiCad version.
-
-    Returns:
-        (scale, source). Source is "calibrated", "version" or "report".
-    """
-    index: dict[str, tuple[float, float]] = {}
-    for path in schematic_files:
-        try:
-            index.update(top_level_positions(read_as_kicad(path)))
-        except (OSError, KiCadEncodingError):
-            continue
-
-    ratios = []
-    for sheet in _erc_sheets(report):
-        for v in sheet.get("violations", []):
-            for item in v.get("items", []):
-                ref_pos = index.get(item.get("uuid", ""))
-                pos = item.get("pos") or {}
-                if ref_pos is None or "x" not in pos or "y" not in pos:
-                    continue
-                for file_val, rpt_val in zip(ref_pos, (pos["x"], pos["y"]), strict=True):
-                    if abs(rpt_val) > 1e-9 and abs(file_val) > 1e-9:
-                        ratios.append(file_val / rpt_val)
-
-    if ratios:
-        ratio = statistics.median(ratios)
-        if ratio > 0:
-            scale = min(_POSITION_SCALES, key=lambda s: abs(math.log(ratio / s)))
-            if abs(ratio / scale - 1.0) < 0.02:
-                return scale, "calibrated"
-
-    # Examined only on KiCad 10.0.6. Examine again for each new KiCad version.
-    if str(report.get("kicad_version", "")).startswith("10."):
-        return 100.0, "version"
-    return 1.0, "report"
+def parse_erc_report(report: dict[str, Any]) -> list[ERCError]:
+    """Parse the data of an ERC JSON report into ERC errors (read_erc_report with no
+    schematic files: the item texts of lines keep the length of the report)."""
+    return read_erc_report(report).errors
 
 
 def parse_drc_item(item: dict[str, Any]) -> DRCItem:

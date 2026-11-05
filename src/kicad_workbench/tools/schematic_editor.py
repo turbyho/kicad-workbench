@@ -4,7 +4,6 @@ import asyncio
 import dataclasses
 import itertools
 import math
-import re
 import uuid
 from pathlib import Path
 
@@ -98,25 +97,41 @@ def _child_symbol(parent: Node, name: str) -> Node | None:
     return None
 
 
-def _insert_symbol_into_lib_symbols(content: str, symbol_text: str) -> str:
-    """Insert a symbol definition into the lib_symbols section of a schematic."""
-    if parse(content).first("lib_symbols") is None:
-        # No lib_symbols section - create one before the first schematic element
-        insert_pattern = r"(\n\t\((?:symbol|wire|label|global_label|junction|text|sheet|sheet_instances)\b)"
-        m = re.search(insert_pattern, content)
-        if m:
-            insert_pos = m.start()
-            new_section = f"\n\t(lib_symbols\n{symbol_text}\n\t)"
-            return content[:insert_pos] + new_section + content[insert_pos:]
-        # Last resort: insert before final closing paren
-        stripped = content.rstrip()
-        if stripped.endswith(")"):
-            return stripped[:-1] + f"\n\t(lib_symbols\n{symbol_text}\n\t)\n)\n"
-        return content
+# The items that SCH_IO_KICAD_SEXPR::Format writes before (lib_symbols ...), in
+# this order (KiCad 8, 9 and 10).
+_HEADER_HEADS = ("version", "generator", "generator_version", "uuid", "paper", "title_block")
 
-    # Insert before the closing paren of lib_symbols
-    end_pos = parse(content).first("lib_symbols").end - 1
-    return content[:end_pos] + "\n" + symbol_text + "\n" + content[end_pos:]
+
+def _insert_symbol_into_lib_symbols(content: str, symbol_text: str) -> str:
+    """Insert a symbol definition into the lib_symbols section of a schematic.
+
+    KiCad writes the section in each file, also when it is empty, after the
+    header items (_HEADER_HEADS; SCH_IO_KICAD_SEXPR::Format): each symbol on
+    its own lines, and the ")" of a section with symbols on its own line. A file
+    with no section gets it after the header items at the start of the file.
+    The parser of KiCad reads the section at each place. The caller has checked
+    the head "kicad_sch" (writable_schematic_version).
+    """
+    root = parse(content)
+    section = root.first("lib_symbols")
+    if section is not None:
+        symbols = section.children()
+        if symbols:
+            last = symbols[-1].end
+            return content[:last] + "\n" + symbol_text + content[last:]
+        # "(lib_symbols)": the ")" goes on its own line, with the indent of the section.
+        line_start = content.rfind("\n", 0, section.start) + 1
+        lead = content[line_start : section.start]
+        lead = lead if not lead.strip() else ""
+        head_end = section.items[0].end
+        return content[:head_end] + "\n" + symbol_text + "\n" + lead + content[section.end - 1 :]
+    position = root.items[0].end
+    for item in root.items[1:]:
+        if not isinstance(item, Node) or item.head not in _HEADER_HEADS:
+            break
+        position = item.end
+    section_text = f"\n\t(lib_symbols\n{symbol_text}\n\t)"
+    return content[:position] + section_text + content[position:]
 
 
 # ---------------------------------------------------------------------------
@@ -171,10 +186,13 @@ def _pin_anchor(content: str, reference: str, pin: str) -> tuple[Point, int] | N
 
 
 def _append_top_level(content: str, entry: str) -> str:
-    stripped = content.rstrip()
-    if not stripped.endswith(")"):
-        return content + "\n" + entry + "\n"
-    return stripped[:-1] + entry + "\n)\n"
+    """Add items at the end of the root list (kicad_sch), before its ")".
+
+    The parser gives the ")" of the root list: a text after it (a comment) stays
+    after it.
+    """
+    end = parse(content).end - 1
+    return content[:end] + entry + "\n" + content[end:]
 
 
 _LABEL_SHAPES = ("input", "output", "bidirectional", "tri_state", "passive")

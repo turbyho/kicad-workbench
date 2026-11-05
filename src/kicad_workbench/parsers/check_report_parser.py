@@ -1,9 +1,10 @@
 """Parsers for the ERC and DRC JSON reports of kicad-cli (KiCad 8+).
 
-The tools run kicad-cli with an English locale (see ``utils.kicad_cli``), so
-the item text is English. The rules for English text come first. If the text
-is localized, language-neutral fallback rules get the reference and the
-position, and the pin fields stay empty.
+The tools run kicad-cli in English (a copy of the KiCad settings with the
+language English, see ``utils.kicad_cli``), so the item text of their reports is
+English. The rules for English text come first. A report that KiCad wrote in an
+other language (for example a report of the user): language-neutral fallback
+rules get the reference and the position, and the pin fields stay empty.
 """
 
 import math

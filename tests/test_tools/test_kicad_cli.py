@@ -1,7 +1,9 @@
 """Tests for the kicad-cli wrapper (utils/kicad_cli)."""
 
 import asyncio
+import json
 import locale
+import shutil
 import sys
 from pathlib import Path
 
@@ -218,3 +220,134 @@ class TestCharacterSet:
     def test_no_output(self):
         assert decode_output(None) == ""
         assert decode_output(b"") == ""
+
+
+class TestEnglishSettings:
+    """kicad-cli takes its language from system.language of kicad_common.json
+    (PGM_BASE::SetLanguage), thus an English kicad-cli gets a copy of the
+    settings with the language English."""
+
+    @pytest.fixture
+    def settings(self, monkeypatch, tmp_path):
+        home = tmp_path / "user"
+        version_dir = home / "10.0"
+        (version_dir / "colors").mkdir(parents=True)
+        (version_dir / "colors" / "theme.json").write_text("{}", encoding="utf-8")
+        (version_dir / "sym-lib-table").write_text("(sym_lib_table)", encoding="utf-8")
+        common = {"system": {"language": "Čeština", "x": 1}, "environment": {"vars": {"A": "b"}}}
+        (version_dir / "kicad_common.json").write_text(
+            json.dumps(common, ensure_ascii=False), encoding="utf-8"
+        )
+        monkeypatch.setenv("KICAD_CONFIG_HOME", str(home))
+        return version_dir
+
+    @pytest.mark.parametrize(
+        ("platform", "language"),
+        [("linux", "Default"), ("darwin", "English"), ("win32", "English")],
+    )
+    def test_copy_with_the_language_english(
+        self, settings, tmp_path, monkeypatch, platform, language
+    ):
+        # Unix: "Default", thus LANG=C of kicad_cli_env and the LC_CTYPE of the paths
+        # apply (a language of the settings sets LC_CTYPE too).
+        monkeypatch.setattr(kicad_cli.sys, "platform", platform)
+        copy = tmp_path / "copy"
+        kicad_cli.english_settings(copy, "10.0.6")
+        common = json.loads((copy / "10.0" / "kicad_common.json").read_text(encoding="utf-8"))
+        assert common == {
+            "system": {"language": language, "x": 1},
+            "environment": {"vars": {"A": "b"}},
+        }
+        assert (copy / "10.0" / "sym-lib-table").read_text(encoding="utf-8") == "(sym_lib_table)"
+        assert (copy / "10.0" / "colors" / "theme.json").is_file()
+        # The settings of the user do not change.
+        user = json.loads((settings / "kicad_common.json").read_text(encoding="utf-8"))
+        assert user["system"]["language"] == "Čeština"
+
+    def test_settings_that_cannot_be_read(self, settings, tmp_path):
+        # No default settings in place of the settings of the user: an error.
+        (settings / "kicad_common.json").write_text("{not json", encoding="utf-8")
+        with pytest.raises(ValueError, match="kicad_common.json is not valid JSON"):
+            kicad_cli.english_settings(tmp_path / "a", "10.0.6")
+        (settings / "kicad_common.json").write_text('{"system": 3}', encoding="utf-8")
+        with pytest.raises(ValueError, match="system is not a JSON object"):
+            kicad_cli.english_settings(tmp_path / "b", "10.0.6")
+
+    def test_settings_as_kicad_reads_them(self, settings, tmp_path):
+        """Comments and a byte order mark (nlohmann::json with ignore_comments)."""
+        (settings / "kicad_common.json").write_bytes(
+            '\ufeff{"environment": {"vars": {"A": "b"}} // user\n /* x */}'.encode()
+        )
+        kicad_cli.english_settings(tmp_path / "a", "10.0.6")
+        common = json.loads((tmp_path / "a" / "10.0" / "kicad_common.json").read_text("utf-8"))
+        assert common["environment"] == {"vars": {"A": "b"}}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need rights")
+    def test_symbolic_links(self, settings, tmp_path):
+        """A file of a dotfile manager is a link: the copy holds the file, thus a
+        write cannot change the settings of the user. A link to no file is left out."""
+        real = tmp_path / "dotfiles" / "kicad_common.json"
+        real.parent.mkdir()
+        (settings / "kicad_common.json").rename(real)
+        (settings / "kicad_common.json").symlink_to(real)
+        (settings / "fp-lib-table").symlink_to(tmp_path / "missing")
+        kicad_cli.english_settings(tmp_path / "copy", "10.0.6")
+        copy = tmp_path / "copy" / "10.0"
+        assert not (copy / "kicad_common.json").is_symlink()
+        assert json.loads(real.read_text("utf-8"))["system"]["language"] == "Čeština"
+        assert not (copy / "fp-lib-table").exists()
+
+    def test_no_version(self, settings, monkeypatch):
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
+        monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: None)
+        with pytest.raises(RuntimeError, match="kicad-cli did not give its version"):
+            run_kicad_cli_sync(["-c", "pass"], timeout=30, english=True)
+
+    def test_no_settings_of_the_version(self, settings, tmp_path):
+        kicad_cli.english_settings(tmp_path / "copy", "9.0.9")
+        assert [p.name for p in (tmp_path / "copy" / "9.0").iterdir()] == ["kicad_common.json"]
+
+    def test_run_gives_the_copy_to_kicad_cli(self, settings, monkeypatch):
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
+        monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.6")
+        code = (
+            "import json, os, pathlib; home = pathlib.Path(os.environ['KICAD_CONFIG_HOME']); "
+            "print(home); print(json.loads((home / '10.0' / 'kicad_common.json')"
+            ".read_text(encoding='utf-8'))['system']['language'])"
+        )
+        result = run_kicad_cli_sync(["-c", code], timeout=30, english=True)
+        home, language = decode_output(result.stdout).split()
+        assert language == kicad_cli._english_language() and home != str(settings.parent)
+        assert not Path(home).exists()  # the copy is removed after the run
+        # Without english, kicad-cli gets the settings of the user.
+        result = run_kicad_cli_sync(["-c", code], timeout=30)
+        assert decode_output(result.stdout).split() == [str(settings.parent), "Čeština"]
+
+    def test_settings_that_cannot_be_copied(self, settings, monkeypatch):
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
+        monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.6")
+        (settings / "kicad_common.json").write_text("{not json", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="The settings of KiCad cannot be copied"):
+            run_kicad_cli_sync(["-c", "pass"], timeout=30, english=True)
+
+    @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli is not installed")
+    def test_real_kicad_cli_in_an_other_language(self, settings, tmp_path):
+        """A user with Czech in KiCad: the report of kicad-cli is in English."""
+        version = decode_output(run_kicad_cli_sync(["version"], timeout=30).stdout).strip()
+        major, minor = version.split(".")[:2]
+        settings.rename(settings.parent / f"{major}.{minor}")
+        sheet = tmp_path / "deska č.kicad_sch"
+        sheet.write_text(
+            '(kicad_sch (version 20231120) (generator "eeschema") (uuid "a") (paper "A4")\n'
+            '  (text "x" (at 0 0 0) (effects (font (size 1.27 1.27))))\n'
+            "  (wire (pts (xy 10 10) (xy 20 10))))\n",
+            encoding="utf-8",
+        )
+        report = tmp_path / "erc.json"
+        args = ["sch", "erc", "--format", "json", "--output", str(report), str(sheet)]
+        result = run_kicad_cli_sync(args, timeout=60, english=True)
+        assert result.returncode == 0, decode_output(result.stderr)
+        text = decode_output(result.stdout)
+        assert "Found" in text and "Nalezeno" not in text, text
+        violations = json.loads(report.read_text(encoding="utf-8"))["sheets"][0]["violations"]
+        assert violations and all(v["description"].isascii() for v in violations), violations

@@ -29,8 +29,8 @@ from .unit_fields import CONFIRMED_FIELD, field_key, mpn_order
 
 # The text of KiCad in a BOM line of more symbols or units with different values of
 # a field (INDETERMINATE_STATE, include/widgets/ui_common.h; FIELDS_EDITOR_GRID_DATA_MODEL
-# in eeschema/fields_data_model.cpp, KiCad 8, 9 and 10). A KiCad in an other language
-# writes its translation.
+# in eeschema/fields_data_model.cpp, KiCad 8, 9 and 10). The tool runs kicad-cli in
+# English (utils/kicad_cli.py); a BOM of KiCad in an other language has its translation.
 MIXED_VALUES = "-- mixed values --"
 
 

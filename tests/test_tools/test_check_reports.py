@@ -230,6 +230,26 @@ class TestKicadCliIntegration:
         assert out.startswith("# ERC Violations")
         assert "**Count:** 1" in out
 
+    @pytest.mark.parametrize("check", ["erc", "drc"])
+    async def test_settings_that_cannot_be_copied(self, tmp_path, monkeypatch, check):
+        """An expected error of an English kicad-cli gives "❌ <message>", no traceback."""
+
+        async def failing(*args, **kwargs):
+            raise RuntimeError("The settings of KiCad cannot be copied for kicad-cli: x")
+
+        monkeypatch.setattr(validation, "run_kicad_cli", failing)
+        if check == "erc":
+            sch = tmp_path / "dangling_label.kicad_sch"
+            shutil.copy(LABEL_SCH, sch)
+            out = await validation.run_erc(str(sch))
+        else:
+            pcb = tmp_path / "board.kicad_pcb"
+            pcb.write_text(
+                '(kicad_pcb (version 20240108) (generator "pcbnew"))\n', encoding="utf-8"
+            )
+            out = await validation.run_drc(str(pcb))
+        assert out == "❌ The settings of KiCad cannot be copied for kicad-cli: x"
+
     async def test_export_erc_report_with_violations(self, tmp_path):
         sch = tmp_path / "dangling_label.kicad_sch"
         shutil.copy(LABEL_SCH, sch)

@@ -328,22 +328,25 @@ async def run_erc(
         erc_report_path.unlink(missing_ok=True)
 
         # Run ERC using kicad-cli (KiCad 7+). --severity-all also gives the
-        # excluded violations, with "excluded": true. The English locale
+        # excluded violations, with "excluded": true. The English kicad-cli
         # makes the item text parsable (pin number, pin name and pin type).
-        result = await run_kicad_cli(
-            [
-                "sch",
-                "erc",
-                "--format",
-                "json",
-                "--severity-all",
-                "--output",
-                str(erc_report_path),
-                str(sch_path),
-            ],
-            timeout=60,
-            english=True,
-        )
+        try:
+            result = await run_kicad_cli(
+                [
+                    "sch",
+                    "erc",
+                    "--format",
+                    "json",
+                    "--severity-all",
+                    "--output",
+                    str(erc_report_path),
+                    str(sch_path),
+                ],
+                timeout=60,
+                english=True,
+            )
+        except RuntimeError as e:  # the settings for an English kicad-cli
+            return f"❌ {e}"
 
         stderr_text = decode_output(result.stderr)
 
@@ -505,11 +508,14 @@ async def run_drc(
         args = ["pcb", "drc", "--format", "json", "--severity-all"]
         if pcb.with_suffix(".kicad_sch").exists():
             args.append("--schematic-parity")
-        result = await run_kicad_cli(
-            args + ["--output", str(drc_report_path), str(pcb)],
-            timeout=60,
-            english=True,
-        )
+        try:
+            result = await run_kicad_cli(
+                args + ["--output", str(drc_report_path), str(pcb)],
+                timeout=60,
+                english=True,
+            )
+        except RuntimeError as e:  # the settings for an English kicad-cli
+            return f"❌ {e}"
 
         stderr_text = decode_output(result.stderr)
 

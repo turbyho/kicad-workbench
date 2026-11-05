@@ -256,6 +256,15 @@ class TestVariables:
         monkeypatch.setenv("LIBS", "")
         assert expand("x${LIBS}/a", env) == "x/a"
 
+    def test_settings_with_comments(self, kicad):
+        """KiCad reads kicad_common.json with comments and a byte order mark
+        (nlohmann::json with ignore_comments, JSON_SETTINGS::LoadFromFile)."""
+        common = kicad["root"] / "config" / "10.0" / "kicad_common.json"
+        common.write_bytes(
+            '\ufeff{"environment": {"vars": {"MYLIBS": "/c"}} /* a */ } // b\n'.encode()
+        )
+        assert kicad_environment("10.0.6").variables["MYLIBS"] == "/c"
+
     def test_no_appdata_on_windows(self, monkeypatch):
         monkeypatch.setattr(library_tables.sys, "platform", "win32")
         monkeypatch.delenv("KICAD_CONFIG_HOME", raising=False)

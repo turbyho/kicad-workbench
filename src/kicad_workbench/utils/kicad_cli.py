@@ -19,6 +19,7 @@ non-async contexts.
 import asyncio
 import codecs
 import functools
+import json
 import locale
 import os
 import shutil
@@ -28,7 +29,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..parsers.kicad_versions import version_numbers
+from .kicad_text import read_kicad_json
 from .kicad_version import find_kicad_install
+from .library_tables import kicad_settings_dir
 
 _cached_exe: str | None = None
 
@@ -140,13 +144,11 @@ def kicad_cli_env(english: bool = False) -> dict[str, str] | None:
     """Return the environment for kicad-cli, or None for the environment of
     this process.
 
-    With ``english``, kicad-cli writes report text (for example the ERC item
-    "Symbol U1 Pin 3 [...]") in English, which the report parsers need.
-    KiCad takes its language from LC_ALL, LC_MESSAGES, LANGUAGE and LANG,
-    thus the function removes all LC_ variables of the user and sets LANG
-    to "C", which each system has. This also keeps a decimal comma of the
-    user (LC_NUMERIC) out of the report. On Windows and macOS these variables
-    can have no effect. The parsers then fall back to language-neutral rules.
+    With ``english``, the function removes all LC_ variables of the user and
+    sets LANG to "C", which each system has. This keeps a decimal comma of the
+    user (LC_NUMERIC) out of the report. The language of kicad-cli comes from
+    its settings (see english_settings(), which run_kicad_cli_sync() uses):
+    KiCad takes LANG only when the language of its settings is "Default".
 
     LC_CTYPE is child_ctype(). A locale that does not exist (for example
     "C.UTF-8" on macOS or on an old Linux) would put kicad-cli in the "C"
@@ -191,6 +193,65 @@ def decode_output(data: bytes | None) -> str:
     return data.decode(encoding, errors="replace")
 
 
+# The labels of the list of languages of KiCad (LanguagesList of common/pgm_base.cpp,
+# KiCad 8.0.9, 9.0.9 and 10.0.6). "English" is not translated; "Default" matches no
+# label of the list when KiCad runs in English, thus it also gives wxLANGUAGE_DEFAULT.
+_ENGLISH = "English"
+_DEFAULT = "Default"
+
+
+def _english_language() -> str:
+    """Return the language of the settings that gives an English kicad-cli.
+
+    On Linux and other Unix systems: "Default". kicad-cli then takes the language
+    of its environment (wxLocale::Init with wxLANGUAGE_DEFAULT), and
+    kicad_cli_env(english=True) gives LANG=C and the LC_CTYPE of the file paths. A
+    language of the settings makes wxLocale set all categories of the locale, also
+    LC_CTYPE: in a locale that is not UTF-8, kicad-cli then cannot load a file
+    whose path is not ASCII. On Windows and macOS the environment does not give
+    the language: "English". There kicad-cli gets the file paths as Unicode
+    (Windows) or as UTF-8 (macOS).
+    """
+    return _ENGLISH if sys.platform in ("win32", "darwin") else _DEFAULT
+
+
+def english_settings(directory: Path, version: str) -> None:
+    """Make in directory a copy of the KiCad settings of the version, with the
+    language of _english_language(), for KICAD_CONFIG_HOME of kicad-cli.
+
+    kicad-cli takes its language from system.language of kicad_common.json
+    (PGM_BASE::InitPgm calls SetLanguage, KiCad 8, 9 and 10), thus LANG gives
+    English only when that language is "Default". The copy keeps the other
+    settings: the path variables and the global library tables. The settings
+    of the user do not change: the copy has the files, not symbolic links to
+    them (a write of kicad-cli or of this function cannot go through a link
+    into the settings of the user), and a link that points to no file is left
+    out (KiCad does not find that file either). kicad_common.json is read as
+    KiCad reads it (read_kicad_json).
+
+    Raises:
+        OSError: The settings cannot be copied.
+        ValueError: kicad_common.json is not JSON, or its system is not a JSON
+            object.
+        LibraryTableError: The version has no major and minor number.
+    """
+    source = kicad_settings_dir(version)
+    target = directory / source.name
+    if source.is_dir():
+        shutil.copytree(source, target, symlinks=False, ignore_dangling_symlinks=True)
+    else:
+        target.mkdir(parents=True)
+    common = target / "kicad_common.json"
+    try:
+        data = read_kicad_json(common) if common.is_file() else {}
+    except ValueError as e:
+        raise ValueError(f"{source / common.name} is not valid JSON: {e}") from e
+    if not isinstance(data, dict) or not isinstance(data.setdefault("system", {}), dict):
+        raise ValueError(f"{source / common.name}: system is not a JSON object.")
+    data["system"]["language"] = _english_language()
+    common.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def run_kicad_cli_sync(
     args: list[str],
     timeout: float = 60.0,
@@ -198,8 +259,13 @@ def run_kicad_cli_sync(
 ) -> subprocess.CompletedProcess:
     """Run kicad-cli synchronously (blocking).
 
-    ``english`` makes kicad-cli write English report text (see
-    kicad_cli_env()).
+    ``english`` makes kicad-cli write its messages and reports in English, also
+    when the user selected an other language in KiCad: kicad-cli gets a copy
+    of the settings with the language of _english_language()
+    (english_settings()) and the environment of kicad_cli_env(english=True).
+
+    Raises RuntimeError when the settings cannot be copied, or when kicad-cli
+    gives no version.
 
     Raises RuntimeError when an argument is not ASCII and no locale lets
     kicad-cli decode it as this process encodes it (see child_ctype()).
@@ -220,9 +286,24 @@ def run_kicad_cli_sync(
             "the system has no UTF-8 locale for kicad-cli. Install a UTF-8 locale "
             "(for example C.UTF-8), or start the server with PYTHONUTF8=0."
         )
-    return subprocess.run(
-        [exe] + args, capture_output=True, timeout=timeout, env=kicad_cli_env(english)
-    )
+    env = kicad_cli_env(english)
+    if not english:
+        return subprocess.run([exe] + args, capture_output=True, timeout=timeout, env=env)
+    # The thread that runs this function owns the directory: a cancel of the tool
+    # call does not stop kicad-cli.
+    with tempfile.TemporaryDirectory(
+        prefix="kicad-workbench-settings-", ignore_cleanup_errors=True
+    ) as settings:
+        version = kicad_cli_version_sync()
+        if version is None or version_numbers(version) is None:
+            raise RuntimeError(f"kicad-cli did not give its version: {version!r}")
+        try:
+            english_settings(Path(settings), version)
+        except (OSError, ValueError) as e:  # LibraryTableError is a ValueError
+            raise RuntimeError(f"The settings of KiCad cannot be copied for kicad-cli: {e}") from e
+        env = dict(os.environ if env is None else env)
+        env["KICAD_CONFIG_HOME"] = settings
+        return subprocess.run([exe] + args, capture_output=True, timeout=timeout, env=env)
 
 
 @dataclass(frozen=True)
@@ -240,9 +321,9 @@ def export_with_kicad_cli(
 
     kicad-cli gets ``[*command, "--output", <file>, <source>]``. The thread
     that runs this function owns the temporary directory: a cancel of the tool
-    call does not stop kicad-cli. kicad-cli writes its messages in the
-    language of the KiCad settings, thus the function finds the line that
-    names the output file by the name of the directory, not by its text.
+    call does not stop kicad-cli. kicad-cli runs in English (see
+    run_kicad_cli_sync()). The function finds the line that names the output
+    file by the name of the directory, not by its text.
 
     Raises:
         RuntimeError: kicad-cli did not stop in time, or did not write the file.
@@ -285,12 +366,18 @@ async def run_kicad_cli(
     return await asyncio.to_thread(run_kicad_cli_sync, args, timeout, english)
 
 
-async def get_kicad_version() -> str | None:
-    """Return the installed KiCad version (e.g. "10.0.6"), or None if unknown."""
+def kicad_cli_version_sync() -> str | None:
+    """Return the version of kicad-cli (e.g. "10.0.6"), or None if unknown. No
+    cache: KiCad can change while the server runs (one run takes about 0.1 s)."""
     try:
-        result = await run_kicad_cli(["version"], timeout=30)
+        result = run_kicad_cli_sync(["version"], timeout=30)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
     return decode_output(result.stdout).strip() or None
+
+
+async def get_kicad_version() -> str | None:
+    """Return the installed KiCad version (e.g. "10.0.6"), or None if unknown."""
+    return await asyncio.to_thread(kicad_cli_version_sync)

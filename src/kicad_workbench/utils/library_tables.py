@@ -17,7 +17,6 @@ implementation of these rules.
   and others.
 """
 
-import json
 import os
 import re
 import sys
@@ -26,7 +25,7 @@ from pathlib import Path
 
 from ..parsers.kicad_versions import version_numbers
 from ..parsers.sexpr import SExprError, parse
-from .kicad_text import KiCadEncodingError, read_as_kicad
+from .kicad_text import KiCadEncodingError, read_as_kicad, read_kicad_json
 from .kicad_version import get_kicad_share_dir
 
 # The file name of each table kind, and the head of its S-expression.
@@ -140,6 +139,21 @@ def _config_base() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 
 
+def kicad_settings_dir(version: str) -> Path:
+    """Return the settings directory of a KiCad version (kicad_common.json, the
+    global library tables), as PATHS::CalculateUserSettingsPath finds it:
+    KICAD_CONFIG_HOME, else the configuration directory of the user and "kicad",
+    then "<major>.<minor>" of the version.
+
+    Raises:
+        LibraryTableError: The version has no major and minor number, or Windows
+            gives no APPDATA.
+    """
+    major, minor = _parse_version(version)
+    config_home = os.environ.get("KICAD_CONFIG_HOME")
+    return (Path(config_home) if config_home else _config_base() / "kicad") / f"{major}.{minor}"
+
+
 def _stock_dir(version_dir: str) -> Path | None:
     """The "share/kicad" directory of the KiCad installation of the version.
 
@@ -168,8 +182,7 @@ def kicad_environment(version: str) -> KicadEnvironment:
     """
     major, minor = _parse_version(version)
     version_dir = f"{major}.{minor}"
-    config_home = os.environ.get("KICAD_CONFIG_HOME")
-    config_dir = (Path(config_home) if config_home else _config_base() / "kicad") / version_dir
+    config_dir = kicad_settings_dir(version)
 
     folder = "KiCad" if sys.platform in ("win32", "darwin") else "kicad"
     documents_home = os.environ.get("KICAD_DOCUMENTS_HOME")
@@ -217,13 +230,15 @@ def project_variables(project_file: Path) -> dict[str, str]:
 
 def _json_object(path: Path, *keys: str) -> dict:
     """Return the JSON object at the keys of a JSON file, or {} if it has none.
+    The file is read as KiCad reads it (read_kicad_json: comments, a byte order
+    mark).
 
     Raises:
         LibraryTableError: The file cannot be read, or a value on the way is
             not a JSON object.
     """
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = read_kicad_json(path)
     except (OSError, ValueError) as e:
         raise LibraryTableError(f"{path} cannot be read: {e}") from e
     for key in ("",) + keys:

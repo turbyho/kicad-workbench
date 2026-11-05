@@ -2,9 +2,8 @@
 
 The tool runs "kicad-cli sch export bom" (EESCHEMA_JOBS_HANDLER::JobExportBom
 and FIELDS_EDITOR_GRID_DATA_MODEL, KiCad 8.0.9, 9.0.9 and 10.0.6) and reads
-its CSV file. kicad-cli writes each text in the language of the KiCad
-settings, thus the tool does not read the text of its messages: it gives
-each message to the caller.
+its CSV file. kicad-cli runs in English (utils/kicad_cli.py). The tool does
+not read the text of its messages: it gives each message to the caller.
 
 The rules of KiCad for the lines of the BOM:
 
@@ -21,8 +20,8 @@ The rules of KiCad for the lines of the BOM:
   group.
 - A cell holds the different values of the symbols of one line: KiCad 9 and
   later join them with a comma and leave out the empty values. KiCad 8
-  writes INDETERMINATE_STATE ("-- mixed values --", in the language of
-  KiCad).
+  writes INDETERMINATE_STATE ("-- mixed values --": the tool runs kicad-cli
+  in English).
 - kicad-cli removes the tabs and the line breaks from the values, and puts
   each value between double quotes (a double quote in a value is two double
   quotes).
@@ -264,7 +263,7 @@ _BOM_NOTE = (
     "KiCad does not put the power symbols and the symbols that are excluded from the "
     "BOM into the BOM. A cell can hold the different values of the units of one "
     "symbol: KiCad 9 and later join them with a comma, KiCad 8 writes "
-    '"-- mixed values --" in the language of KiCad.'
+    '"-- mixed values --".'
 )
 
 

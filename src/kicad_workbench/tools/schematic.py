@@ -1,10 +1,15 @@
 """Schematic analysis tools for KiCad Workbench."""
 
+import asyncio
+from functools import cmp_to_key
 from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.schematic_parser import SchematicParser
+from ..parsers.netlist_parser import NetlistParser
+from ..parsers.schematic_parser import SchematicParser, unknown_alternate_note
+from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
+from ..utils.kicad_cli import export_with_kicad_cli, get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic
 
 
@@ -81,6 +86,43 @@ async def list_schematic_components(
         return f"Error parsing schematic: {e}"
 
 
+# The time of the netlist of get_symbol_details (a large project needs some seconds).
+_NETLIST_TIMEOUT = 120.0
+
+
+def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]] | None, str]:
+    """Return the pins of a reference as the netlist of kicad-cli gives them, and the
+    note, or None and the reason when the netlist has no such reference.
+
+    The netlist of the root schematic has the pins of the placed units of the
+    reference, with the name and the electrical type that KiCad computes (also the
+    alternate of a pin), sorted by StrNumCmp as KiCad sorts the pins.
+    """
+    try:
+        root = find_root_schematic(file_path) or file_path
+        export = export_with_kicad_cli(
+            ["sch", "export", "netlist", "--format", "kicadxml"], root, "pins.xml", _NETLIST_TIMEOUT
+        )
+    except (AmbiguousRootError, RuntimeError, FileNotFoundError) as e:
+        return None, f"kicad-cli gives no netlist ({e})"
+    netlist = NetlistParser.from_bytes(export.data)
+    component = netlist.get_components().get(reference)
+    if component is None:
+        return None, (
+            f"the netlist has no {reference} (the Reference field of the symbol is not the "
+            "reference of its sheet path)"
+        )
+    pins = [
+        {
+            "number": number,
+            "name": component.pin_names.get(number, ""),
+            "electrical_type": component.pin_types.get(number, ""),
+        }
+        for number in sorted(component.pins, key=cmp_to_key(str_num_cmp))
+    ]
+    return pins, netlist.netlist_note()
+
+
 @mcp.tool()
 @with_field_rules_note
 async def get_symbol_details(file_path: str, reference: str) -> str:
@@ -91,11 +133,19 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         reference: Component reference designator (e.g., 'R1', 'U1')
 
     Returns:
-        Detailed component information including pins and properties
+        Detailed component information including pins and properties. The pins
+        are the pins of the netlist of kicad-cli (the placed units of the
+        reference, with the alternate functions). A symbol that the netlist does
+        not have gets the pins of the schematic file, as the installed KiCad
+        loads them. A power symbol (a reference with "#") is not a component.
     """
     try:
-        parser = SchematicParser(file_path)
-        component = parser.get_component_by_reference(reference)
+        kicad = await get_kicad_version()
+
+        def find():
+            return SchematicParser(file_path, kicad).get_component_by_reference(reference)
+
+        component = await asyncio.to_thread(find)
 
         if not component:
             return f"Component '{reference}' not found in schematic."
@@ -121,17 +171,28 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
                 if key not in ("Value", "Footprint"):
                     lines.append(f"- {key}: {value}")
 
-        # Pins
-        if component.pins:
+        # Pins: the netlist of kicad-cli, else the schematic model.
+        pins, note = await asyncio.to_thread(_netlist_pins, Path(file_path), component.reference)
+        if pins is None:
+            pins = component.pins
+            note = f"⚠️ The pins are the pins of the schematic file: {note}."
+            if alternates := unknown_alternate_note([component]):
+                note += f"\n\n{alternates}"
+        if pins:
             lines.append("")
             lines.append("## Pins")
             lines.append("| Pin | Name | Type |")
             lines.append("|-----|------|------|")
-            for pin in component.pins:
+            for pin in pins:
                 pin_num = pin.get("number", "?")
                 pin_name = pin.get("name", "")
                 pin_type = pin.get("electrical_type", "")
+                if "alternate" in pin and pin["alternate"] is None:
+                    pin_name = pin_type = "not known"
                 lines.append(f"| {pin_num} | {pin_name} | {pin_type} |")
+        if note:
+            lines.append("")
+            lines.append(note)
 
         return "\n".join(lines)
 

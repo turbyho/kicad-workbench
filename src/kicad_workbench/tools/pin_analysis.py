@@ -176,6 +176,10 @@ def _identify_mcu_family(component_value: str) -> str | None:
     return None
 
 
+# The port and the pin of an STM32 pin name "PXn" (for example PA0, PB12).
+STM32_PIN = re.compile(r"P([A-Z])(\d+)", re.IGNORECASE)
+
+
 def _get_mcu_pin_mapping(mcu_family: str, pin_name: str) -> dict:
     """Get MCU-specific pin mapping information.
 
@@ -198,7 +202,7 @@ def _get_mcu_pin_mapping(mcu_family: str, pin_name: str) -> dict:
 
     if mcu_family == "stm32":
         # STM32 pin naming convention: PXn (e.g., PA0, PB12)
-        if re.match(r"P[A-Z][\d]+", pin_name, re.IGNORECASE):
+        if STM32_PIN.match(pin_name):
             pin_mapping["function"] = "GPIO"
             pin_mapping["alternate_functions"] = [
                 "GPIO", "ADC", "TIM", "USART", "SPI", "I2C", "CAN"
@@ -254,33 +258,31 @@ async def analyze_pin_functions(
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # Parse schematic
-        schematic_parser = SchematicParser(str(sch_path))
-
         # Generate netlist for accurate connection analysis
         netlist_path = await _ensure_netlist(sch_path)
         if netlist_path is None:
             return "❌ **Failed to generate netlist for pin analysis**"
 
-        # Parse netlist
+        # Parse netlist, then the schematic with the KiCad of the netlist (the pins of
+        # the components: SchematicParser._component_pins).
         netlist_parser = NetlistParser(str(netlist_path))
+        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Get components to analyze
+        all_components = list(schematic_parser.get_components(recursive=True))
         if reference:
             # Analyze specific component
-            components = [comp for comp in schematic_parser.get_components(recursive=True) if comp.reference == reference]
+            components = [comp for comp in all_components if comp.reference == reference]
             if not components:
                 return f"❌ **Component not found:** {reference}"
         else:
             # Analyze all components
-            components = list(schematic_parser.get_components(recursive=True))
+            components = all_components
 
-        # Analyze pin functions.
-        # The authoritative pin->net map comes from the netlist; pin name/type
-        # are enriched from the schematic's lib_symbols via SchematicComponent.pins.
-        # (Previously this relied on _extract_pin_info_from_symbol_details whose
-        # only parse branch was `pass`, so the tool always returned empty.)
-        sch_components = {c.reference: c for c in schematic_parser.get_components(recursive=True)}
+        # Analyze pin functions. The pin -> net map, the pin names and the pin types
+        # come from the netlist (as KiCad computes them); the schematic gives the base
+        # names of the library pins (SchematicComponent.pins).
+        sch_components = {c.reference: c for c in all_components}
         nl_components = netlist_parser.get_components()
         pin_analysis = []
 
@@ -294,23 +296,25 @@ async def analyze_pin_functions(
             if not pin_map:
                 continue  # not in netlist / nothing connected
 
-            # pin number -> (name, electrical_type) from schematic lib_symbols
-            pin_meta: dict[str, tuple[str, str]] = {}
+            # The name (with the alternate) and the type of each pin are the ones that
+            # KiCad gives the nodes of the netlist. The base name (the name of the library
+            # pin, for the MCU pin names) comes from the schematic.
+            base_names: dict[str, str] = {}
             sch_comp = sch_components.get(comp_ref)
             if sch_comp:
                 for p in sch_comp.pins:
-                    pin_meta[str(p.get("number", ""))] = (
-                        p.get("name", ""),
-                        p.get("electrical_type", ""),
-                    )
+                    base_names[str(p.get("number", ""))] = p.get("base_name", p.get("name", ""))
 
             for pin_num, net_name in pin_map.items():
-                pin_name, pin_type = pin_meta.get(str(pin_num), (str(pin_num), ""))
+                pin_name = nl_comp.pin_names.get(pin_num, "")
+                pin_type = nl_comp.pin_types.get(pin_num, "")
+                base_name = base_names.get(str(pin_num), "")
 
                 func = _infer_pin_function_from_net(net_name)
                 inferred_functions = [func] if func else []
 
-                mcu_mapping = _get_mcu_pin_mapping(mcu_family, pin_name) if mcu_family else None
+                # The MCU pin names (PA7, GPIO4) are the names of the library pins.
+                mcu_mapping = _get_mcu_pin_mapping(mcu_family, base_name) if mcu_family else None
 
                 pin_analysis.append({
                     "component": comp_ref,
@@ -381,6 +385,8 @@ Unable to extract pin information. This could be due to:
                 result += f"- Max Current: {mapping['max_current']} mA\n"
                 result += f"- 5V Tolerant: {'Yes' if mapping['is_5v_tolerant'] else 'No'}\n\n"
 
+        if note := netlist_parser.netlist_note():
+            result += f"\n{note}\n"
         return result
 
     except Exception as e:
@@ -463,20 +469,18 @@ async def detect_pin_conflicts(
         if netlist_path is None:
             return "❌ **Failed to generate netlist for conflict detection**"
 
-        # Parse netlist + schematic. The netlist carries pin->net but NOT pin
-        # electrical type; that comes from the schematic's lib_symbols.
+        # The netlist has the electrical type of each node as KiCad gives it (with the
+        # alternate of the pin).
         netlist_parser = NetlistParser(str(netlist_path))
-        schematic_parser = SchematicParser(str(sch_path))
 
         output_types = {"output", "power_out", "open_collector", "open_emitter", "tri_state"}
 
         # (ref, pin_number) -> electrical_type
-        pin_type_of: dict[tuple[str, str], str] = {}
-        for c in schematic_parser.get_components(recursive=True):
-            for p in c.pins:
-                pin_type_of[(c.reference, str(p.get("number", "")))] = (
-                    p.get("electrical_type", "").lower()
-                )
+        pin_type_of: dict[tuple[str, str], str] = {
+            (ref, number): kind.lower()
+            for ref, comp in netlist_parser.get_components().items()
+            for number, kind in comp.pin_types.items()
+        }
 
         # Detect conflicts
         conflicts = []
@@ -608,16 +612,14 @@ async def extract_pinmux_config(
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # Parse schematic
-        schematic_parser = SchematicParser(str(sch_path))
-
         # Generate netlist for accurate connection analysis
         netlist_path = await _ensure_netlist(sch_path)
         if netlist_path is None:
             return "❌ **Failed to generate netlist for pinmux extraction**"
 
-        # Parse netlist
+        # Parse netlist, then the schematic with the KiCad of the netlist.
         netlist_parser = NetlistParser(str(netlist_path))
+        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Find MCU components
         components = list(schematic_parser.get_components(recursive=True))
@@ -680,21 +682,26 @@ No MCU components were found in the schematic.
                 "pins": [],
             }
 
-            pin_names: dict[str, str] = {}
+            # The base name of each pin (the name of the library pin, for the MCU pin
+            # names) comes from the schematic; the name with the alternate comes from the
+            # netlist.
+            base_names: dict[str, str] = {}
             sch_c = sch_components.get(mcu_ref)
             if sch_c:
                 for p in sch_c.pins:
-                    pin_names[str(p.get("number", ""))] = p.get("name", "")
+                    base_names[str(p.get("number", ""))] = p.get("base_name", p.get("name", ""))
 
             comp = netlist_parser.get_components().get(mcu_ref)
             if comp:
                 for pin_num, net_name in comp.pins.items():
                     peripheral = _infer_pin_function_from_net(net_name)
-                    pin_name = pin_names.get(str(pin_num), str(pin_num))
-                    mcu_mapping = _get_mcu_pin_mapping(mcu_family, pin_name)
+                    pin_name = comp.pin_names.get(pin_num, "")
+                    base_name = base_names.get(str(pin_num), "")
+                    mcu_mapping = _get_mcu_pin_mapping(mcu_family, base_name)
                     pin_config = {
                         "pin_number": str(pin_num),
-                        "pin_name": pin_name,
+                        "pin_name": pin_name or str(pin_num),
+                        "base_name": base_name,
                         "net": net_name,
                         "peripheral": peripheral,
                         "alternate_functions": (mcu_mapping or {}).get("alternate_functions", []),
@@ -747,13 +754,17 @@ No MCU components were found in the schematic.
             for pin in mcu_config["pins"][:10]:  # Show first 10 pins as example
                 if pin["peripheral"]:
                     result += f"// {pin['pin_name']}: {pin['peripheral']} ({pin['net']})\n"
-                    if mcu_config["mcu_family"] == "stm32":
-                        result += f"// GPIO_{pin['pin_name'][1]}_{pin['pin_name'][2:]} // {pin['peripheral']}_AF\n"
+                    stm32_pin = STM32_PIN.match(pin["base_name"])
+                    if mcu_config["mcu_family"] == "stm32" and stm32_pin:
+                        port, number = stm32_pin.group(1).upper(), stm32_pin.group(2)
+                        result += f"// GPIO_{port}_{number} // {pin['peripheral']}_AF\n"
                     elif mcu_config["mcu_family"] == "esp32":
                         result += f"// GPIO{pin['pin_number']} // {pin['peripheral']}\n"
 
             result += "```\n\n"
 
+        if note := netlist_parser.netlist_note():
+            result += f"\n{note}\n"
         return result
 
     except Exception as e:

@@ -1,7 +1,9 @@
 """Text parser for KiCad schematic files (.kicad_sch)."""
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +17,12 @@ from .kicad_fields import (
     sheet_fields,
     symbol_fields,
 )
-from .kicad_versions import KicadFileError, file_text
+from .kicad_versions import KicadFileError, file_text, kicad_release, version_triple
 from .lib_symbols import LibrarySymbol, pin_number, sub_symbols, symbol_name
+from .sch_geometry import body_style, node_point, symbol_unit
 from .sch_geometry import definition_key as _lib_key
 from .sexpr import Node, parse
+from .sheet_list import str_num_cmp
 
 # KiCad-defined boolean flags (fixed set, not user-extensible)
 KICAD_SYMBOL_FLAGS = ("dnp", "in_bom", "on_board", "exclude_from_sim")
@@ -199,8 +203,14 @@ def _definition_pins(definition: Node, file: Path, version: int) -> list[dict[st
     rule of lib_symbols.sub_symbols). A pin outside a sub-symbol is in unit 1
     with body style 1 (parseLibSymbol of KiCad 8, 9 and 10). Unit 0 and style 0
     are common to all units and styles. A pin with no (number ...) has an empty
-    number. The name and the number are the texts of the netlist (file_text: KiCad
-    8 and 9 give "~" as an empty text with GetShownName and GetShownNumber).
+    number.
+
+    Each pin has "file_number" (GetNumber: the number of the file, with "_" for
+    each space, SCH_PIN::SetNumber), "file_name" (GetBaseName), "number" and
+    "name" (the texts of the netlist:
+    file_text; KiCad 8 and 9 give "~" as an empty text with GetShownName and
+    GetShownNumber), "electrical_type" (the token of the file) and "alternates"
+    (the electrical type of each (alternate "X" <type> <shape>)).
 
     Raises:
         KicadFileError: KiCad cannot read the name of a sub-symbol.
@@ -212,14 +222,319 @@ def _definition_pins(definition: Node, file: Path, version: int) -> list[dict[st
         for pin in group.children("pin"):
             name = pin.first("name")
             number = pin.first("number")
+            file_number = pin_number(number.value(0, "") if number else "")
+            at = pin.first("at")
             pins.append({
                 "unit": unit,
                 "style": style,
-                "number": pin_number(file_text(number.value(0, "") if number else "", version)),
+                # (at x y) in IU, with the Y axis of the file (up).
+                "at": node_point(at) if at is not None else (0, 0),
+                "file_number": file_number,
+                "number": file_text(file_number, version),
+                "file_name": name.value(0, "") if name else "",
                 "name": file_text(name.value(0, "") if name else "", version),
                 "electrical_type": pin.value(0, ""),
+                "alternates": {
+                    alternate.value(0, ""): alternate.value(1, "")
+                    for alternate in pin.children("alternate")
+                },
             })
     return pins
+
+
+# The rules of SCH_PIN::SetAlt: "keep" keeps each alternate (KiCad 8.0, 9.0.0 to
+# 9.0.2); "base" keeps no empty alternate and not the base name of the pin (9.0.3:
+# its check of the library alternates does not change m_alt); "library" also keeps
+# no alternate that the library pin does not have (9.0.4 to 9.0.9, 10.0.0 to
+# 10.0.7, branch master).
+_SET_ALT_RULES = ("keep", "base", "library")
+
+
+def _kicad_rules(kicad: str | None) -> tuple[int, str] | None:
+    """Return the major version (the sort of the library pins) and the SetAlt rules of
+    the KiCad version that reads a schematic, or None when the server does not know
+    them (no version, or an other version)."""
+    numbers = version_triple(kicad) if kicad else None
+    if numbers is None:
+        return None
+    if kicad_release(kicad) is None:
+        # A nightly build of branch master (10.99): the rules of master.
+        return (10, "library") if numbers[:2] == (10, 99) else None
+    major, _minor, patch = numbers
+    if major == 8 or (major == 9 and patch <= 2):
+        return major, "keep"
+    if major == 9 and patch == 3:
+        return 9, "base"
+    if (major == 9 and patch <= 9) or (major == 10 and patch <= 7):
+        return major, "library"
+    return None
+
+
+def _set_alt(alt: str, pin: dict[str, Any], rules: str) -> str:
+    """Return the alternate that SCH_PIN::SetAlt keeps (_SET_ALT_RULES)."""
+    if rules == "keep":
+        return alt
+    if not alt or alt == pin["file_name"]:
+        return ""
+    if rules == "library" and alt not in pin["alternates"]:
+        return ""
+    return alt
+
+
+# The electrical type of an alternate that the library pin does not have:
+# GetAlternates()[name] adds an ALT with zero values, and the first value of
+# ELECTRICAL_PINTYPE is PT_INPUT (SCH_PIN::GetType).
+_UNKNOWN_ALTERNATE_TYPE = "input"
+
+
+def _library_order(definition: list[dict[str, Any]], major: int) -> list[int]:
+    """Return the indexes of the library pins in the order of LIB_SYMBOL::GetPins.
+
+    The parser sorts the draw items (GetDrawItems().sort(), operator< and compare):
+    KiCad 8 (LIB_PIN::compare): unit, body style, number (wxString::Cmp), name,
+    position; KiCad 9 (SCH_PIN::compare): unit, body style, position, number (Cmp);
+    KiCad 10: unit, body style, number (StrNumCmp), position. KiCad 9 and 10 read
+    the Y of a pin inverted (parseXY( true )). The sort is std::sort: pins that are
+    equal in these keys keep the order of the file here.
+    """
+
+    def key(index: int) -> tuple:
+        pin = definition[index]
+        x, y = pin["at"]
+        if major == 8:
+            return (pin["unit"], pin["style"], pin["file_number"], pin["file_name"], x, y)
+        if major == 9:
+            return (pin["unit"], pin["style"], x, -y, pin["file_number"])
+        return (pin["unit"], pin["style"], cmp_to_key(str_num_cmp)(pin["file_number"]), x, -y)
+
+    return sorted(range(len(definition)), key=key)
+
+
+def _update_pins(
+    items: list[tuple[str, str]],
+    definition: list[dict[str, Any]],
+    style: int,
+    order: list[int],
+    rules: list[str],
+) -> dict[int, tuple[float, set[str]]]:
+    """Return the place in GetPins and the possible alternates of each library pin of
+    the body style, by its index in the definition (SCH_SYMBOL::UpdatePins two
+    times, _component_pins).
+
+    Args:
+        order: The library pins in the order of GetPins (_library_order).
+        rules: The possible SetAlt rules (_SET_ALT_RULES).
+    """
+
+    def set_alt(alts: set[str], pin: dict[str, Any]) -> set[str]:
+        return {_set_alt(alt, pin, rule) for alt in alts for rule in rules}
+
+    alternates = {number: alt for number, alt in items if alt}
+    places: dict[str, list[int]] = {}  # The places of the items of each number.
+    for index, (number, _alt) in enumerate(items):
+        places.setdefault(number, []).append(index)
+    left = Counter({number: len(found) for number, found in places.items()})
+    first: dict[int, tuple[float, set[str]]] = {}
+    no_match = []
+    for index in order:
+        pin = definition[index]
+        if pin["style"] and style and pin["style"] != style:
+            continue
+        number = pin["file_number"]
+        if left[number] > 0:
+            # The items of a number go to its library pins: which item a pin gets is
+            # the order of memory, thus the pins get the places of the items in order.
+            place = places[number][len(places[number]) - left[number]]
+            left[number] -= 1
+            first[index] = (place, set_alt({alternates.get(number, "")}, pin))
+        else:
+            no_match.append(index)
+    # The (pin ...) items with no library pin: which items of a number are left is
+    # not known, thus each item of a number with a left item can be one.
+    spare = sum(left.values())
+    candidates = {alt for number, alt in items if left[number] > 0}
+    # One left item and one pin: the pin takes the place of the item (when the
+    # number of the item has no other item, the place is known).
+    single = [i for i, (number, _alt) in enumerate(items) if left[number] > 0]
+    reused_place = single[0] if spare == 1 and len(no_match) == 1 and len(single) == 1 else None
+    for position, index in enumerate(no_match):
+        pin = definition[index]
+        if pin["file_number"] in alternates:
+            alts = set_alt({alternates[pin["file_number"]]}, pin)
+        else:
+            # A reused (pin ...) keeps its alternate with no SetAlt, a new pin has none.
+            alts = set(candidates) or {""}
+            if spare < len(no_match):
+                alts.add("")
+        if reused_place is not None:
+            place: float = reused_place
+        else:
+            place = len(items) + (0 if position < spare else 1)
+        first[index] = (place, alts)
+    # The second UpdatePins: each pin has the number of its library pin. The last
+    # alternate of a number (in the order of the pins) goes through SetAlt to each
+    # pin of the number; a number with no alternate gives no alternate. The order of
+    # pins with other alternates is not modelled: each one can be the last.
+    by_number: dict[str, list[set[str]]] = {}
+    for index, (_place, alts) in first.items():
+        by_number.setdefault(definition[index]["file_number"], []).append(alts)
+    result = {}
+    for index, (place, _alts) in first.items():
+        sets = by_number[definition[index]["file_number"]]
+        outcomes = {alt for alts in sets for alt in alts if alt}
+        if all("" in alts for alts in sets):
+            outcomes.add("")  # Each pin can have no alternate: the map has no number.
+        result[index] = (place, set_alt(outcomes, definition[index]) if outcomes else {""})
+    return result
+
+
+def _component_pins(
+    symbol: Node,
+    definition: list[dict[str, Any]],
+    kicad: str | None,
+    orders: dict[int, list[int]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the pins that the netlist gives a placed symbol, as KiCad makes them.
+
+    The tools with a netlist take the names and the types of the netlist
+    (NetlistParser): this model is for the pins of a symbol with no netlist.
+
+    SCH_SYMBOL::UpdatePins (KiCad 8, 9 and 10, at the load of the file) takes
+    each library pin of the body style of the symbol, in the order of the library
+    (_library_order), and matches it to a (pin "N") of the symbol by the number of
+    the file (GetNumber; the constructor of the instance pin keeps spaces). A
+    library pin with no match gets an other (pin ...) of the symbol, or a new pin at
+    the end; the (pin ...) items with no library pin go away. The (alternate "X")
+    of a number applies to each library pin with that number (a map: the last
+    (pin ...) of the number wins), through SetAlt (_set_alt). A library pin with no
+    match and no alternate of its number keeps the alternate of the (pin ...) that
+    it gets, with no SetAlt: the order is the order of the addresses in memory, thus
+    each possible (pin ...) item counts. A second UpdatePins (measured: KiCad 8.0.9
+    keeps such an alternate, 9.0.9 and 10.0.6 remove one that the library pin does
+    not have) gives the last alternate of each number to each pin of the number,
+    through SetAlt.
+
+    SCH_SYMBOL::GetPins gives the pins of unit 0 and of the unit of the symbol, in
+    the order of the pins of the symbol: the places of the (pin ...) items of the
+    file, then the new pins. KiCad takes the library pins with no match in the order
+    of their addresses (std::set; usually the order of the parse): here they are in
+    the sort order, thus the place of a reused or new pin among them is only known
+    when one pin and one item are left. Pins that the sort of KiCad gives as equal
+    (for example "1" and "01" in KiCad 10) have no defined order (std::sort).
+
+    Args:
+        symbol: The (symbol ...) of the placed symbol.
+        definition: The pins of its definition (_definition_pins).
+        kicad: The version of the KiCad that reads the file, or None when it is
+            not known: an alternate that differs between the rules of KiCad 8, 9
+            and 10 is then not known, and the order is the order of KiCad 10.
+        orders: A cache of _library_order for this definition, by major version.
+
+    Returns:
+        For each pin: "number", "name" (the alternate, else the name of the library
+        pin), "base_name" (the name of the library pin), "electrical_type" (the type
+        of the alternate, else of the library pin) and "alternate". A pin whose
+        alternate is not known has the alternate None, and an empty name and type.
+    """
+    rules = _kicad_rules(kicad)
+    orders = {} if orders is None else orders
+    unit = symbol_unit(symbol)
+    style = body_style(symbol)
+    items = []  # (number of the file, alternate) of each (pin ...), in the file order.
+    for item in symbol.children("pin"):
+        alternate = item.first("alternate")
+        items.append((item.value(0, ""), alternate.value(0, "") if alternate else ""))
+    runs = []
+    for major, set_rules in [rules] if rules else [(8, None), (9, None), (10, None)]:
+        if major not in orders:
+            orders[major] = _library_order(definition, major)
+        rule_list = [set_rules] if set_rules else list(_SET_ALT_RULES)
+        runs.append(_update_pins(items, definition, style, orders[major], rule_list))
+    pins = []
+    for index, _entry in sorted(runs[-1].items(), key=lambda entry: entry[1][0]):
+        pin = definition[index]
+        if unit and pin["unit"] and pin["unit"] != unit:
+            continue
+        found = set().union(*(run[index][1] for run in runs))
+        alt = found.pop() if len(found) == 1 else None
+        if alt == "~" and rules is None:
+            alt = None  # KiCad 8 shows an empty name, KiCad 9 and 10 show "~".
+        if alt is None:
+            name, kind = "", ""
+        elif alt:
+            # KiCad 8 shows "~" as an empty name (GetShownName).
+            name = "" if alt == "~" and rules and rules[0] == 8 else alt
+            kind = pin["alternates"].get(alt, _UNKNOWN_ALTERNATE_TYPE)
+        else:
+            name, kind = pin["name"], pin["electrical_type"]
+        pins.append({
+            "number": pin["number"],
+            "name": name,
+            "base_name": pin["name"],
+            "electrical_type": kind,
+            "alternate": alt,
+        })
+    return pins
+
+
+def _pins_with_no_definition(symbol: Node, kicad: str | None) -> list[dict[str, Any]]:
+    """Return the pins of a placed symbol whose definition is not in lib_symbols.
+
+    UpdatePins stops before the match (no m_part): the pins are the (pin ...) items
+    of the file, with no library pin. KiCad 8 shows the name "??" (or the alternate)
+    and the type no_connect (PT_NC); KiCad 9 and 10 show an empty name (or the
+    alternate) and the type unspecified. GetShownNumber of KiCad 8 and 9 gives "~"
+    as an empty number. With no known KiCad version, a name, a type or a number that
+    differs between them is not known (the alternate None).
+    """
+    rules = _kicad_rules(kicad)
+    pins = []
+    for item in symbol.children("pin"):
+        number = item.value(0, "")
+        alternate = item.first("alternate")
+        alt = alternate.value(0, "") if alternate else ""
+        if rules is None:
+            pins.append({
+                "number": "" if number == "~" else number,
+                "name": "",
+                "base_name": "",
+                "electrical_type": "",
+                "alternate": None,
+            })
+            continue
+        major = rules[0]
+        name = alt or ("??" if major == 8 else "")
+        pins.append({
+            "number": "" if number == "~" and major < 10 else number,
+            "name": "" if name == "~" and major == 8 else name,
+            "base_name": "",
+            "electrical_type": "no_connect" if major == 8 else "unspecified",
+            "alternate": alt,
+        })
+    return pins
+
+
+def unknown_alternate_note(components: list["SchematicComponent"]) -> str:
+    """Return the warning about the pins whose alternate is not known, or "".
+
+    _component_pins gives such a pin an empty name and type: KiCad gives it the
+    alternate of a (pin ...) item by the order of memory, or the rules of SetAlt of
+    the KiCad version (of the netlist) are not known.
+    """
+    pins = [
+        f"{component.reference}.{pin.get('number', '')}"
+        for component in components
+        for pin in component.pins
+        if "alternate" in pin and pin["alternate"] is None
+    ]
+    if not pins:
+        return ""
+    return (
+        f"⚠️ The name and the electrical type of these pins are not known, thus they are "
+        f"empty: {', '.join(pins)}. KiCad gives such a pin the alternate of a (pin ...) "
+        "item of the file in the order of the memory, or the server does not know the "
+        "rules of the KiCad version (for alternates, or for a symbol with no definition)."
+    )
 
 
 def _position(item: Node) -> tuple[float, float]:
@@ -231,11 +546,14 @@ def _position(item: Node) -> tuple[float, float]:
 class SchematicParser:
     """Parser for KiCad schematic files (.kicad_sch)."""
 
-    def __init__(self, file_path: str) -> None:
+    def __init__(self, file_path: str, kicad: str | None = None) -> None:
         """Initialize parser with schematic file.
 
         Args:
             file_path: Path to .kicad_sch file
+            kicad: The version of the KiCad that reads the file: the KiCad of the
+                netlist that the caller uses with the pins (NetlistParser.kicad_version).
+                None: not known (_component_pins).
 
         Raises:
             FileNotFoundError: If file doesn't exist
@@ -250,6 +568,9 @@ class SchematicParser:
         self._power_keys: set[str] = set()
         self._power_net_keys: set[str] = set()
         self._rules: FieldRules | None = None
+        self.kicad = kicad
+        # The order of the library pins of each definition, by major version.
+        self._lib_orders: dict[str, dict[int, list[int]]] = {}
 
     def _root(self) -> Node:
         """Return the parsed tree of the file.
@@ -358,22 +679,6 @@ class SchematicParser:
                     if any(pin["electrical_type"] == "power_in" for pin in pins):
                         self._power_net_keys.add(key)
 
-    def _instance_pins(self, symbol: Node) -> dict[str, dict[str, Any]]:
-        """Return the pins of the definition of a symbol instance, by number.
-
-        Only the pins of the unit and of the body style of the instance count
-        (unit 0 and style 0 are common to all). The first pin of a number wins.
-        """
-        unit_node = symbol.first("unit")
-        style_node = symbol.first("body_style") or symbol.first("convert")
-        unit = int(unit_node.number(0, 1)) if unit_node else 1
-        style = int(style_node.number(0, 1)) if style_node else 1
-        pins: dict[str, dict[str, Any]] = {}
-        for pin in self._lib_pins.get(_lib_key(symbol), []):
-            if pin["unit"] in (0, unit) and pin["style"] in (0, style):
-                pins.setdefault(pin["number"], pin)
-        return pins
-
     def _parse_title_block(self, root: Node) -> dict[str, str]:
         """Parse title block from schematic."""
         title_block = {
@@ -415,19 +720,14 @@ class SchematicParser:
             footprint = fields.get("Footprint") or None
             x, y = _position(symbol)
 
-            # Pins of the instance, with the data of the library definition
-            lib_pin_data = self._instance_pins(symbol)
-            pins = []
-            for pin in symbol.children("pin"):
-                # The (pin "N") of the file has the number of GetNumber: the netlist
-                # number is file_text, as for the pins of the definition.
-                pin_num = file_text(pin.value(0, ""), self.field_rules.file_version)
-                pin_info = lib_pin_data.get(pin_num, {})
-                pins.append({
-                    "number": pin_num,
-                    "name": pin_info.get("name", ""),
-                    "electrical_type": pin_info.get("electrical_type", ""),
-                })
+            # The pins of the netlist: the library pins of the unit (UpdatePins), or the
+            # (pin ...) items of a symbol with no definition.
+            key = _lib_key(symbol)
+            if key in self._lib_pins:
+                orders = self._lib_orders.setdefault(key, {})
+                pins = _component_pins(symbol, self._lib_pins[key], self.kicad, orders)
+            else:
+                pins = _pins_with_no_definition(symbol, self.kicad)
 
             flags = dict(KICAD_FLAG_DEFAULTS)
             for flag in KICAD_SYMBOL_FLAGS:
@@ -543,7 +843,7 @@ class SchematicParser:
             # read (KicadFileError) is an error: the list would not be complete.
             for sheet in sheet_files(self.file_path)[1:]:
                 try:
-                    sub_data = SchematicParser(str(sheet))._parse_file()
+                    sub_data = SchematicParser(str(sheet), self.kicad)._parse_file()
                 except (FileNotFoundError, ValueError, OSError):
                     continue
                 components.extend(

@@ -389,9 +389,6 @@ async def generate_device_tree(
 
 Please specify a supported SOC family."""
 
-        # Parse schematic
-        schematic_parser = SchematicParser(str(sch_path))
-
         # Obtain a netlist (next to schematic, in temp, or freshly generated).
         # generate_netlist writes to the temp dir — NOT next to the schematic —
         # so we must look there too (previously this always raised FileNotFoundError).
@@ -401,8 +398,10 @@ Please specify a supported SOC family."""
         if netlist_path is None:
             return "X **Failed to generate netlist for device tree analysis**"
 
-        # Parse netlist
+        # Parse netlist, then the schematic with the KiCad of the netlist (the pins of
+        # the components: SchematicParser._component_pins).
         netlist_parser = NetlistParser(str(netlist_path))
+        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract device tree data
         dt_data = {
@@ -617,20 +616,24 @@ async def extract_gpio_config(
             return f"X **Schematic file not found:** {schematic_path}"
 
         # Obtain netlist
-        from .pin_analysis import _ensure_netlist
+        from .pin_analysis import STM32_PIN, _ensure_netlist
 
         netlist_path = await _ensure_netlist(sch_path)
         if netlist_path is None:
             return "X **Failed to generate netlist for GPIO extraction**"
 
         netlist_parser = NetlistParser(str(netlist_path))
-        schematic_parser = SchematicParser(str(sch_path))
+        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # pin number -> name from schematic lib_symbols
+        # The name of the library pin (base_name): the GPIO port comes from it, not from
+        # an alternate function (SchematicParser._component_pins).
         pin_name_of: dict[tuple[str, str], str] = {}
         for c in schematic_parser.get_components(recursive=True):
             for p in c.pins:
-                pin_name_of[(c.reference, str(p.get("number", "")))] = p.get("name", "")
+                pin_name_of[(c.reference, str(p.get("number", "")))] = p.get(
+                    "base_name", p.get("name", "")
+                )
 
         # Extract GPIO configurations
         gpio_configs = []
@@ -654,7 +657,8 @@ async def extract_gpio_config(
                             gpio_configs.append({
                                 "component": comp_ref,
                                 "pin_number": str(pin_num),
-                                "pin_name": pin_name_of.get((comp_ref, str(pin_num)), str(pin_num)),
+                                "pin_name": pin_name_of.get((comp_ref, str(pin_num)))
+                                or str(pin_num),
                                 "net": net_name,
                                 "soc": comp_value,
                             })
@@ -707,11 +711,16 @@ No GPIO configurations were found in the schematic.
 
             for config in configs[:10]:  # Show first 10
                 result += f"// {config['pin_name']} ({config['pin_number']}): {config['net']}\n"
-                if "STM32" in soc.upper():
-                    result += f"GPIO_InitTypeDef gpio_{config['pin_name'].lower()};\n"
-                    result += f"gpio_{config['pin_name'].lower()}.Pin = GPIO_PIN_{config['pin_number']};\n"
-                    result += f"gpio_{config['pin_name'].lower()}.Mode = GPIO_MODE_OUTPUT_PP;\n"
-                    result += f"HAL_GPIO_Init(GPIO{config['pin_name'][1]}, &gpio_{config['pin_name'].lower()});\n\n"
+                # The port and the bit of the pin come from its name "PXn" (PA7: GPIOA,
+                # GPIO_PIN_7), not from the number of the package pin.
+                stm32_pin = STM32_PIN.match(config["pin_name"])
+                if "STM32" in soc.upper() and stm32_pin:
+                    port, bit = stm32_pin.group(1).upper(), stm32_pin.group(2)
+                    var = f"gpio_p{port.lower()}{bit}"  # A C name also for "PA13/SWDIO".
+                    result += f"GPIO_InitTypeDef {var};\n"
+                    result += f"{var}.Pin = GPIO_PIN_{bit};\n"
+                    result += f"{var}.Mode = GPIO_MODE_OUTPUT_PP;\n"
+                    result += f"HAL_GPIO_Init(GPIO{port}, &{var});\n\n"
                 elif "ESP32" in soc.upper():
                     result += f"gpio_set_direction(GPIO{config['pin_number']}, GPIO_MODE_OUTPUT);\n\n"
 
@@ -764,7 +773,7 @@ async def extract_i2c_devices(
             return "X **Failed to generate netlist for I2C extraction**"
 
         netlist_parser = NetlistParser(str(netlist_path))
-        schematic_parser = SchematicParser(str(sch_path))
+        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract I2C devices
         i2c_devices = []
@@ -883,7 +892,7 @@ async def extract_spi_devices(
             return "X **Failed to generate netlist for SPI extraction**"
 
         netlist_parser = NetlistParser(str(netlist_path))
-        schematic_parser = SchematicParser(str(sch_path))
+        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract SPI devices
         spi_devices = []

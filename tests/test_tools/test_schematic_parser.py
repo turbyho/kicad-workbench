@@ -7,8 +7,11 @@ import pytest
 from kicad_workbench.parsers.kicad_versions import KicadFileError, file_text
 from kicad_workbench.parsers.schematic_parser import (
     SchematicParser,
+    _component_pins,
     _definition_pins,
+    _kicad_rules,
     _shown_text,
+    unknown_alternate_note,
 )
 from kicad_workbench.parsers.sexpr import parse
 
@@ -263,10 +266,15 @@ def test_pins_of_the_unit_and_of_the_body_style(units):
         ]
         for component in units.get_components()
     }
+    # The library pins of unit 0 and of the unit, in the order of the (pin ...) items
+    # (UpdatePins, GetPins). UpdatePins does not filter the units: the (pin "1") of U2
+    # matches the first library pin "1" (unit 1), thus pins 14 and 1 of unit 2 are new
+    # pins at the end, in the order of the library.
     assert pins == {
         "U1": [("1", "A", "input"), ("14", "VCC", "power_in")],
-        "U2": [("1", "B", "bidirectional")],
-        # KiCad 8 and earlier write the body style as (convert N).
+        "U2": [("14", "VCC", "power_in"), ("1", "B", "bidirectional")],
+        # KiCad 8 and earlier write the body style as (convert N). VCC is in body
+        # style 1 only.
         "U3": [("1", "A_DM", "output")],
     }
 
@@ -333,3 +341,180 @@ def test_file_text(text, version, expected):
     # "~" of a file before EMPTY_TEXT_MARKER is an empty text; an unknown version
     # keeps the text.
     assert file_text(text, version) == expected
+
+
+DEFINITION = (
+    '(symbol "Lib:U" (symbol "U_1_1"'
+    ' (pin bidirectional line (name "PA7") (number "1")'
+    '  (alternate "SPI1_MOSI" output line) (alternate "TIM1" input line))'
+    ' (pin passive line (name "B") (number "2"))'
+    ' (pin passive line (name "C") (number "A 1"))))'
+)
+
+
+def component_pins(items: str, kicad: str | None = "10.0.6") -> list[tuple]:
+    definition = _definition_pins(parse(DEFINITION), Path("a.kicad_sch"), 20260306)
+    symbol = parse(f'(symbol (lib_id "Lib:U") (unit 1) {items})')
+    return [
+        (p["number"], p["name"], p["electrical_type"], p["alternate"])
+        for p in _component_pins(symbol, definition, kicad)
+    ]
+
+
+def test_alternates_of_the_pins():
+    # The alternate gives the name and the type (GetShownName, GetType). SetAlt of
+    # KiCad 9 and 10 keeps no alternate that the library pin does not have, nor
+    # its base name.
+    items = (
+        '(pin "1" (alternate "SPI1_MOSI")) (pin "2" (alternate "X")) (pin "A_1" (alternate "C"))'
+    )
+    assert component_pins(items) == [
+        ("1", "SPI1_MOSI", "output", "SPI1_MOSI"),
+        ("2", "B", "passive", ""),
+        ("A_1", "C", "passive", ""),
+    ]
+    # KiCad 8 keeps each alternate; an alternate that the library pin does not have
+    # gets the type of a zero ALT: input.
+    assert component_pins(items, kicad="8.0.9")[1:] == [
+        ("2", "X", "input", "X"),
+        ("A_1", "C", "input", "C"),
+    ]
+
+
+def test_pins_that_the_symbol_does_not_have():
+    # UpdatePins makes a pin for each library pin with no (pin "N"), and removes a
+    # (pin "N") with no library pin. Here "9" is reused for "2": no alternate.
+    assert component_pins('(pin "1") (pin "9")') == [
+        ("1", "PA7", "bidirectional", ""),
+        ("2", "B", "passive", ""),
+        ("A_1", "C", "passive", ""),
+    ]
+
+
+def test_space_in_the_number_of_a_placed_pin():
+    # The instance pin keeps the space; the library pin has "A_1": no match. The pin
+    # gets the (pin "A 1") again, with its alternate (the only item left). KiCad 8
+    # keeps it; SetAlt of KiCad 9 and 10 removes it (the library pin has no "Z").
+    items = '(pin "1") (pin "2") (pin "A 1" (alternate "Z"))'
+    assert component_pins(items, kicad="8.0.9")[2] == ("A_1", "Z", "input", "Z")
+    assert component_pins(items)[2] == ("A_1", "C", "passive", "")
+
+
+def test_alternate_of_a_reused_pin_that_is_not_known():
+    # Two (pin ...) items with no library pin and other alternates: the order of
+    # the addresses decides which one a library pin gets (KiCad 8). KiCad 9 and 10
+    # remove both alternates (SetAlt), thus the result is known.
+    items = '(pin "1") (pin "8" (alternate "P")) (pin "9" (alternate "Q"))'
+    assert component_pins(items, kicad="8.0.9")[1:] == [("2", "", "", None), ("A_1", "", "", None)]
+    assert component_pins(items)[1:] == [("2", "B", "passive", ""), ("A_1", "C", "passive", "")]
+
+
+def test_last_alternate_of_a_number_wins():
+    pins = component_pins('(pin "1" (alternate "TIM1")) (pin "1" (alternate "SPI1_MOSI"))')
+    assert pins[0] == ("1", "SPI1_MOSI", "output", "SPI1_MOSI")
+
+
+@pytest.mark.parametrize(
+    "kicad, rules",
+    [
+        ("8.0.9", (8, "keep")),
+        ("9.0.2", (9, "keep")),
+        ("9.0.3", (9, "base")),
+        ("9.0.4", (9, "library")),
+        ("10.0.7", (10, "library")),
+        ("10.99.0", (10, "library")),
+        ("10.0.8", None),
+        (None, None),
+    ],
+)
+def test_kicad_rules(kicad, rules):
+    assert _kicad_rules(kicad) == rules
+
+
+def test_alternate_with_no_known_kicad_version():
+    # The rules of SetAlt differ for an alternate that the library pin does not have.
+    items = '(pin "1" (alternate "SPI1_MOSI")) (pin "2" (alternate "X")) (pin "A_1")'
+    assert component_pins(items, None) == [
+        ("1", "SPI1_MOSI", "output", "SPI1_MOSI"),
+        ("2", "", "", None),
+        ("A_1", "C", "passive", ""),
+    ]
+
+
+def test_unknown_alternate_note():
+    from kicad_workbench.parsers.schematic_parser import SchematicComponent
+
+    known = SchematicComponent("U1", "U", "Lib:U", pins=[{"number": "1", "alternate": ""}])
+    unknown = SchematicComponent("U2", "U", "Lib:U", pins=[{"number": "2", "alternate": None}])
+    assert unknown_alternate_note([known]) == ""
+    note = unknown_alternate_note([known, unknown])
+    assert note.startswith("⚠️ The name and the electrical type of these pins are not known")
+    assert ": U2.2. KiCad gives" in note
+
+
+@pytest.mark.parametrize(
+    "kicad, expected",
+    [
+        ("8.0.9", [("", "??", "no_connect", ""), ("2", "X", "no_connect", "X")]),
+        ("10.0.6", [("~", "", "unspecified", ""), ("2", "X", "unspecified", "X")]),
+        (None, [("", "", "", None), ("2", "", "", None)]),
+    ],
+)
+def test_pins_of_a_symbol_with_no_definition(tmp_path, kicad, expected):
+    # UpdatePins stops with no m_part: the pins are the (pin ...) items of the file.
+    path = tmp_path / "a.kicad_sch"
+    path.write_text(
+        '(kicad_sch (version 20250114) (generator "eeschema") (uuid "a0") (lib_symbols)\n'
+        '  (symbol (lib_id "Lib:Gone") (at 0 0 0) (unit 1)\n'
+        '    (property "Reference" "U1" (at 0 0 0)) (property "Value" "U" (at 0 0 0))\n'
+        '    (pin "~" (uuid "p1")) (pin "2" (uuid "p2") (alternate "X"))))\n',
+        encoding="utf-8",
+    )
+    (component,) = SchematicParser(str(path), kicad).get_components()
+    pins = [(p["number"], p["name"], p["electrical_type"], p["alternate"]) for p in component.pins]
+    assert pins == expected
+
+
+def test_kicad_version_of_a_netlist(tmp_path):
+    from kicad_workbench.parsers.netlist_parser import NetlistParser
+
+    path = tmp_path / "n.xml"
+    path.write_text(
+        '<export version="E"><design><tool>Eeschema 9.0.3</tool></design></export>',
+        encoding="utf-8",
+    )
+    assert NetlistParser(str(path)).kicad_version == "9.0.3"
+    path.write_text('<export version="E"><design/></export>', encoding="utf-8")
+    assert NetlistParser(str(path)).kicad_version is None
+
+
+def test_place_of_a_pin_that_reuses_an_item():
+    # One left item and one library pin with no match: the pin takes the place of the
+    # item in m_pins (GetPins).
+    pins = component_pins('(pin "9") (pin "1") (pin "2")')
+    assert [p[0] for p in pins] == ["A_1", "1", "2"]
+
+
+def test_base_name_of_a_pin_with_an_alternate():
+    definition = _definition_pins(parse(DEFINITION), Path("a.kicad_sch"), 20260306)
+    symbol = parse('(symbol (lib_id "Lib:U") (unit 1) (pin "1" (alternate "TIM1")))')
+    first = _component_pins(symbol, definition, "10.0.6")[0]
+    assert (first["name"], first["base_name"]) == ("TIM1", "PA7")
+
+
+@pytest.mark.parametrize(
+    "major, order",
+    [(8, ["10", "2", "1"]), (9, ["2", "10", "1"]), (10, ["2", "10", "1"])],
+)
+def test_library_order(major, order):
+    # KiCad 8: unit, body style, number (Cmp); KiCad 9: unit, body style, position (Y
+    # inverted), number; KiCad 10: unit, body style, number (StrNumCmp), position.
+    from kicad_workbench.parsers.schematic_parser import _library_order
+
+    text = (
+        '(symbol "Lib:U" (symbol "U_2_1" (pin passive line (at 0 0 0) (number "1")))'
+        ' (symbol "U_1_1" (pin passive line (at 0 0 0) (number "10"))'
+        ' (pin passive line (at 0 2.54 0) (number "2"))))'
+    )
+    definition = _definition_pins(parse(text), Path("a.kicad_sch"), 20260306)
+    assert [definition[i]["file_number"] for i in _library_order(definition, major)] == order

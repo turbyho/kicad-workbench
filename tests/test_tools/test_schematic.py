@@ -151,3 +151,44 @@ class TestSchematicTools:
         assert "Example Project" in result
         assert "Components by Type" in result
 
+
+NETLIST = """<export version="E"><design><tool>Eeschema {version}</tool></design>
+<components><comp ref="R1"><value>10k</value><libsource lib="Device" part="R"/></comp></components>
+<nets>
+<net code="1" name="A"><node ref="R1" pin="2" pinfunction="{f2}" pintype="passive"/></net>
+<net code="2" name="B"><node ref="R1" pin="1" pinfunction="{f1}" pintype="output+no_connect"/></net>
+</nets></export>"""
+
+
+@pytest.mark.parametrize(
+    "version, f1, f2",
+    [("9.0.9", "SPI1_MOSI", "B"), ("10.0.6", "SPI1_MOSI_1", "B_2")],
+)
+def test_pins_of_the_netlist_nodes(version, f1, f2):
+    # KiCad 10 writes "<name>_<number>" (NETLIST_EXPORTER_XML); "+no_connect" is no type.
+    from kicad_workbench.parsers.netlist_parser import NetlistParser
+
+    text = NETLIST.format(version=version, f1=f1, f2=f2).encode()
+    component = NetlistParser.from_bytes(text).get_components()["R1"]
+    assert component.pin_names == {"1": "SPI1_MOSI", "2": "B"}
+    assert component.pin_types == {"1": "output", "2": "passive"}
+
+
+@pytest.mark.asyncio
+async def test_symbol_details_with_the_pins_of_the_netlist(example_schematic, monkeypatch):
+    from kicad_workbench.utils.kicad_cli import CliExport
+
+    data = NETLIST.format(version="10.0.6", f1="SPI1_MOSI_1", f2="B_2").encode()
+    monkeypatch.setattr(schematic, "export_with_kicad_cli", lambda *args: CliExport(data, []))
+    result = await schematic.get_symbol_details(str(example_schematic), "R1")
+    assert "| 1 | SPI1_MOSI | output |\n| 2 | B | passive |" in result, result
+
+
+@pytest.mark.asyncio
+async def test_symbol_details_with_no_netlist(example_schematic, monkeypatch):
+    def no_netlist(*args):
+        raise RuntimeError("no kicad-cli")
+
+    monkeypatch.setattr(schematic, "export_with_kicad_cli", no_netlist)
+    result = await schematic.get_symbol_details(str(example_schematic), "R1")
+    assert "⚠️ The pins are the pins of the schematic file: kicad-cli gives no netlist" in result

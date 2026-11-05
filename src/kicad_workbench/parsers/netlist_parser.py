@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .kicad_versions import version_triple
+
 
 @dataclass
 class NetlistComponent:
@@ -15,6 +17,27 @@ class NetlistComponent:
     library: str
     footprint: str | None = None
     pins: dict[str, str] = field(default_factory=dict)  # pin_number -> net_name
+    # pin_number -> the pin name and the electrical type that KiCad gives the node
+    # (pin_name_of_node; the "+no_connect" of a pintype is not a type).
+    pin_names: dict[str, str] = field(default_factory=dict)
+    pin_types: dict[str, str] = field(default_factory=dict)
+
+
+def pin_name_of_node(pinfunction: str, number: str, kicad: str | None) -> str:
+    """Return the pin name (SCH_PIN::GetShownName) of the pinfunction of a netlist node.
+
+    KiCad 8 and 9 write the name. KiCad 10 writes "<name>_<number>", the number for
+    a stacked pin with no name, and no pinfunction for an other pin with no name
+    (NETLIST_EXPORTER_XML, 10.0.0 to 10.0.7 and branch master). With no known KiCad
+    version, the text stays (netlist_note).
+    """
+    numbers = version_triple(kicad) if kicad else None
+    if numbers is None or numbers[0] < 10:
+        return pinfunction
+    if pinfunction == number:
+        return ""
+    suffix = f"_{number}"
+    return pinfunction[: -len(suffix)] if pinfunction.endswith(suffix) else pinfunction
 
 
 @dataclass
@@ -47,6 +70,16 @@ class NetlistParser:
             raise ValueError(f"Netlist file must be .xml, got: {self.file_path.suffix}")
 
         self._data: dict[str, Any] | None = None
+        self._text: bytes | None = None
+
+    @classmethod
+    def from_bytes(cls, data: bytes, name: str = "netlist.xml") -> "NetlistParser":
+        """Return a parser of the data of an XML netlist (for example of kicad-cli)."""
+        parser = cls.__new__(cls)
+        parser.file_path = Path(name)
+        parser._data = None
+        parser._text = data
+        return parser
 
     def _parse_file(self) -> dict[str, Any]:
         """Parse the netlist XML file.
@@ -57,8 +90,15 @@ class NetlistParser:
         if self._data is not None:
             return self._data
 
-        tree = ET.parse(self.file_path)
-        root = tree.getroot()
+        root = (
+            ET.fromstring(self._text)
+            if self._text is not None
+            else ET.parse(self.file_path).getroot()
+        )
+
+        # <design><tool>Eeschema 10.0.6</tool>: the KiCad that wrote the netlist.
+        tool = root.findtext("design/tool") or ""
+        kicad_version = tool.removeprefix("Eeschema ").strip() or None
 
         # Parse components (KiCad 9.0+ uses <comp> not <component>)
         components = {}
@@ -98,12 +138,19 @@ class NetlistParser:
                     # Populate component pins
                     if ref in components:
                         components[ref].pins[pin_num] = name
+                        components[ref].pin_names[pin_num] = pin_name_of_node(
+                            node.get("pinfunction", ""), pin_num, kicad_version
+                        )
+                        components[ref].pin_types[pin_num] = node.get("pintype", "").replace(
+                            "+no_connect", ""
+                        )
 
             nets[name] = NetlistNet(name=name, code=code, pins=pins_list)
 
         self._data = {
             "components": components,
             "nets": nets,
+            "kicad_version": kicad_version,
         }
 
         return self._data
@@ -122,6 +169,22 @@ class NetlistParser:
         if net_elem is not None:
             return net_elem.get("name", f"net_{net_code}")
         return f"net_{net_code}"
+
+    @property
+    def kicad_version(self) -> str | None:
+        """The version of the KiCad that wrote the netlist (<design><tool>), or None."""
+        return self._parse_file()["kicad_version"]
+
+    def netlist_note(self) -> str:
+        """Return the warning when the netlist has no KiCad version that the server can
+        read, or ""."""
+        if self.kicad_version is not None and version_triple(self.kicad_version):
+            return ""
+        return (
+            f"⚠️ The netlist has no KiCad version that the server can read "
+            f"({self.kicad_version!r}): a pin name of KiCad 10 can have "
+            '"_<number>" at the end (NETLIST_EXPORTER_XML).'
+        )
 
     def get_components(self) -> dict[str, NetlistComponent]:
         """Get all components from netlist.

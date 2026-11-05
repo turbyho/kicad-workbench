@@ -17,10 +17,21 @@ import os
 import traceback
 from pathlib import Path
 
-from ..parsers.confirmed_mpns import FieldCheck, FieldWrite, bom_symbols, check_symbols
+from ..parsers.confirmed_mpns import (
+    CadSymbol,
+    FieldCheck,
+    FieldWrite,
+    bom_symbols,
+    check_symbols,
+)
 from ..parsers.kicad_versions import KicadFileError
 from ..parsers.sexpr import SExprError
-from ..parsers.unit_fields import distinct_conflicts, variant_unit_conflicts
+from ..parsers.unit_fields import (
+    distinct_conflicts,
+    is_confirmed_field,
+    mpn_order,
+    variant_unit_conflicts,
+)
 from ..server import mcp
 from ..utils.kicad_bom import (
     bom_args,
@@ -49,15 +60,64 @@ _DUPLICATE = (
     "a duplicate reference: KiCad joins the fields of its symbols in one BOM line. "
     "Annotate the schematic in KiCad first"
 )
+_NOT_ANNOTATED = (
+    "a reference that is not annotated: set_symbol_fields cannot find the symbol. Annotate "
+    "the schematic in KiCad first"
+)
 
 
 def _code(item: FieldWrite) -> str:
-    """The change of set_symbol_fields for a write, as inline code."""
-    change: dict[str, object] = {"reference": item.reference, "fields": item.fields}
+    """The change of set_symbol_fields for a write, as inline code. A field that the
+    user selects has a name in angle brackets (see _choices)."""
+    fields = dict(item.fields)
+    for role, text, names in item.choices:
+        fields[f"<the field for {role}: {' or '.join(names)}>"] = text
+    change: dict[str, object] = {"reference": item.reference, "fields": fields}
     if item.variant:
         change["variant"] = item.variant
     text = json.dumps(change, ensure_ascii=False)
     return f"`` {text} ``" if "`" in text else f"`{text}`"
+
+
+def _own_fields(symbol: CadSymbol, names: list[str]) -> None:
+    """Write into the fields that the symbol has, when its BOM line has no value of
+    the role: the BOM cannot tell if a symbol has an empty field. Not in datasheet-lens,
+    which reads only the BOM. names: the fields of the symbol (UnitCheck.fields).
+    The names of more fields of one role (for example in different units): not
+    known, the user selects the field."""
+    if not symbol.mpn:
+        own = list(dict.fromkeys(names[i] for i in mpn_order(names)))
+        if own:
+            symbol.mpn_fields, symbol.mpn_known = own, len(own) == 1
+    if symbol.value_confirmed == "":  # None: the BOM has no field Value_Confirmed
+        own = [n for n in names if is_confirmed_field(n)]
+        if own:
+            symbol.confirmed_fields, symbol.confirmed_known = own, len(own) == 1
+
+
+def _choices(item: FieldWrite) -> str:
+    """The fields of a write that the user selects (see write_fields)."""
+    return "".join(
+        f" The field for {role} is not known ({', '.join(names)}): ask the user which one the "
+        "symbol uses, and put its name in place of the name in angle brackets."
+        for role, _text, names in item.choices
+    )
+
+
+def _missing(item: FieldWrite, own: dict[str, list[str]]) -> str:
+    """The fields of a write into a variant that the symbol does not have: a variant
+    can set only a field that the symbol has (set_symbol_fields)."""
+    missing = [
+        name
+        for name in item.fields
+        if name != "Value" and name not in own.get(item.reference.upper(), [])
+    ]
+    if not item.variant or not missing:
+        return ""
+    return (
+        f" The symbol has no field {', '.join(missing)}: first write it into the symbol (a "
+        "change with no variant)."
+    )
 
 
 def _target(item: FieldWrite) -> str:
@@ -67,7 +127,7 @@ def _target(item: FieldWrite) -> str:
     return item.reference
 
 
-def _messages(result: FieldCheck) -> list[str]:
+def _messages(result: FieldCheck, own: dict[str, list[str]]) -> list[str]:
     """The messages of check_symbols with the next step for each symbol, as
     format_check of datasheet-lens gives them."""
     lines = []
@@ -89,14 +149,16 @@ def _messages(result: FieldCheck) -> list[str]:
             )
             lines.append(
                 f"- ⚠️ change in the CAD project: {_target(c)}: {c.text} Tell the user. When the "
-                f"user confirms the change:{first} Write {_code(c)}. Else the Value must change "
-                "back."
+                f"user confirms the change:{first} Write {_code(c)}.{_choices(c)}{_missing(c, own)} Else the Value "
+                "must change back."
             )
         lines.append("")
     if result.unconfirmed:
         lines += ["## Not confirmed", ""]
         lines += [
             f"- not confirmed: {_target(u)}:{u.text} When the user agrees: Write {_code(u)}."
+            + _choices(u)
+            + _missing(u, own)
             for u in result.unconfirmed
         ]
         lines.append("")
@@ -105,6 +167,8 @@ def _messages(result: FieldCheck) -> list[str]:
         lines += [
             f"- complete the fields: {_target(c)}: the MPN is not in Value (the convention: the "
             f"MPNs in parentheses in Value). The parts do not change. Write {_code(c)}."
+            + _choices(c)
+            + _missing(c, own)
             for c in result.complete
         ]
         lines.append("")
@@ -119,9 +183,9 @@ def _messages(result: FieldCheck) -> list[str]:
         lines.append(
             f"no part selected (a general value and no MPN): {', '.join(result.no_mpn)}. A part "
             "that needs a datasheet: select it with the user, then write its MPN into Value in "
-            "parentheses ('10k (RC0603FR-0710KL)'), into MPN, and the new Value into "
-            "Value_Confirmed. A symbol that needs no part (a test point, a generic resistor): "
-            "MPN = '-'."
+            "parentheses ('10k (RC0603FR-0710KL)'), into the MPN field of the symbol, and the new "
+            "Value into its field Value_Confirmed. A symbol that needs no part (a test point, a "
+            "generic resistor): MPN = '-'."
         )
     return lines
 
@@ -175,6 +239,8 @@ async def _check(schematic_path: str) -> str:
             key = symbol.reference.upper()
             symbol.unit_conflicts = [_UNITS] if key in joined else []
             symbol.unit_conflicts += [_DUPLICATE] if key in duplicates else []
+            symbol.unit_conflicts += [_NOT_ANNOTATED] if key.endswith("?") else []
+            _own_fields(symbol, units.fields.get(key, []))
         symbols += lines
         counts.append(f"{variant_label(variant)}: {len(rows) - 1}")
 
@@ -188,7 +254,7 @@ async def _check(schematic_path: str) -> str:
     )
     out += [f"⚠️ kicad-cli: {message}" for message in cli_messages]
     out.append("")
-    messages = _messages(result)
+    messages = _messages(result, units.fields)
     if messages:
         out += messages
         out += [

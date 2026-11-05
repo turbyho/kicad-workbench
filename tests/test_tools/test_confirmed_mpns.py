@@ -345,11 +345,65 @@ class TestBomSymbols:
             "Manufacturer Part Number": "LM358DT",
             "Value Confirmed": "LM358 (LM358DT)",
         }
-        # The column of the value of the line; with no value, the default name when the
-        # BOM has it.
-        rows = [["Reference", "Value", "MP", "MPN"], ["U1", "X", "A", ""], ["U2", "X (B)", "", ""]]
+        # Two filled MPN columns: the write goes into the two, in the order of MPN_FIELDS
+        # (as datasheet-lens). No MPN in the line and more names: the user selects the
+        # field (test_write_field_names of datasheet-lens).
+        rows = [
+            ["Reference", "Value", "MP", "Manufacturer Part Number"],
+            ["U1", "X", "A", "A"],
+            ["U2", "X (B)", "", ""],
+        ]
         u1, u2 = bom_symbols(rows)
-        assert (u1.mpn_field, u2.mpn_field, u1.confirmed_field) == ("MP", "MPN", "Value_Confirmed")
+        assert (u1.mpn_fields, u1.mpn_known) == (["Manufacturer Part Number", "MP"], True)
+        assert (u2.mpn_fields, u2.mpn_known) == (["Manufacturer Part Number", "MP"], False)
+        assert (u1.confirmed_fields, u1.confirmed_known) == (["Value_Confirmed"], True)
+        result = check_symbols([u1, u2])
+        (c1,) = result.complete
+        assert c1.fields == {"Value": "X (A)", "Manufacturer Part Number": "A", "MP": "A"}
+        (c2,) = result.unconfirmed
+        assert (c2.fields, c2.choices) == (
+            {},
+            [("the MPN", "B", ["Manufacturer Part Number", "MP"])],
+        )
+        # One name of the role (also in an other spelling): known.
+        rows = [["Reference", "Value", "mpn"], ["U2", "X (B)", ""]]
+        (u2,) = bom_symbols(rows)
+        assert (u2.mpn_fields, u2.mpn_known) == (["mpn"], True)
+
+    def test_write_fields_of_the_roles(self):
+        """A "no part" mark, no MPN column, two names of Value_Confirmed
+        (test_write_fields_of_the_roles of datasheet-lens)."""
+        rows = [
+            ["Reference", "Value", "MP", "Value_Confirmed", "Value Confirmed"],
+            ["TP1", "TP", "-", "", ""],
+            ["U1", "X (A)", "", "", ""],
+        ]
+        tp1, u1 = bom_symbols(rows)
+        assert (tp1.mpn_fields, tp1.mpn_known) == (["MP"], True)  # the column of the mark
+        assert (u1.confirmed_fields, u1.confirmed_known) == (
+            ["Value_Confirmed", "Value Confirmed"],
+            False,
+        )
+        (u1,) = bom_symbols([["Reference", "Value", "Value_Confirmed"], ["U1", "X (A)", ""]])
+        assert (u1.mpn_fields, u1.mpn_known) == (["MPN"], True)  # no MPN column
+
+    def test_write_targets_of_a_variant(self):
+        """A variant line that writes into other fields than the default line gives its
+        own message (test_write_targets_of_a_variant of datasheet-lens)."""
+        result = check_symbols(
+            [
+                CadSymbol(reference="U1", value="LM358", mpn="LM358DR", value_confirmed=""),
+                CadSymbol(
+                    reference="U1",
+                    value="LM358",
+                    mpn="LM358DR",
+                    value_confirmed="",
+                    variant="b",
+                    mpn_fields=["Manufacturer Part Number"],
+                ),
+            ]
+        )
+        assert [list(c.fields)[1] for c in result.complete] == ["MPN", "Manufacturer Part Number"]
 
     def test_no_column_value_confirmed(self):
         (symbol,) = bom_symbols([["Reference", "Value", "MPN"], ["R1", "10k", "A"]])

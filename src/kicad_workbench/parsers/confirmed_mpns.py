@@ -25,7 +25,7 @@ The convention:
 import re
 from dataclasses import dataclass, field
 
-from .unit_fields import CONFIRMED_FIELD, field_key, is_mpn_field
+from .unit_fields import CONFIRMED_FIELD, field_key, mpn_order
 
 # The text of KiCad in a BOM line of more symbols or units with different values of
 # a field (INDETERMINATE_STATE, include/widgets/ui_common.h; FIELDS_EDITOR_GRID_DATA_MODEL
@@ -274,11 +274,15 @@ class CadSymbol:
     # The name of a variant of KiCad 10, or empty for the default variant. A variant
     # can set an other Value, MPN or DNP.
     variant: str = ""
-    # The names of the fields that a write uses: the field that holds the MPN of the
-    # line (for example "Manufacturer Part Number"), and the field Value_Confirmed. Not
-    # in datasheet-lens, which names the fields MPN and Value_Confirmed.
-    mpn_field: str = "MPN"
-    confirmed_field: str = CONFIRMED_FIELD
+    # The fields that a write uses (see write_fields): the MPN fields with the MPN of
+    # the line (for example "Manufacturer Part Number"; more fields hold the same MPNs),
+    # and the fields Value_Confirmed. known False: the line has no value and the project
+    # has more names of the role; the fields are the choices, and the user selects the
+    # field of the symbol.
+    mpn_fields: list[str] = field(default_factory=lambda: ["MPN"])
+    mpn_known: bool = True
+    confirmed_fields: list[str] = field(default_factory=lambda: [CONFIRMED_FIELD])
+    confirmed_known: bool = True
     # The conflicts of the units of one package with different fields (not in
     # datasheet-lens, which cannot see the units in a BOM line): each one is a conflict
     # of its own, thus a variant line does not repeat one of the default line.
@@ -437,22 +441,37 @@ def symbol_state(symbol: CadSymbol) -> SymbolState:
     return state
 
 
+def write_fields(filled: list[str], names: list[str], default: str) -> tuple[list[str], bool]:
+    """The fields that a write uses for one role, and True if they are known (as
+    _write_fields of datasheet-lens). filled: the fields of the role with a value in
+    the line (they hold the same value, else the line has a conflict and no
+    proposal); names: all fields of the role. With no value: the one name of the
+    role, or the default name when there is no field of the role. More names (for
+    example MPN and Manufacturer Part Number of two libraries): not known; the names
+    are the choices, and the user selects the field that the symbol uses. The BOM of
+    the tool has one reference in each line, thus not the rule of datasheet-lens for
+    a line of more symbols."""
+    if filled:
+        return list(dict.fromkeys(filled)), True
+    choices = list(dict.fromkeys(names))
+    return (choices, False) if len(choices) > 1 else (choices or [default], True)
+
+
 def bom_symbols(rows: list[list[str]], variant: str = "") -> list[CadSymbol]:
     """Read the lines of a BOM of kicad-cli (one line for each reference, no DNP
     symbols) as bom_parts of datasheet-lens reads them.
 
-    The columns: Reference, each Value column, each MPN column (is_mpn_field: the
-    first filled one is the field MPN, the others must hold the same MPNs) and
+    The columns: Reference, each Value column, each MPN column (MPN_FIELDS, in
+    their order: the first filled one is the field MPN, the others must hold the
+    same MPNs) and
     each column of Value_Confirmed. The names of a role are compared with no
     case, spaces, "_", "." and "-" (field_key): the fields MPN and mpn of symbols
     from different libraries are two columns of one role. More columns of one role
     with different values are a conflict. A line with no Value, no MPN and no
     conflict gives no symbol.
 
-    The field of a write (CadSymbol.mpn_field, confirmed_field) is the column of
-    the value of the line. With no value: the default name when the BOM has that
-    column or no column of the role, else the first column of the role (the name
-    that the project uses).
+    The fields of a write (CadSymbol.mpn_fields, confirmed_fields): see
+    write_fields.
     """
     header, lines = rows[0], rows[1:]
     keys = [field_key(name) for name in header]
@@ -464,17 +483,9 @@ def bom_symbols(rows: list[list[str]], variant: str = "") -> list[CadSymbol]:
     reference_columns = [i for i, name in enumerate(header) if name == "Reference"]
     value_columns = [i for i, key in enumerate(keys) if key == "value"]
     confirmed_columns = [i for i, key in enumerate(keys) if key == field_key(CONFIRMED_FIELD)]
-    field_columns = [
-        i for i, name in enumerate(header) if is_mpn_field(name) and i not in value_columns
-    ]
-
-    def name(filled: list[int], columns: list[int], default: str) -> str:
-        """The field of a write: see the docstring."""
-        if filled:
-            return header[filled[0]]
-        if not columns or any(header[i] == default for i in columns):
-            return default
-        return header[columns[0]]
+    # The MPN columns in the order of MPN_FIELDS (MPN first), as datasheet-lens: the
+    # first filled one is the field MPN of the line.
+    field_columns = [i for i in mpn_order(header) if i not in value_columns]
 
     def role(row: list[str], columns: list[int]) -> tuple[str, str]:
         """The first filled value of the columns of a role, and the conflict text
@@ -523,12 +534,14 @@ def bom_symbols(rows: list[list[str]], variant: str = "") -> list[CadSymbol]:
             other_values=[text for _, text in values[1:]],
             variant=variant,
             conflict="; ".join(c for c in (value_conflict, mark_conflict, confirmed_conflict) if c),
-            mpn_field=name(filled or marked, field_columns, "MPN"),
-            confirmed_field=name(
-                [i for i in confirmed_columns if _filled(row[i])],
-                confirmed_columns,
-                CONFIRMED_FIELD,
-            ),
+        )
+        symbol.mpn_fields, symbol.mpn_known = write_fields(
+            [header[i] for i in filled or marked], [header[i] for i in field_columns], "MPN"
+        )
+        symbol.confirmed_fields, symbol.confirmed_known = write_fields(
+            [header[i] for i in confirmed_columns if _filled(row[i])],
+            [header[i] for i in confirmed_columns],
+            CONFIRMED_FIELD,
         )
         if symbol.value or symbol.mpn or symbol.conflict:
             symbols.append(symbol)
@@ -544,6 +557,9 @@ class FieldWrite:
     fields: dict[str, str]  # by name, in the order Value, MPN, Value_Confirmed (CadSymbol)
     text: str = ""  # the message: the change, or the MPNs that are new or not in Value
     select: bool = False  # the user selects a new part first, and writes it into Value
+    # The fields that are not known (CadSymbol.mpn_known, confirmed_known): (the role,
+    # the text, the names to select from).
+    choices: list[tuple[str, str, list[str]]] = field(default_factory=list)
 
 
 @dataclass
@@ -571,10 +587,23 @@ def _write(
     (only a completion), the MPN field, and Value_Confirmed when the BOM has the
     field (the names of CadSymbol)."""
     fields = {"Value": value} if value else {}
-    fields[symbol.mpn_field] = mpn
+    choices = []
+    roles = [("the MPN", mpn, symbol.mpn_fields, symbol.mpn_known)]
     if symbol.value_confirmed is not None:
-        fields[symbol.confirmed_field] = confirmed
-    return FieldWrite(symbol.reference.strip(), symbol.variant, fields, text, state.select)
+        roles.append(
+            (
+                "Value_Confirmed",
+                confirmed,
+                symbol.confirmed_fields,
+                symbol.confirmed_known,
+            )
+        )
+    for role, written, names, known in roles:
+        if known:
+            fields.update(dict.fromkeys(names, written))
+        else:
+            choices.append((role, written, names))
+    return FieldWrite(symbol.reference.strip(), symbol.variant, fields, text, state.select, choices)
 
 
 def check_symbols(symbols: list[CadSymbol]) -> FieldCheck:
@@ -589,7 +618,7 @@ def check_symbols(symbols: list[CadSymbol]) -> FieldCheck:
     default: dict[str, set[tuple[str, str]]] = {kind: set() for kind in kinds}
     result = FieldCheck()
 
-    def add(kind: str, symbol: CadSymbol, text: str, item: object) -> None:
+    def add(kind: str, symbol: CadSymbol, text: object, item: object) -> None:
         keys = {(symbol.reference.upper(), text)}
         if not symbol.variant:
             default[kind] |= keys
@@ -625,21 +654,31 @@ def check_symbols(symbols: list[CadSymbol]) -> FieldCheck:
         # The fields that a confirmation writes: the MPNs of the parentheses of Value.
         value = _filled(symbol.value)
         mpn = NEW_MPN if state.select else state.write_mpn
+        # A variant line that writes into other fields than the default line is no
+        # duplicate.
+        target = (
+            tuple(symbol.mpn_fields),
+            symbol.mpn_known,
+            symbol.value_confirmed is not None,
+            tuple(symbol.confirmed_fields),
+            symbol.confirmed_known,
+        )
         if state.change:
             new = f" New: {', '.join(state.new)}." if state.new else ""
             removed = f" Not in Value now: {', '.join(state.removed)}." if state.removed else ""
             confirmed = NEW_VALUE if state.select else value
             item = _write(symbol, state, f"{state.change}.{new}{removed}", mpn, confirmed)
-            add("changes", symbol, state.change, item)
+            add("changes", symbol, (state.change, target), item)
         elif state.unconfirmed:
             new = state.new if state.mpns else []
             text = (f" Not in MPN: {', '.join(new)}." if new else "") + (
                 f" Not in Value: {', '.join(state.removed)}." if state.removed else ""
             )
-            add("unconfirmed", symbol, f"{mpn}|{value}", _write(symbol, state, text, mpn, value))
+            item = _write(symbol, state, text, mpn, value)
+            add("unconfirmed", symbol, (mpn, value, target), item)
         elif state.complete:
             item = _write(symbol, state, "", mpn, state.complete, state.complete)
-            add("complete", symbol, state.complete, item)
+            add("complete", symbol, (state.complete, target), item)
         if state.no_mpn:
             add("no_mpn", symbol, "", label)
     return result

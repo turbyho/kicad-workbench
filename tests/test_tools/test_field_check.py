@@ -205,6 +205,72 @@ class TestCheckSymbolFields:
         project["state"]["warning"] = ""
         assert "✅" in await check(project)
 
+    async def test_fields_of_the_symbol(self, project):
+        """A BOM line with no MPN: the write goes into the MPN field that the symbol has
+        (also an empty one). A symbol with no MPN field in a project with more names:
+        the user selects the field."""
+        directory = project["directory"]
+        mfr = placed("U1", 1, "").replace('"MPN"', '"Manufacturer Part Number"')
+        other = placed("U2", 1, "").replace('(property "MPN" "" (at 0 0 0))', "")
+        (directory / "board.kicad_sch").write_text(
+            schematic(mfr, other, placed("U3", 1, "A")), encoding="utf-8"
+        )
+        header = '"Reference","Value","MPN","Manufacturer Part Number"\n'
+        lines = '"U1","LM358 (LM358DR)","",""\n"U2","LM358 (LM358DT)","",""\n'
+        project["state"]["csv"] = {"": header + lines, "Lite": header + lines}
+        out = await check(project)
+        assert (
+            'not confirmed: U1: When the user agrees: Write `{"reference": "U1", "fields": '
+            '{"Manufacturer Part Number": "LM358DR"}}`.' in out
+        )
+        assert (
+            'not confirmed: U2: When the user agrees: Write `{"reference": "U2", "fields": '
+            '{"<the field for the MPN: MPN or Manufacturer Part Number>": "LM358DT"}}`. The '
+            "field for the MPN is not known (MPN, Manufacturer Part Number): ask the user which "
+            "one the symbol uses, and put its name in place of the name in angle brackets." in out
+        )
+
+    async def test_variant_field_that_the_symbol_does_not_have(self, project):
+        """A variant can set only a field that the symbol has (set_symbol_fields)."""
+        directory = project["directory"]
+        no_mpn = placed("U1", 1, "").replace('(property "MPN" "" (at 0 0 0))', "")
+        (directory / "board.kicad_sch").write_text(
+            schematic(no_mpn, placed("U3", 1, "A")), encoding="utf-8"
+        )
+        header = '"Reference","Value","MPN"\n'
+        project["state"]["csv"] = {
+            "": header + '"U1","LM358",""\n',
+            "Lite": header + '"U1","LM358 (LM358DT)",""\n',
+        }
+        out = await check(project)
+        assert (
+            '"fields": {"MPN": "LM358DT"}, "variant": "Lite"}`. The symbol has no field MPN: '
+            "first write it into the symbol (a change with no variant)." in out
+        )
+
+    async def test_more_own_fields(self, project):
+        """The units have empty MPN fields of two names: the user selects the field."""
+        directory = project["directory"]
+        unit_b = placed("U1", 2, "").replace('"MPN"', '"MP"')
+        (directory / "board.kicad_sch").write_text(
+            schematic(placed("U1", 1, ""), unit_b), encoding="utf-8"
+        )
+        line = '"U1","LM358 (LM358DT)","","",""\n'
+        project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
+        out = await check(project)
+        assert '"<the field for the MPN: MPN or MP>": "LM358DT"' in out
+
+    async def test_not_annotated(self, project):
+        line = '"U?","LM358 (LM358DT)","","",""\n'
+        project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
+        out = await check(project)
+        assert (
+            "- ❌ conflict in the CAD project: U?: a reference that is not annotated: "
+            "set_symbol_fields cannot find the symbol. Annotate the schematic in KiCad first."
+            in out
+        )
+        assert "Write `" not in out
+
     async def test_duplicate_reference(self, project):
         """KiCad joins the fields of the symbols of a duplicate reference in one BOM
         line: a conflict, and no proposal."""

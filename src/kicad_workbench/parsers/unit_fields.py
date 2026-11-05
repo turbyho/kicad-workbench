@@ -80,6 +80,13 @@ def is_mpn_field(name: str) -> bool:
     return field_key(name) in _MPN_KEYS
 
 
+def mpn_order(names: list[str]) -> list[int]:
+    """Return the indexes of the MPN fields of names, in the order of MPN_FIELDS (MPN
+    first, also in an other spelling), as datasheet-lens orders the MPN columns."""
+    keys = [field_key(name) for name in names]
+    return [i for wanted in MPN_FIELDS for i, key in enumerate(keys) if key == field_key(wanted)]
+
+
 def is_confirmed_field(name: str) -> bool:
     """Return True for the name of the field Value_Confirmed (see field_key)."""
     return field_key(name) == field_key(CONFIRMED_FIELD)
@@ -184,6 +191,9 @@ class UnitCheck:
     conflicts: dict[str, list[UnitConflict]]
     hierarchy: list[str]  # the problems of the sheet hierarchy (a sheet not read)
     duplicates: list[str]  # the duplicate references: their fields are not compared
+    # The MPN fields and the fields Value_Confirmed of each reference (in upper case),
+    # also the empty ones, in the order of the fields of its units.
+    fields: dict[str, list[str]]
 
     @property
     def problems(self) -> list[str]:
@@ -245,7 +255,11 @@ def variant_unit_conflicts(project: Path, variants: list[str] | None = None) -> 
                 )
                 if len({value for _unit, value in values}) > 1:
                     found.append(UnitConflict(reference, variant, name, values))
-    return UnitCheck(conflicts, problems, duplicates)
+    fields = {
+        key: list(dict.fromkeys(name for unit in group for name in unit.fields if name != "Value"))
+        for key, group in units.items()
+    }
+    return UnitCheck(conflicts, problems, duplicates, fields)
 
 
 def unit_conflicts(

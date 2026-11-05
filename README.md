@@ -234,7 +234,7 @@ Uses `run_erc`, `run_drc`, and `detect_pin_conflicts`.
 
 | Tool | Description |
 |------|-------------|
-| `export_bom` | The BOM of the full project, as `kicad-cli sch export bom` of the installed KiCad makes it: the fields that the caller selects (default: all fields), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or all variants with one CSV file for each). It can keep the CSV file of kicad-cli, for example for `project_check` of [datasheet-lens](https://github.com/turbyho/datasheet-lens) |
+| `export_bom` | The BOM of the full project, as `kicad-cli sch export bom` of the installed KiCad makes it: the fields that the caller selects (default: all fields), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or all variants with one CSV file for each). It gives an error of the design when the units of one package have a different Value or MPN. It can keep the CSV file of kicad-cli, for example for `project_check` of [datasheet-lens](https://github.com/turbyho/datasheet-lens) |
 
 ### Libraries
 

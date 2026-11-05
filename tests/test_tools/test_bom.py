@@ -304,6 +304,37 @@ class TestExportBom:
         assert out.startswith("❌ kicad-cli did not write the BOM of")
         assert "exit code 255: Warning: schematic has annotation errors" in out
 
+    async def test_units_with_different_mpn(self, project):
+        directory = project["directory"]
+        units = "".join(
+            f'  (symbol (lib_id "A:LM358") (at 0 0 0) (unit {unit})\n'
+            f'    (property "Reference" "U1" (at 0 0 0)) (property "Value" "LM358" (at 0 0 0))\n'
+            f'    (property "MPN" "{mpn}" (at 0 0 0))\n'
+            '    (instances (project "board" (path "/00000000-0000-0000-0000-000000000001"\n'
+            f'      (reference "U1") (unit {unit})))))\n'
+            for unit, mpn in ((1, "LM358NG"), (2, "LM358P"))
+        )
+        (directory / "board.kicad_sch").write_text(
+            ROOT.replace("  (sheet", units + "  (sheet", 1), encoding="utf-8"
+        )
+        for arguments in ({}, {"output_path": "bom.csv", "all_variants": True}):
+            out = await bom.export_bom(str(directory / "board.kicad_sch"), **arguments)
+            lines = out.splitlines()
+            assert lines[2].startswith("❌ ERROR IN THE DESIGN: the units of one package")
+            assert lines[3] == "- U1: MPN: A = 'LM358NG', B = 'LM358P'"
+
+    async def test_unit_check_failure_keeps_the_bom(self, project, monkeypatch):
+        def failing(project, variants):
+            raise ValueError("bad unit")
+
+        monkeypatch.setattr(bom, "unit_conflicts", failing)
+        directory = project["directory"]
+        out = await bom.export_bom(str(directory / "board.kicad_sch"), output_path="bom.csv")
+        assert (
+            "⚠️ The tool could not compare the fields of the units of the symbols: bad unit" in out
+        )
+        assert "The CSV file of kicad-cli is written" in out and (directory / "bom.csv").is_file()
+
     async def test_not_a_schematic(self, project):
         out = await bom.export_bom(str(project["directory"] / "board.kicad_pro"))
         assert out.startswith("❌") and "is not a .kicad_sch file" in out

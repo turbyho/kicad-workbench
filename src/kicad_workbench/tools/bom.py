@@ -40,8 +40,9 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..parsers.kicad_versions import KICAD8, KICAD9, KICAD10, kicad_release
+from ..parsers.kicad_versions import KICAD8, KICAD9, KICAD10, KicadFileError, kicad_release
 from ..parsers.sexpr import SExprError, parse
+from ..parsers.unit_fields import unit_conflicts
 from ..server import mcp
 from ..utils.kicad_cli import CliExport, export_with_kicad_cli, get_kicad_version
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad, read_kicad_json
@@ -386,6 +387,32 @@ _BOM_NOTE = (
 )
 
 
+def _unit_check(project: Path, variants: list[str]) -> list[str]:
+    """Return the lines about the units of one package with different fields (see
+    parsers/unit_fields): an error of the design, first in the output."""
+    try:
+        conflicts, problems = unit_conflicts(project, variants)
+    except (OSError, KiCadEncodingError, SExprError, KicadFileError, ValueError) as e:
+        # The BOM of kicad-cli is correct: only this check did not run.
+        return [f"⚠️ The tool could not compare the fields of the units of the symbols: {e}"]
+    lines_out = []
+    if conflicts:
+        lines_out += [
+            "❌ ERROR IN THE DESIGN: the units of one package have different fields. One "
+            "package has one Value and one MPN. Correct the fields in KiCad. The line of "
+            'the package in the BOM joins the values: KiCad 9 and 10 write "A,B", which '
+            'looks like an MPN and its alternative, and KiCad 8 writes "-- mixed values --".',
+            *(f"- {conflict.text()}" for conflict in conflicts),
+            "",
+        ]
+    if problems:
+        lines_out.append(
+            "⚠️ The compare of the fields of the units did not read each sheet: "
+            + " ".join(problems)
+        )
+    return lines_out
+
+
 def _bom_text(
     root: Path,
     kicad: str,
@@ -396,9 +423,10 @@ def _bom_text(
     replaced: bool,
     variant: str,
     grouped: bool,
+    units: list[str],
 ) -> str:
     header, lines = rows[0], rows[1:]
-    lines_out = [f"# BOM of {root.name}", ""]
+    lines_out = [f"# BOM of {root.name}", "", *units]
     source = f"kicad-cli of KiCad {kicad} (`sch export bom`)"
     if variant:
         source += f", variant {variant!r}"
@@ -540,10 +568,12 @@ async def _export_all_variants(
         )
     except OSError as e:
         return f"❌ The BOM files cannot be written: {e}. The tool changed no file."
+    units = await asyncio.to_thread(_unit_check, project, variants)
     count = len(variants)
     lines_out = [
         f"# BOM of {root.name}, all variants",
         "",
+        *units,
         f"kicad-cli of KiCad {kicad} (`sch export bom`), one run and one CSV file for each "
         + (
             f"variant: the default variant and {count} variant{'s' if count > 1 else ''}."
@@ -618,16 +648,9 @@ async def _export_bom(
             # An empty name is the default variant (SCHEMATIC::SetCurrentVariant). KiCad
             # does not let the user give it ("Variant name cannot be empty.",
             # DIALOG_SYMBOL_FIELDS_TABLE), but a file that a person edits can have it.
+            variants = sorted(name for name in known if name)
             return await _export_all_variants(
-                root,
-                project,
-                kicad,
-                names,
-                group_by or [],
-                exclude_dnp,
-                columns,
-                output,
-                sorted(name for name in known if name),
+                root, project, kicad, names, group_by or [], exclude_dnp, columns, output, variants
             )
         if variant not in known:
             # JobExportBom uses the default variant for an unknown name, with no message.
@@ -653,7 +676,10 @@ async def _export_bom(
             output.write_bytes(export.data)
 
         await asyncio.to_thread(write)
-    return _bom_text(root, kicad, export, rows, columns, output, replaced, variant, bool(group_by))
+    units = await asyncio.to_thread(_unit_check, project, [variant] if variant else [])
+    return _bom_text(
+        root, kicad, export, rows, columns, output, replaced, variant, bool(group_by), units
+    )
 
 
 @mcp.tool()
@@ -672,6 +698,12 @@ async def export_bom(
     schematic, and gives its lines as a table. Without group_by, each
     reference is one line. KiCad does not put the power symbols and the
     symbols that are excluded from the BOM into the BOM.
+
+    The units of one package (one reference, U1A and U1B) must have the same
+    Value and the same MPN. When they do not, the output starts with an error
+    of the design: the BOM line of the package joins the values, and the
+    joined MPNs look like an MPN and its alternative. Tell the user, and
+    correct the fields in KiCad.
 
     For project_check of datasheet-lens, give output_path and no group_by.
     Then give the path of the CSV file to project_check (argument bom). For a
@@ -702,8 +734,9 @@ async def export_bom(
             output_path, and gives no tables. Not with variant.
 
     Returns:
-        The number of lines, the path of the CSV file, the messages of
-        kicad-cli, the warnings, and the table of the BOM. With all_variants:
+        The errors of the design (units of one package with different
+        fields), the number of lines, the path of the CSV file, the messages
+        of kicad-cli, the warnings, and the table of the BOM. With all_variants:
         for each variant the number of lines, the path and the warnings, and
         the list of the files for project_check.
     """

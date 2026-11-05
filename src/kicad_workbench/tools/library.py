@@ -2007,7 +2007,7 @@ def _page_count_warning(
     """
     if isinstance(symbol, Exception):
         return (
-            "**Warning**: the server cannot read the symbol, thus it did not compare the "
+            "⚠️ **Warning:** the server cannot read the symbol, thus it did not compare the "
             f"pages with the units and body styles of the symbol: {symbol}"
         )
     chain, info = symbol
@@ -2020,7 +2020,7 @@ def _page_count_warning(
         return f"{value} {noun}" + ("" if value == 1 else "s")
 
     warning = (
-        f"**Warning**: kicad-cli wrote {number(count, 'page')}, but the symbol has "
+        f"⚠️ **Warning:** kicad-cli wrote {number(count, 'page')}, but the symbol has "
         f"{number(info.unit_count, 'unit')} and {number(styles, 'body style')} "
         f"({number(expected, 'page')})."
     )

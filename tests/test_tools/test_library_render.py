@@ -298,7 +298,7 @@ class TestRenderLibraryItem:
         assert "- U_unit2: 4 × 8 mm, no text, legible from 11.8 px/mm (300 DPI)" in summary
         assert "_Hidden pins and hidden fields are not shown (include_hidden)._" in summary
         # Four pages: two units with two body styles.
-        assert "**Warning**" not in summary
+        assert "⚠️ **Warning:**" not in summary
         # 10 × 5 mm at 300 DPI is 118 × 59 px: two tiles. U_unit2 fits: one image.
         assert out[1::2] == [
             "U_unit1: tile 1 of 2, x 0 to 8.47 mm, y 0 to 5 mm, 11.8 px/mm (300 DPI), "
@@ -334,7 +334,7 @@ class TestRenderLibraryItem:
         render["state"]["files"] = {"UD_unit1.svg": svg(), "UD_unit2.svg": svg()}
         out = await render_item("Device:UD", "symbol")
         assert (
-            "**Warning**: kicad-cli wrote 2 pages, but the symbol has 2 units and 2 body "
+            "⚠️ **Warning:** kicad-cli wrote 2 pages, but the symbol has 2 units and 2 body "
             "styles (4 pages). kicad-cli of KiCad 10.0.0 to 10.0.6 draws only the first body "
             "style of a derived symbol (KiCad issue 25209, repaired in KiCad 10.0.7)."
         ) in out[0]
@@ -343,7 +343,7 @@ class TestRenderLibraryItem:
         render["state"]["files"] = {"U_unit1.svg": svg()}
         out = await render_item("Device:U", "symbol")
         assert out[0].splitlines()[-2] == (
-            "**Warning**: kicad-cli wrote 1 page, but the symbol has 2 units and 2 body "
+            "⚠️ **Warning:** kicad-cli wrote 1 page, but the symbol has 2 units and 2 body "
             "styles (4 pages)."
         )
 
@@ -355,7 +355,7 @@ class TestRenderLibraryItem:
         monkeypatch.setattr(library_tools, "get_kicad_version", version)
         render["state"]["files"] = {"UD_unit1.svg": svg(), "UD_unit2.svg": svg()}
         out = await render_item("Device:UD", "symbol")
-        assert "**Warning**: kicad-cli wrote 2 pages" in out[0]
+        assert "⚠️ **Warning:** kicad-cli wrote 2 pages" in out[0]
         assert "issue 25209" not in out[0]
 
     async def test_region_on_some_pages(self, render):
@@ -382,7 +382,7 @@ class TestRenderLibraryItem:
         )
         out = await render_item("Device:R", "symbol", project_path=str(render["project"]))
         assert (
-            "**Warning**: the server cannot read the symbol, thus it did not compare the "
+            "⚠️ **Warning:** the server cannot read the symbol, thus it did not compare the "
             "pages with the units and body styles of the symbol: The symbol library file "
             f"{library} has the file version 20991231"
         ) in out[0]
@@ -413,7 +413,7 @@ class TestRenderLibraryItem:
         )
         out = await render_item("Device:R", "symbol", max_images=10)
         assert len(out) == 21
-        assert "**Warning**" not in out[0]
+        assert "⚠️ **Warning:**" not in out[0]
 
     async def test_project_library(self, render):
         out = await render_item(

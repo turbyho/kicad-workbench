@@ -108,3 +108,58 @@ def _wire_widths(data: object) -> tuple[int, int]:
     # A class without a wire width gets the width of the Default class.
     values = set(widths.values()) | {widths.get("Default", default)}
     return min(values), max(values)
+
+
+# SCHEMATIC_SETTINGS: PARAM<int>( "subpart_id_separator", 0, 0, 126 ) and
+# PARAM<int>( "subpart_first_id", 'A', '1', 'z' ) (KiCad 8.0.9, 9.0.9, 10.0.6).
+_SUBPART_SEPARATOR = (0, 0, 126)
+_SUBPART_FIRST_ID = (ord("A"), ord("1"), ord("z"))
+
+
+def _int_param(data: object, key: str, limits: tuple[int, int, int]) -> int:
+    """Return an int parameter of the "schematic" settings as PARAM<int>::Load reads it.
+
+    nlohmann gives an int for a number or a boolean (a float is cut to an
+    integer). Other values keep the default. A value out of the limits gives
+    the default. C++ does not define the cast of a float out of the int range:
+    the tool then gives the default.
+    """
+    default, low, high = limits
+    value = _value(data, "schematic", key)
+    if isinstance(value, bool):
+        number = int(value)
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, float) and value == value and abs(value) < 2**31:
+        number = int(value)
+    else:
+        return default
+    return number if low <= number <= high else default
+
+
+@dataclass(frozen=True)
+class SubpartSettings:
+    """The unit letters of the project (SCHEMATIC_SETTINGS::SubReference)."""
+
+    separator: int  # The character before the unit letters; 0: none.
+    first_id: int  # The first letter ("A" or "a"), or a digit: the units are numbers.
+    problem: str | None = None  # Why KiCad uses the default values.
+
+
+def subpart_settings(project_file: Path) -> SubpartSettings:
+    """Return the unit letter settings of a project. A project file that does not
+    exist or cannot be read gives the default values (no separator, "A")."""
+    problem = None
+    try:
+        data = read_kicad_json(project_file) if project_file.is_file() else None
+    except (OSError, ValueError) as e:
+        data = None
+        problem = (
+            f"The project file {project_file} cannot be read ({e}), thus KiCad uses "
+            "the default unit letters."
+        )
+    return SubpartSettings(
+        _int_param(data, "subpart_id_separator", _SUBPART_SEPARATOR),
+        _int_param(data, "subpart_first_id", _SUBPART_FIRST_ID),
+        problem,
+    )

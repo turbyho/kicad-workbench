@@ -110,12 +110,13 @@ def _id_in_file(prop: Node) -> int | None:
         return None
 
 
-def _properties(item: Node) -> list[tuple[str, str, int | None]]:
+def _properties(item: Node) -> list[tuple[str, str, int | None, Node]]:
+    """Return (name, value, the (id N) or None, the property) of each named property."""
     result = []
     for prop in item.children("property"):
         field = property_field(prop)
         if field is not None:
-            result.append((*field, _id_in_file(prop)))
+            result.append((*field, _id_in_file(prop), prop))
     return result
 
 
@@ -134,9 +135,15 @@ def _next_free(field_id: int, used: set[int]) -> int:
 
 def symbol_fields(symbol: Node, rules: FieldRules) -> dict[str, str]:
     """Return the mandatory fields of a placed symbol, by canonical name."""
+    return {name: value for name, (value, _prop) in symbol_field_nodes(symbol, rules).items()}
+
+
+def symbol_field_nodes(symbol: Node, rules: FieldRules) -> dict[str, tuple[str, Node]]:
+    """Return the mandatory fields of a placed symbol, by canonical name: (the value,
+    the (property ...) that sets it). The last property of a field sets it."""
     mandatory = len(SYMBOL_FIELD_NAMES)
-    by_id: dict[int, str] = {}
-    for name, value, id_in_file in _properties(symbol):
+    by_id: dict[int, tuple[str, Node]] = {}
+    for name, value, id_in_file, prop in _properties(symbol):
         field_id = _name_id(name, SYMBOL_FIELD_NAMES, no_case=rules.kicad == 10)
         if field_id is None:
             continue
@@ -144,7 +151,7 @@ def symbol_fields(symbol: Node, rules: FieldRules) -> dict[str, str]:
         # field. KiCad 10 ignores the IDs.
         if rules.kicad == 9 and id_in_file is not None and id_in_file >= mandatory:
             continue
-        by_id[field_id] = value
+        by_id[field_id] = (value, prop)
     return {SYMBOL_FIELD_NAMES[i]: by_id[i] for i in range(mandatory) if i in by_id}
 
 
@@ -169,7 +176,7 @@ def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
     properties = _properties(sheet)
     if rules.kicad == 10:
         result: dict[str, str] = {}
-        for name, value, _id in properties:
+        for name, value, _id, _prop in properties:
             field_id = _name_id(name, _SHEET_NAMES, no_case=True)
             if field_id is None:
                 field_id = _name_id(name, ("Sheet name", "Sheet file"), no_case=True)
@@ -181,7 +188,7 @@ def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
         return result
     fields: list[tuple[int, str]] = []
     used: set[int] = set()
-    for name, value, id_in_file in properties:
+    for name, value, id_in_file, _prop in properties:
         field_id = _next_free(_sheet_field_id_v9(name, id_in_file), used)
         used.add(field_id)
         fields.append((field_id, value))

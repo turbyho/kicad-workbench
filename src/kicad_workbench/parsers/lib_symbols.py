@@ -44,7 +44,7 @@ _FLAGS = ("exclude_from_sim", "in_bom", "on_board", "in_pos_files")
 _RENAMES = range(1, 10)
 # The name of a sub-symbol: "<symbol name>_<unit>_<body style>".
 _UNIT_SUFFIX = re.compile(r"(\d+)_(\d+)")
-_SUB_SYMBOL = re.compile(r"_(\d+)_(\d+)\Z")
+SUB_SYMBOL = re.compile(r"_(\d+)_(\d+)\Z")
 # The characters that wxString::Strip removes (wxSafeIsspace: ASCII isspace).
 _BLANKS = " \t\n\v\f\r"
 
@@ -361,7 +361,7 @@ def unit_count(definition: Node) -> int:
     """Return the number of units of a symbol: the highest unit of its sub-symbols."""
     units = [1]
     for sub in definition.children("symbol"):
-        match = _SUB_SYMBOL.search(sub.value(0, ""))
+        match = SUB_SYMBOL.search(sub.value(0, ""))
         if match:
             units.append(int(match.group(1)))
     return max(units)
@@ -564,7 +564,7 @@ def _groups(symbol: Node, body_style: int, units: set[int] | None) -> list[Node]
     """
     groups = [(1, 1, symbol)]
     for sub in symbol.children("symbol"):
-        match = _SUB_SYMBOL.search(sub.value(0, ""))
+        match = SUB_SYMBOL.search(sub.value(0, ""))
         if match:
             groups.append((int(match.group(1)), int(match.group(2)), sub))
     return [

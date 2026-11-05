@@ -131,7 +131,7 @@ def _read_sheets(path: Path) -> tuple[str | None, list[_Sheet]]:
     return cached
 
 
-def _text_variables(root: Path) -> dict[str, str]:
+def text_variables(root: Path) -> dict[str, str]:
     """Return the text variables that KiCad uses to expand a sheet file name.
 
     KiCad expands a sheet file name with the variables of the project only
@@ -155,7 +155,9 @@ def _text_variables(root: Path) -> dict[str, str]:
     return variables
 
 
-def _expand(name: str, variables: dict[str, str]) -> str:
+def expand_text_variables(name: str, variables: dict[str, str]) -> str:
+    """Return a sheet file name with the text variables of text_variables expanded.
+    A variable that is not known stays as it is."""
     return _TEXT_VAR.sub(lambda m: variables.get(m.group(1), m.group(0)), name)
 
 
@@ -281,7 +283,7 @@ def _walk(
                 continue
             if not sheet.file:
                 continue  # KiCad reads an invalid name as empty: no file.
-            child = Path(_expand(sheet.file, variables))
+            child = Path(expand_text_variables(sheet.file, variables))
             if not child.is_absolute():
                 child = file.parent / child
             child = Path(os.path.normpath(child))
@@ -311,7 +313,7 @@ def sheet_files(root: Path) -> list[Path]:
     """
     root = Path(os.path.abspath(root))
     tops = [TopLevelSheet(root, None, root.stem)]
-    places, _problems = _walk(tops, _text_variables(root), unique=True)
+    places, _problems = _walk(tops, text_variables(root), unique=True)
     return [place.file for place in places]
 
 
@@ -329,7 +331,7 @@ def sheet_paths(project_file: Path) -> tuple[list[SheetPath], list[str]]:
     """
     project_file = Path(os.path.abspath(project_file))
     return _walk(
-        top_level_sheets(project_file), _text_variables(project_file.with_suffix(SCH_SUFFIX))
+        top_level_sheets(project_file), text_variables(project_file.with_suffix(SCH_SUFFIX))
     )
 
 
@@ -390,7 +392,7 @@ def project_files(project_file: Path) -> list[Path]:
     the project.
     """
     project_file = Path(os.path.abspath(project_file))
-    variables = _text_variables(project_file.with_suffix(SCH_SUFFIX))
+    variables = text_variables(project_file.with_suffix(SCH_SUFFIX))
     places, _problems = _walk(top_level_sheets(project_file), variables, unique=True)
     return [place.file for place in places]
 

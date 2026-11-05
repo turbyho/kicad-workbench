@@ -46,7 +46,7 @@ def fake_pcbnew(monkeypatch):
     """Replace the pcbnew script run. Set "board" and "kicad" to change its output."""
     state = {"board": 20260206, "kicad": "10.0.6", "calls": []}
 
-    async def run(args, timeout=120.0):
+    def run(args, timeout=120.0, input=None):
         state["calls"].append(args)
         path = Path(args[2])
         path.write_text(
@@ -57,7 +57,7 @@ def fake_pcbnew(monkeypatch):
         # A log line of pcbnew after the version line of the script.
         return _result(stdout=f"KICAD_VERSION={state['kicad']}\nlog line\n".encode())
 
-    monkeypatch.setattr(kicad_python, "run_kicad_python", run)
+    monkeypatch.setattr(kicad_python, "run_kicad_python_sync", run)
     return state
 
 
@@ -162,10 +162,10 @@ class TestRefusal:
         assert not sch.with_suffix(".kicad_pcb").exists()
 
     def test_pcbnew_failure(self, tmp_path, monkeypatch):
-        async def run(args, timeout=120.0):
+        def run(args, timeout=120.0, input=None):
             return _result(returncode=1, stderr=b"ImportError: pcbnew")
 
-        monkeypatch.setattr(kicad_python, "run_kicad_python", run)
+        monkeypatch.setattr(kicad_python, "run_kicad_python_sync", run)
         result = setup(write_schematic(tmp_path, 20260306))
         assert result.startswith("❌ pcbnew could not create the board:"), result
         assert "ImportError: pcbnew" in result
@@ -176,10 +176,10 @@ class TestRefusal:
         assert result.startswith("❌ No Python with KiCad's pcbnew module was found."), result
 
     def test_timeout(self, tmp_path, monkeypatch):
-        async def run(args, timeout=120.0):
+        def run(args, timeout=120.0, input=None):
             raise subprocess.TimeoutExpired("python", timeout)
 
-        monkeypatch.setattr(kicad_python, "run_kicad_python", run)
+        monkeypatch.setattr(kicad_python, "run_kicad_python_sync", run)
         result = setup(write_schematic(tmp_path, 20260306))
         assert result == "❌ pcbnew did not stop in 120 s. The tool did not write the board."
 

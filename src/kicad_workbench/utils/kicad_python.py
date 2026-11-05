@@ -177,7 +177,10 @@ if not pcbnew.SaveBoard(path, board, sys.argv[7] != "project"):
 print("KICAD_VERSION=" + pcbnew.GetMajorMinorPatchVersion())
 """
 
-async def _run_new_board_script(
+_KICAD_VERSION = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _new_board_sync(
     path: Path,
     title: str,
     company: str,
@@ -185,15 +188,19 @@ async def _run_new_board_script(
     outline: tuple[float, float] | None,
     save_project: bool,
 ) -> str:
-    """Run the script, and return the KiCad version that it prints, or "".
+    """Run the script, and return the KiCad version of pcbnew that it prints
+    (for example "10.0.6").
+
+    Call it in the thread that owns the folder of the board: a cancel of the
+    tool does not stop pcbnew.
 
     Raises:
         FileNotFoundError: No Python with pcbnew is found.
-        RuntimeError: pcbnew cannot make the board.
+        RuntimeError: pcbnew cannot make the board, or gives no KiCad version.
         subprocess.TimeoutExpired: pcbnew did not stop in time.
     """
     width, height = outline or (0.0, 0.0)
-    result = await run_kicad_python(
+    result = run_kicad_python_sync(
         [
             "-c",
             _NEW_BOARD_SCRIPT,
@@ -210,25 +217,36 @@ async def _run_new_board_script(
         raise RuntimeError(
             "pcbnew could not create the board:\n" + decode_python_output(result.stderr).strip()
         )
-    version = result_line(result.stdout, _VERSION_PREFIX)
-    return version.strip() if version is not None else ""
+    line = result_line(result.stdout, _VERSION_PREFIX)
+    version = line.strip() if line is not None else ""
+    if not _KICAD_VERSION.fullmatch(version):
+        raise RuntimeError(f"pcbnew did not give the KiCad version: {version!r}")
+    return version
 
 
-async def new_project_board(path: Path, title: str, company: str = "", date: str = "") -> None:
-    """Make an empty board with pcbnew of KiCad, with its project files.
+def new_project_board_sync(path: Path, title: str, company: str = "", date: str = "") -> str:
+    """Make an empty board with pcbnew of KiCad, with its project files, and
+    return the KiCad version of pcbnew.
 
     pcbnew writes the board and the default .kicad_pro and .kicad_prl next to
-    it, in the file format of that KiCad.
+    it, in the file format of that KiCad. Call it in the thread that owns the
+    folder (see _new_board_sync).
 
     Raises:
         FileNotFoundError: No Python with pcbnew is found.
-        RuntimeError: pcbnew cannot make the board.
+        RuntimeError: pcbnew cannot make the board, or gives no KiCad version.
         subprocess.TimeoutExpired: pcbnew did not stop in time.
     """
-    await _run_new_board_script(path, title, company, date, None, save_project=True)
+    return _new_board_sync(path, title, company, date, None, save_project=True)
 
 
-_KICAD_VERSION = re.compile(r"\d+\.\d+\.\d+")
+def _board_text_sync(file_name: str, title: str, outline: tuple[float, float]) -> tuple[str, str]:
+    # The thread owns the temporary directory: a cancel of the tool does not stop
+    # pcbnew, and the directory goes only after pcbnew stops.
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / file_name
+        version = _new_board_sync(path, title, "", "", outline, save_project=False)
+        return path.read_text(encoding="utf-8"), version
 
 
 async def board_text(file_name: str, title: str, outline: tuple[float, float]) -> tuple[str, str]:
@@ -243,10 +261,4 @@ async def board_text(file_name: str, title: str, outline: tuple[float, float]) -
         RuntimeError: pcbnew cannot make the board, or gives no KiCad version.
         subprocess.TimeoutExpired: pcbnew did not stop in time.
     """
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / file_name
-        version = await _run_new_board_script(path, title, "", "", outline, save_project=False)
-        text = path.read_text(encoding="utf-8")
-    if not _KICAD_VERSION.fullmatch(version):
-        raise RuntimeError(f"pcbnew did not give the KiCad version: {version!r}")
-    return text, version
+    return await asyncio.to_thread(_board_text_sync, file_name, title, outline)

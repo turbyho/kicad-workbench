@@ -107,9 +107,13 @@ there. Make sure that a new connection is in the netlist: `generate_netlist` and
 
 ## Projects and boards
 
-- `create_kicad_project` makes an empty project with the board, the schematic and the
-  project file of the installed KiCad (through `pcbnew` and kicad-cli), or a project
-  from a KiCad template (`template="Arduino_Uno"`).
+- `create_kicad_project` makes an empty project in the file format of the installed
+  KiCad, or a project from a KiCad template (`template="Arduino_Uno"`). `pcbnew`
+  writes the board and the project file. kicad-cli cannot make a schematic: the
+  server writes an empty sheet as KiCad 8 or 9 writes it, and KiCad 10 and later
+  convert it with `kicad-cli sch upgrade`. `pcbnew` and kicad-cli must be of the same
+  KiCad version, else the tool gives an error and writes no file. KiCad 7 and older
+  give an error.
 - `setup_pcb_layout` makes a new board with an outline, through `pcbnew` of the
   installed KiCad. The board has the file format of the installed KiCad. When that is
   newer than the KiCad of the schematic, the output has a warning: the older KiCad

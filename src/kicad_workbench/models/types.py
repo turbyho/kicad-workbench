@@ -77,7 +77,11 @@ class ERCItem(BaseModel):
     pin_number: str = Field(default="", description="Pin number")
     pin_name: str = Field(default="", description="Pin name")
     pin_type: str = Field(default="", description="Pin electrical type")
-    value: str = Field(default="", description="Symbol value, for a symbol item")
+    value: str = Field(
+        default="",
+        description="The library item name of a symbol item: the text in the brackets of "
+        '"Symbol R1 [R]" (SCH_SYMBOL::GetItemDescription), not the Value field',
+    )
     label: str = Field(default="", description="Label, net or sheet pin text")
     x_mm: float | None = Field(default=None, description="X position in mm")
     y_mm: float | None = Field(default=None, description="Y position in mm")

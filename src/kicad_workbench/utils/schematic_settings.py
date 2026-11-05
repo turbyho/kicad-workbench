@@ -24,6 +24,7 @@ values (JSON_SETTINGS::LoadFromFile).
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..parsers.rule_severity_keys import SeverityKeys
 from ..parsers.sch_geometry import IU_PER_MIL, kiround
 from .kicad_text import read_kicad_json
 
@@ -163,3 +164,118 @@ def subpart_settings(project_file: Path) -> SubpartSettings:
         _int_param(data, "subpart_first_id", _SUBPART_FIRST_ID),
         problem,
     )
+
+
+def _project_data(project_file: Path) -> object:
+    """The JSON of a project file, or None when KiCad uses the defaults (no file, or
+    a file that is not JSON)."""
+    if not project_file.is_file():
+        return None
+    try:
+        return read_kicad_json(project_file)
+    except (OSError, ValueError):
+        return None
+
+
+def _severity(value: str) -> str:
+    """SeverityFromString: "warning" and "ignore", each other text is "error"."""
+    return value if value in ("warning", "ignore") else "error"
+
+
+def rule_severities(
+    project_file: Path,
+    keys: tuple[str, ...],
+    defaults: dict[str, str],
+    order: SeverityKeys | None,
+) -> dict[str, str | None]:
+    """Return the severity of some checks in the project file: "error", "warning" or
+    "ignore".
+
+    Args:
+        keys: The path of the severities, for example ("erc", "rule_severities").
+        defaults: The default severity of each check name.
+        order: The keys in the order that the installed KiCad reads them
+            (rule_severity_keys.severity_keys), or None when it is not known.
+
+    KiCad reads the keys in its order with SeverityFromString. A value that is
+    not a text stops the read: the keys after it keep their defaults. When the
+    order is not known and the file has a value that is not a text, the
+    severities are not known (None). With no project file, or a file that is
+    not JSON, KiCad uses the defaults.
+    """
+    data = _project_data(project_file)
+    for key in keys:
+        data = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return dict(defaults)
+    result: dict[str, str | None] = dict(defaults)
+    if order is None:
+        if any(not isinstance(value, str) for value in data.values()):
+            return dict.fromkeys(defaults, None)
+        for name in defaults:
+            if isinstance(data.get(name), str):
+                result[name] = _severity(data[name])
+        return result
+    pre, loop = order
+    for json_key, check in [*pre, *((key, key) for key in loop)]:
+        if json_key not in data:
+            continue
+        value = data[json_key]
+        if not isinstance(value, str):
+            break
+        if check in result:
+            result[check] = _severity(value)
+    return result
+
+
+@dataclass(frozen=True)
+class ErcExclusions:
+    """The ERC exclusions of a project (``ERC_SETTINGS::m_ErcExclusions``)."""
+
+    comments: dict[str, str]  # The serialized marker: its comment ("" for none).
+    problem: str | None = None  # Why KiCad does not read all entries.
+
+
+def erc_exclusions(project_file: Path, kicad: int) -> ErcExclusions:
+    """Return the ERC exclusions of a project ("erc.erc_exclusions"), as KiCad reads them.
+
+    KiCad 8 skips an empty entry (null, [] or {}) and reads each other entry as a
+    text. KiCad 9 and 10 read a text, and an array [text, comment]: they keep the
+    text before they read the comment. They skip each other entry. An entry that
+    KiCad cannot read throws: KiCad keeps the exclusions before it and ignores
+    the others (JSON_SETTINGS::Load). An array with less than two items has no
+    defined result in KiCad (an index out of the range).
+
+    Args:
+        kicad: The major version of the KiCad that reads the file.
+    """
+    data = _value(_project_data(project_file), "erc", "erc_exclusions")
+    comments: dict[str, str] = {}
+    if not isinstance(data, list):
+        return ErcExclusions(comments)
+
+    def stop(entry: object, what: str) -> ErcExclusions:
+        return ErcExclusions(
+            comments,
+            f"KiCad {kicad} {what} the ERC exclusion {entry!r} of {project_file}: it ignores "
+            "the exclusions after it.",
+        )
+
+    for entry in data:
+        if kicad == 8:
+            if entry is None or entry == [] or entry == {}:
+                continue
+            if not isinstance(entry, str):
+                return stop(entry, "cannot read")
+            comments[entry] = ""
+        elif isinstance(entry, str):
+            comments.setdefault(entry, "")
+        elif isinstance(entry, list):
+            if len(entry) < 2:
+                return stop(entry, "has no defined result for")
+            if not isinstance(entry[0], str):
+                return stop(entry, "cannot read")
+            comments[entry[0]] = entry[1] if isinstance(entry[1], str) else ""
+            if not isinstance(entry[1], str):
+                return stop(entry, "cannot read the comment of")
+    return ErcExclusions(comments)

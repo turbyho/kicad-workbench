@@ -27,10 +27,11 @@ from pathlib import Path
 from ..parsers.board_models import board_models
 from ..parsers.check_report_parser import parse_drc_report, parse_erc_report
 from ..parsers.kicad_versions import version_numbers
+from ..parsers.rule_severity_keys import SeverityKeys, severity_keys
 from ..parsers.sexpr import SExprError
 from ..server import mcp
 from ..utils.kicad_cli import decode_output, get_kicad_version, run_kicad_cli_sync
-from ..utils.kicad_text import KiCadEncodingError, read_as_kicad, read_kicad_json
+from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.library_tables import (
     LibraryTableError,
     find_library,
@@ -40,9 +41,11 @@ from ..utils.library_tables import (
 )
 from ..utils.model_paths import ModelFile, resolve_model
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.schematic_settings import rule_severities
 from .library import (
     NO_KICAD_CLI,
     SchematicFootprints,
+    annotation_lines,
     cell,
     netlist_root,
     not_found_reason,
@@ -92,42 +95,18 @@ def _run_check(args: list[str], source: Path) -> dict:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def _severities(
-    project: Path, keys: tuple[str, ...], names: tuple[str, ...]
-) -> dict[str, str | None]:
-    """Return the severity of some checks in the project file: "error", "warning" or "ignore".
-
-    ERC_SETTINGS and BOARD_DESIGN_SETTINGS read each key with SeverityFromString:
-    "warning" and "ignore" are these severities, each other text is "error".
-    A value that is not a text stops the read of the other keys, in an order
-    that the server does not know: then the severity is not known (None).
-    With no project file, or a file that is not JSON, KiCad uses the defaults.
-    """
-    data = None
-    if project.is_file():
-        try:
-            data = read_kicad_json(project)
-        except (OSError, ValueError):
-            data = None
-    for key in keys:
-        data = data.get(key) if isinstance(data, dict) else None
-    if not isinstance(data, dict):
-        return dict.fromkeys(names, _DEFAULT_SEVERITY)
-    if any(not isinstance(value, str) for value in data.values()):
-        return dict.fromkeys(names, None)
-    result: dict[str, str | None] = {}
-    for name in names:
-        value = data.get(name, _DEFAULT_SEVERITY)
-        result[name] = value if value in ("warning", "ignore") else "error"
-    return result
-
-
 def _check_lines(
-    title: str, errors: list, types: tuple[str, ...], project: Path, keys: tuple[str, ...]
+    title: str,
+    errors: list,
+    types: tuple[str, ...],
+    project: Path,
+    keys: tuple[str, ...],
+    order: SeverityKeys | None,
 ) -> tuple[list[str], int]:
     """The section of the ERC or DRC violations of some types, and their count (not excluded)."""
     lines = ["", f"## {title}", ""]
-    for name, severity in _severities(project, keys, types).items():
+    defaults = dict.fromkeys(types, _DEFAULT_SEVERITY)
+    for name, severity in rule_severities(project, keys, defaults, order).items():
         if severity == "ignore":
             lines.append(f"_The project ignores the check {name}: KiCad does not run it._")
         elif severity is None:
@@ -341,20 +320,23 @@ async def _schematic_part(schematic: Path, kicad: str) -> _Part:
     else:
         lines, part.counts["symbols with a library problem"] = _check_lines(
             "Schematic symbols (ERC of KiCad)", parse_erc_report(report), _ERC_TYPES, project,
-            _ERC_KEYS,
+            _ERC_KEYS, severity_keys("erc", kicad),
         )  # fmt: skip
         part.body += lines
     if isinstance(found, str):
         part.body += ["", "## Schematic footprints", "", found]
         part.counts["schematic footprints not checked"] = 1
         return part
-    if found.annotation:
-        part.header.append(
-            "⚠️ **Annotation**: kicad-cli reports annotation errors. With a duplicate "
-            "reference, the netlist has one component for two symbols, thus the footprints "
-            "and the 3D models of a symbol can be not checked."
-        )
-        part.counts["annotation errors (kicad-cli)"] = 1
+    part.header += annotation_lines(
+        found,
+        kicad,
+        "With a duplicate reference, the netlist has one component for two symbols, thus "
+        "the footprints and the 3D models of a symbol can be not checked.",
+    )
+    if found.annotation_errors:
+        part.counts["annotation errors"] = len(found.annotation_errors)
+    elif found.annotation:
+        part.counts["annotation errors (the number is not known)"] = 1
     lines, part.counts["symbols whose footprint KiCad does not find"], users = _footprint_lines(
         found
     )
@@ -395,7 +377,7 @@ async def _board_part(board: Path, kicad: str) -> _Part:
     else:
         lines, part.counts["board footprints with a library problem"] = _check_lines(
             "Board footprints (DRC of KiCad)", parse_drc_report(report), _DRC_TYPES, project,
-            _DRC_KEYS,
+            _DRC_KEYS, severity_keys("drc", kicad),
         )  # fmt: skip
         part.body += lines
     if isinstance(models, str):

@@ -94,6 +94,15 @@ def kiid(text: str | None) -> Kiid:
     return bytes.fromhex("".join(match.group(i) for i in (2, 4, 5, 6, 7)))
 
 
+def kiid_text(value: Kiid) -> str | None:
+    """``KIID::AsString``: the UUID in lower case with dashes. None for a KIID that
+    KiCad makes at random (its text is not known)."""
+    if isinstance(value, RandomKiid):
+        return None
+    text = value.hex()
+    return f"{text[:8]}-{text[8:12]}-{text[12:16]}-{text[16:20]}-{text[20:]}"
+
+
 def kiid_path(text: str) -> tuple[Kiid, ...]:
     """Return the KIIDs of a path text "/<uuid>/<uuid>" (``KIID_PATH::KIID_PATH``).
     "/" is the empty path."""

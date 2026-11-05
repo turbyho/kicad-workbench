@@ -61,6 +61,7 @@ from dataclasses import dataclass, replace
 from functools import cmp_to_key
 from pathlib import Path
 
+from ..models.types import ERCError, ERCItem
 from ..utils.sch_hierarchy import (
     PRO_SUFFIX,
     SCH_SUFFIX,
@@ -68,11 +69,17 @@ from ..utils.sch_hierarchy import (
     text_variables,
     top_level_sheets,
 )
-from ..utils.schematic_settings import SubpartSettings, subpart_settings
+from ..utils.schematic_settings import (
+    SubpartSettings,
+    erc_exclusions,
+    rule_severities,
+    subpart_settings,
+)
 from .kicad_fields import symbol_field_nodes
-from .kicad_versions import EMPTY_TEXT_MARKER
+from .kicad_versions import EMPTY_TEXT_MARKER, kicad_release, version_triple
 from .lib_symbols import SUB_SYMBOL, unit_count
-from .sch_geometry import Point, definition_key, node_point, placed_symbols
+from .rule_severity_keys import severity_keys
+from .sch_geometry import IU_PER_MM, Point, definition_key, node_point, placed_symbols
 from .sexpr import Node
 from .sheet_list import (
     Kiid,
@@ -83,6 +90,7 @@ from .sheet_list import (
     item_kiid,
     kiid_less,
     kiid_path,
+    kiid_text,
     sort_by_page_numbers,
     to_int,
     to_long,
@@ -107,8 +115,10 @@ class AnnotationItem:
     file: Path
     sheet: str  # the sheet names, for example "/Power/"
     path: str  # the UUID path of the sheet
-    uuid: str | None  # the UUID of the symbol
+    uuid: str | None  # the UUID of the symbol, as the file holds it
     position: Point  # IU
+    lib_name: str  # the item name of the lib_id (LIB_ID::GetLibItemName)
+    kiid: str | None  # KIID::AsString of the symbol; None: KiCad makes it at random
 
 
 @dataclass(frozen=True)
@@ -634,6 +644,8 @@ def _item(ref: _Ref, reference: str) -> AnnotationItem:
         ref.path.path,
         ref.symbol.uuid,
         ref.symbol.position,
+        ref.symbol.lib_name,
+        kiid_text(ref.symbol.kiid),
     )
 
 
@@ -837,17 +849,77 @@ def _orders(groups: list[list[SheetPath]]) -> Iterator[dict[int, int]]:
             yield {**place, **other}
 
 
+def kicad_major(version: str) -> int:
+    """Return the major version of an installed KiCad (kicad-cli version) whose
+    annotation check the server knows: 8, 9 or 10.
+
+    Raises:
+        ValueError: The version is a nightly build or a release with no rules.
+    """
+    release = kicad_release(version)
+    major = int(release.name.split(".")[0]) if release is not None else None
+    # The rules of kicad-cli 10 change in 10.0.7 (_tops): the patch must be known.
+    if major not in KICAD_VERSIONS or version_triple(version) is None:
+        raise ValueError(
+            f"The server has no verified rules of the annotation check for KiCad {version}: "
+            "only the releases of KiCad 8, 9 and 10."
+        )
+    return major  # type: ignore[return-value]
+
+
+def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> list[TopLevelSheet]:
+    """The top-level sheets that KiCad loads.
+
+    The GUI of KiCad 10 loads each entry of top_level_sheets whose file exists
+    (``SCH_EDIT_FRAME::OpenProjectFiles``). kicad-cli loads the schematic of the
+    project name (``EESCHEMA_HELPERS::LoadSchematic``). From KiCad 10.0.7 it loads
+    each top-level sheet whose file exists when the project has more than one and
+    the schematic is one of them.
+
+    Raises:
+        ValueError: KiCad cannot load a top-level sheet.
+    """
+    root = project_file.with_suffix(SCH_SUFFIX)
+    kicad = kicad_major(version)
+    numbers = version_triple(version)
+    if numbers is None:
+        raise ValueError(f"The KiCad version {version!r} has no patch number.")
+    declared = top_level_sheets(project_file.with_suffix(PRO_SUFFIX)) if kicad >= 10 else []
+    if view == "erc":
+        load_all = kicad >= 10
+    else:
+        load_all = (
+            numbers >= (10, 0, 7)
+            and len(declared) > 1
+            and root.is_file()
+            and any(top.file.resolve() == root.resolve() for top in declared)
+        )
+    if not load_all:
+        return [TopLevelSheet(root, None, root.stem)]
+    tops = []
+    for top in declared:
+        if top.file.is_file():
+            tops.append(top)
+        else:
+            problems.append(
+                f"The top-level sheet {top.file} does not exist: KiCad does not load it."
+            )
+    if not tops:
+        raise ValueError(f"KiCad cannot load a top-level sheet of {project_file}.")
+    return tops
+
+
 def check_annotation(
-    project_file: Path, kicad: int, view: str = "erc", symbols: str = "all"
+    project_file: Path, version: str, view: str = "erc", symbols: str = "all"
 ) -> AnnotationCheck:
     """Check the annotation of a project as KiCad does it (CheckAnnotation).
 
     Args:
         project_file: The .kicad_pro file (it can be missing).
-        kicad: The major version of the KiCad that runs the check: 8, 9 or 10.
+        version: The version of the KiCad that runs the check (kicad-cli version,
+            for example "10.0.6"): a release of KiCad 8, 9 or 10.
         view: "erc": the ERC dialog of the schematic editor, at the first ERC run
-            after the project opens. "cli": the jobs of kicad-cli (only the root
-            schematic).
+            after the project opens. "cli": the jobs of kicad-cli.
         symbols: "all" (ERC, the netlist job) or "non_power" (the BOM job: no
             reference that starts with "#").
 
@@ -856,11 +928,7 @@ def check_annotation(
             version, or KiCad cannot load the root schematic. A unit is not a number.
         KicadFileError: A file has a version that the server does not know.
     """
-    if kicad not in KICAD_VERSIONS:
-        raise ValueError(
-            f"The server has no verified rules of the annotation check for KiCad {kicad}: "
-            "only KiCad 8, 9 and 10."
-        )
+    kicad = kicad_major(version)
     if view not in VIEWS:
         raise ValueError(f"view must be one of {', '.join(VIEWS)}")
     if symbols not in SYMBOL_FILTERS:
@@ -868,19 +936,7 @@ def check_annotation(
     project_file = Path(project_file).absolute()
     root = project_file.with_suffix(SCH_SUFFIX)
     problems: list[str] = []
-    if view == "erc" and kicad >= 10:
-        tops = []
-        for top in top_level_sheets(project_file.with_suffix(PRO_SUFFIX)):
-            if top.file.is_file():
-                tops.append(top)
-            else:
-                problems.append(
-                    f"The top-level sheet {top.file} does not exist: KiCad does not load it."
-                )
-        if not tops:
-            raise ValueError(f"KiCad cannot load a top-level sheet of {project_file}.")
-    else:
-        tops = [TopLevelSheet(root, None, root.stem)]
+    tops = _tops(project_file, version, view, problems)
     sheet_list = build_sheet_list(tops, project_file.parent, text_variables(root), kicad)
     problems += sheet_list.problems
     settings = subpart_settings(project_file.with_suffix(PRO_SUFFIX))
@@ -917,3 +973,107 @@ def check_annotation(
             f"different in KiCad.{tried}"
         )
     return AnnotationCheck(errors, list(dict.fromkeys(problems)))
+
+
+# --- The markers of the ERC dialog -------------------------------------------
+
+ANNOTATION_TYPES = ("unannotated", "extra_units", "duplicate_reference", "unit_value_mismatch")
+_NIL_KIID = "00000000-0000-0000-0000-000000000000"
+
+
+def marker_text(error: AnnotationError) -> str | None:
+    """``SCH_MARKER::SerializeToString`` of the marker of an error (the key of an ERC
+    exclusion): the type, the position of the first symbol (IU), the KIIDs of the
+    two symbols and three empty sheet paths. None when KiCad makes a KIID at
+    random: no exclusion can match the marker."""
+    first = error.first.kiid
+    second = error.second.kiid if error.second is not None else _NIL_KIID
+    if first is None or second is None:
+        return None
+    x, y = error.first.position
+    return f"{error.code}|{x}|{y}|{first}|{second}|||"
+
+
+def _erc_item(item: AnnotationItem) -> ERCItem:
+    """An item of an annotation violation, made by the server (not by kicad-cli).
+
+    KiCad shows "Symbol <Reference field> [<library item name>]"
+    (SCH_SYMBOL::GetItemDescription): the Reference field holds the reference of
+    the sheet that the editor shows, and KiCad shortens a long text. The server
+    gives the reference of the sheet path of the item, and the full texts.
+    """
+    return ERCItem(
+        description=f"Symbol {item.reference} [{item.lib_name}]",
+        reference=item.reference,
+        value=item.lib_name,
+        x_mm=item.position[0] / IU_PER_MM,
+        y_mm=item.position[1] / IU_PER_MM,
+        uuid=item.kiid or "",
+    )
+
+
+def erc_violations(project_file: Path, version: str) -> tuple[list[ERCError], list[str]]:
+    """Return the annotation errors that the ERC dialog of the schematic editor shows
+    and kicad-cli does not give, and the notes about the result.
+
+    The dialog runs CheckAnnotate (view "erc" of check_annotation) and makes a
+    marker at the first symbol of each error. A marker gets the severity of the
+    project ("ignore": the dialog does not show it). KiCad excludes the marker
+    whose text (marker_text) is an ERC exclusion of the project
+    (``SCHEMATIC::ResolveERCExclusions``, the first marker of a text). The report
+    of ``kicad-cli sch erc`` gives each exclusion that no marker of kicad-cli
+    matches as an excluded violation: it thus has the excluded annotation
+    errors, and this function does not give them.
+
+    Raises:
+        ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError: see
+            check_annotation.
+    """
+    kicad = kicad_major(version)
+    check = check_annotation(project_file, version, "erc")
+    notes = list(check.problems)
+    project = project_file.with_suffix(PRO_SUFFIX)
+    severities = rule_severities(
+        project,
+        ("erc", "rule_severities"),
+        dict.fromkeys(ANNOTATION_TYPES, "error"),
+        severity_keys("erc", version),
+    )
+    exclusions = erc_exclusions(project, kicad)
+    if exclusions.problem:
+        notes.append(exclusions.problem)
+    excluded: dict[str, int] = {}
+    violations = []
+    for error in check.errors:
+        severity = severities[error.code]
+        if severity == "ignore":
+            continue
+        if severity is None:
+            notes.append(
+                f"The severity of the check {error.code} is not known: the project file has "
+                "a severity that is not a text. The tool shows it as an error."
+            )
+            severity = "error"
+        text = marker_text(error)
+        if text is not None and text in exclusions.comments:
+            excluded[text] = excluded.get(text, 0) + 1
+            if excluded[text] == 1:
+                continue
+        items = [error.first] + ([error.second] if error.second is not None else [])
+        violations.append(
+            ERCError(
+                severity=severity,
+                type=error.code,
+                description=error.message,
+                components=list(dict.fromkeys(item.reference for item in items)),
+                items=[_erc_item(item) for item in items],
+                sheet=error.first.sheet,
+            )
+        )
+    if any(count > 1 for count in excluded.values()):
+        notes.append(
+            "One ERC exclusion matches more than one annotation error: KiCad excludes one "
+            "of them, in an order that the tool does not know. The tool shows the first "
+            "one as excluded and the others as violations."
+        )
+    return violations, list(dict.fromkeys(notes))

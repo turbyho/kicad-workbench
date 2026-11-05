@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fastmcp.utilities.types import Image
 
+from ..parsers.annotation import AnnotationError, check_annotation
 from ..parsers.board_netlist import NetlistComponent, NetlistPin, read_board_netlist
 from ..parsers.kicad_versions import (
     KICAD8,
@@ -1321,6 +1322,59 @@ _NETLIST_TIMEOUT = 120
 _ANNOTATION_WARNING = "schematic has annotation errors"
 
 
+# The most annotation errors that a check tool lists.
+_ANNOTATION_ROWS = 20
+
+
+async def _netlist_annotation(
+    root: Path, kicad: str
+) -> tuple[list[AnnotationError] | None, list[str]]:
+    """The annotation errors of the netlist job of kicad-cli for a schematic (view
+    "cli", all symbols), or None when the check cannot run, and the notes."""
+    try:
+        check = await asyncio.to_thread(
+            check_annotation, root.with_suffix(".kicad_pro"), kicad, "cli", "all"
+        )
+    except (ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError) as e:
+        return None, [f"The server cannot list the annotation errors: {e}"]
+    return check.errors, check.problems
+
+
+def annotation_lines(found: "SchematicFootprints", kicad: str, effect: str) -> list[str]:
+    """The Markdown lines about the annotation errors of the netlist of a check tool.
+
+    effect: Why an annotation error can make the result of the tool wrong.
+    """
+    warning, errors = found.annotation, found.annotation_errors
+    if not warning and not errors and not found.annotation_notes:
+        return []
+    lines = []
+    if warning or errors:
+        lines.append(f"⚠️ **Annotation**: {effect}")
+    if warning:
+        lines.append(f"kicad-cli (KiCad {kicad}) reports annotation errors in the netlist.")
+    if errors:
+        lines.append(
+            "The annotation check of the server (the rules of the netlist job of kicad-cli) "
+            "gives these errors:"
+        )
+        lines += [
+            f"- {error.code}: {cell(error.message)} (sheet {error.first.sheet})"
+            for error in errors[:_ANNOTATION_ROWS]
+        ]
+        if len(errors) > _ANNOTATION_ROWS:
+            lines.append(f"- {len(errors) - _ANNOTATION_ROWS} more annotation errors")
+    if warning and errors == []:
+        lines.append(
+            "❌ The annotation check of the server finds no error: the server cannot list "
+            "the errors of kicad-cli."
+        )
+    elif errors and not warning:
+        lines.append("❌ kicad-cli reports no annotation error: the list can be wrong.")
+    lines += [f"⚠️ {note}" for note in found.annotation_notes]
+    return lines
+
+
 def _board_netlist(root: Path) -> tuple[str, str]:
     """Write the netlist that "Update PCB from Schematic" gives pcbnew, with kicad-cli.
 
@@ -1368,7 +1422,7 @@ def _pad_cell(numbers: tuple[str, ...]) -> str:
 
 def _schematic_mapping_text(
     path: Path, root: Path, tops: int, kicad: str, checks: list[_ComponentCheck],
-    annotation: bool, absent: list[str],
+    annotation: list[str], absent: list[str],
 ) -> list[str]:  # fmt: skip
     problems, skipped, good = [], [], []
     for check in checks:
@@ -1404,13 +1458,7 @@ def _schematic_mapping_text(
         )
     else:
         lines.append("**Result**: the netlist has no symbol to check.")
-    if annotation:
-        lines.append(
-            '⚠️ **Annotation**: kicad-cli reports annotation errors. "Update PCB from '
-            'Schematic" does not run until they are repaired (the schematic editor first '
-            "annotates the power symbols itself). With a duplicate reference, the netlist "
-            "has the pins of two symbols in one component, thus a result can be wrong."
-        )
+    lines += annotation
     if absent:
         lines.append(
             f"_Not in the netlist: {', '.join(absent)} (a power symbol, a symbol that is "
@@ -1478,6 +1526,10 @@ class SchematicFootprints:
     components: list[NetlistComponent]
     absent: list[str]  # The references that the caller gave and the netlist does not have.
     annotation: bool  # kicad-cli reports annotation errors.
+    # The annotation errors of the netlist job (check_annotation, view "cli"); None
+    # when the check did not run. The notes tell why the list can be incomplete.
+    annotation_errors: list[AnnotationError] | None
+    annotation_notes: list[str]
     reasons: dict[str, str]  # Footprint ID: why KiCad does not find or load it.
     libraries: dict[str, Path]  # Footprint ID: the .pretty directory.
     items: dict[str, FootprintItems]  # Footprint ID: the footprint that pcbnew loaded.
@@ -1506,8 +1558,19 @@ async def schematic_footprints(
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
     root, tops = await asyncio.to_thread(netlist_root, project, kicad)
+    # The annotation check does not need the netlist: it runs at the same time.
+    netlist, annotation = await asyncio.gather(
+        asyncio.to_thread(_board_netlist, root),
+        _netlist_annotation(root, kicad),
+        return_exceptions=True,
+    )
+    if isinstance(annotation, BaseException):
+        raise annotation
+    annotation_errors, annotation_notes = annotation
     try:
-        text, output = await asyncio.to_thread(_board_netlist, root)
+        if isinstance(netlist, BaseException):
+            raise netlist
+        text, output = netlist
         components = read_board_netlist(text)
     except (RuntimeError, KiCadEncodingError, SExprError) as e:
         return f"❌ kicad-cli did not give the netlist of {root}: {e}"
@@ -1577,6 +1640,8 @@ async def schematic_footprints(
         components=components,
         absent=absent,
         annotation=_ANNOTATION_WARNING in output,
+        annotation_errors=annotation_errors,
+        annotation_notes=annotation_notes,
         reasons=reasons,
         libraries={footprint: files[footprint][0] for footprint in items},
         items=items,
@@ -1626,8 +1691,16 @@ async def _check_schematic(schematic_path: str, references: list[str] | None) ->
                 tuple(pads[index].number for index in no_pin),
             )
         )
+    annotation = annotation_lines(
+        found,
+        kicad,
+        '"Update PCB from Schematic" does not run until the annotation errors are repaired '
+        "(the schematic editor first annotates the power symbols itself). With a duplicate "
+        "reference, the netlist has the pins of two symbols in one component, thus a result "
+        "can be wrong.",
+    )
     text = _schematic_mapping_text(
-        path, found.root, found.tops, kicad, checks, found.annotation, found.absent
+        path, found.root, found.tops, kicad, checks, annotation, found.absent
     )
     return "\n".join(text + problem_lines(found.problems))
 
@@ -1647,6 +1720,8 @@ async def check_schematic_pin_pad_mapping(
     footprint on the board gets them. For a board that has the footprints,
     run_drc with the schematic parity compares the footprints of the board.
     For a library symbol and a footprint, use check_pin_pad_mapping.
+    When the netlist job finds annotation errors (a duplicate reference can
+    join two symbols in one component), the tool lists them.
 
     Args:
         schematic_path: A schematic of the project (.kicad_sch). For a
@@ -1655,9 +1730,9 @@ async def check_schematic_pin_pad_mapping(
             All symbols of the netlist if empty.
 
     Returns:
-        The result, a table of the symbols with errors or warnings, the
-        symbols that the tool did not check (with the reason), and the
-        symbols with no problem.
+        The result, the annotation errors, a table of the symbols with errors
+        or warnings, the symbols that the tool did not check (with the
+        reason), and the symbols with no problem.
     """
     try:
         return await _check_schematic(schematic_path, references)

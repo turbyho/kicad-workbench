@@ -6,10 +6,12 @@ import subprocess
 import pytest
 
 from kicad_workbench.parsers.board_models import BoardFootprint, board_models
+from kicad_workbench.parsers.rule_severity_keys import severity_keys
 from kicad_workbench.tools import library as library_tools
 from kicad_workbench.tools import library_links
 from kicad_workbench.utils import kicad_cli as kicad_cli_module
 from kicad_workbench.utils.library_footprint import FootprintItems, PadNumber
+from kicad_workbench.utils.schematic_settings import rule_severities
 
 from .test_library_footprint import make_footprints
 from .test_library_search import table_rows
@@ -70,17 +72,29 @@ class TestSeverity:
             ('{"erc": {"rule_severities": {"lib_symbol_issues": "ignore"}}}', "ignore"),
             ('{"erc": {"rule_severities": {"lib_symbol_issues": "Error"}}}', "error"),
             ('{"erc": {"rule_severities": {"lib_symbol_issues": "warning"}}}', "warning"),
-            # A value that is not a text stops the read in an order that is not known.
-            ('{"erc": {"rule_severities": {"lib_symbol_issues": "ignore", "x": 1}}}', None),
+            # KiCad reads only its keys: "x" is not one of them.
+            ('{"erc": {"rule_severities": {"lib_symbol_issues": "ignore", "x": 1}}}', "ignore"),
+            # A value that is not a text stops the read: the keys after it keep the default.
+            ('{"erc": {"rule_severities": {"lib_symbol_issues": "ignore", "pin_not_connected": 1}}}',
+             "warning"),
+            ('{"erc": {"rule_severities": {"footprint_filter": 1, "lib_symbol_issues": "ignore"}}}',
+             "ignore"),
         ],
-    )
+    )  # fmt: skip
     def test_severity(self, tmp_path, text, severity):
         project = tmp_path / "p.kicad_pro"
         if text is not None:
             project.write_text(text, encoding="utf-8")
-        names = ("lib_symbol_issues",)
-        found = library_links._severities(project, library_links._ERC_KEYS, names)
-        assert found == {"lib_symbol_issues": severity}
+        defaults = {"lib_symbol_issues": "warning"}
+        order = severity_keys("erc", "10.0.6")
+        assert rule_severities(project, library_links._ERC_KEYS, defaults, order) == {
+            "lib_symbol_issues": severity
+        }
+        # A version with keys that the server does not know: any value that is not a text
+        # makes the severity not known.
+        found = rule_severities(project, library_links._ERC_KEYS, defaults, None)
+        expected = None if text and '": 1' in text else severity
+        assert found == {"lib_symbol_issues": expected}
 
 
 ERC = {
@@ -247,7 +261,9 @@ class TestCheckLibraryLinks:
         project["state"].update(erc={"sheets": []}, drc={"violations": []})
         out = await library_links.check_library_links(str(project["directory"]))
         assert "_The project ignores the check lib_symbol_issues: KiCad does not run it._" in out
-        assert "_The severity of the check lib_footprint_issues is not known" in out
+        # KiCad cannot read the value 1: the check keeps its default severity.
+        assert "lib_footprint_issues is not known" not in out
+        assert "lib_footprint_issues: KiCad does not run it" not in out
 
     async def test_board_only(self, project):
         (project["directory"] / "board.kicad_sch").unlink()

@@ -461,7 +461,30 @@ class TestCheckSchematicPinPadMapping:
             b"fix them\n"
         )
         out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]))
-        assert "⚠️ **Annotation**: kicad-cli reports annotation errors." in out
+        assert "⚠️ **Annotation**: " in out
+        assert "kicad-cli (KiCad 10.0.6) reports annotation errors in the netlist." in out
+        # The schematic of the fixture is not a schematic: the check of the server does not run.
+        assert "⚠️ The server cannot list the annotation errors: KiCad cannot load" in out
+        assert "❌" not in out.split("**Annotation**")[1]
+
+    async def test_annotation_errors_are_listed(self, board):
+        board["state"]["stderr"] = b"Warning: schematic has annotation errors\n"
+        uuid = "11111111-1111-1111-1111-111111111111"
+        symbols = "".join(
+            f'  (symbol (lib_id "Device:R") (at {x} 0 0) (unit 1)\n'
+            '    (property "Reference" "R1" (at 0 0 0)) (property "Value" "1k" (at 0 0 0))\n'
+            f'    (instances (project "board" (path "/{uuid}" (reference "R1") (unit 1)))))\n'
+            for x in (0, 10)
+        )
+        board["schematic"].write_text(
+            f'(kicad_sch (version 20260306) (generator "eeschema") (uuid "{uuid}")\n'
+            '  (lib_symbols (symbol "Device:R" (symbol "R_1_1")))\n'
+            f"{symbols})\n",
+            encoding="utf-8",
+        )
+        out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]))
+        assert "- duplicate_reference: Duplicate items R1 (sheet /)" in out
+        assert "❌" not in out.split("**Annotation**")[1].split("\n\n")[0]
 
     async def test_footprint_that_kicad_cannot_load(self, board):
         board["state"]["pads"] = {"Two": None}

@@ -257,7 +257,7 @@ The library tools read the library tables of the installed KiCad and of the proj
 
 | Tool | Description |
 |------|-------------|
-| `run_erc` | Electrical Rules Check on schematic |
+| `run_erc` | Electrical Rules Check on schematic, with the annotation check of the ERC dialog (kicad-cli does not run it) |
 | `run_drc` | Design Rules Check on PCB |
 | `detect_pin_conflicts` | Find conflicting pin connections |
 

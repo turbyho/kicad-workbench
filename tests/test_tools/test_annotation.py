@@ -16,6 +16,8 @@ from kicad_workbench.parsers.annotation import (
     _Ref,
     check_annotation,
     cmp_no_case,
+    erc_violations,
+    marker_text,
     ref_des_prefix,
 )
 from kicad_workbench.parsers.sexpr import parse
@@ -31,8 +33,10 @@ from kicad_workbench.parsers.sheet_list import (
     to_long,
 )
 from kicad_workbench.utils.sch_hierarchy import TopLevelSheet
-from kicad_workbench.utils.schematic_settings import subpart_settings
+from kicad_workbench.utils.schematic_settings import erc_exclusions, subpart_settings
 
+# The KiCad releases of the rules: the major version gives the version text.
+RELEASE = {8: "8.0.9", 9: "9.0.9", 10: "10.0.6"}
 VERSION_10 = "20260306"
 VERSION_9 = "20250114"
 VERSION_8 = "20231120"
@@ -108,7 +112,7 @@ def write_project(
 
 
 def messages(project: Path, kicad=10, view="erc", symbols="all") -> list[str]:
-    check = check_annotation(project, kicad, view, symbols)
+    check = check_annotation(project, RELEASE[kicad], view, symbols)
     assert check.problems == []
     return [error.message for error in check.errors]
 
@@ -236,7 +240,7 @@ class TestMessages:
     def test_not_verified_versions(self, tmp_path):
         project = write_project(tmp_path, symbol("R1"))
         with pytest.raises(ValueError, match="no verified rules"):
-            check_annotation(project, 11)
+            check_annotation(project, "10.99.0")
 
 
 class TestLoadChanges:
@@ -287,7 +291,7 @@ class TestLoadChanges:
             ),
         )
         project = write_project(tmp_path, "", sub, pages=("2", "2"))
-        check = check_annotation(project, 10)
+        check = check_annotation(project, "10.0.6")
         assert [e.message for e in check.errors] == ["Duplicate items R1"]
         assert [e.first.sheet for e in check.errors] == ["/S0/"]
 
@@ -303,12 +307,12 @@ class TestSettings:
 
 
 class TestTopLevelSheets:
-    def write(self, directory: Path, pages: tuple[str, str]) -> Path:
+    def write(self, directory: Path, pages: tuple[str, str], first="top0.kicad_sch") -> Path:
         uuids = ("55555555-5555-5555-5555-555555555555", "66666666-6666-6666-6666-666666666666")
         library = LIBRARY.format(name_a="", name_b="")
         entries = []
         for number, (uuid, page) in enumerate(zip(uuids, pages, strict=True)):
-            name = f"top{number}.kicad_sch"
+            name = first if number == 0 else f"top{number}.kicad_sch"
             (directory / name).write_text(
                 f'(kicad_sch (version {VERSION_10}) (generator "eeschema") (uuid "{uuid}")\n'
                 f"{library}{symbol('R1', path=f'/{uuid}')}"
@@ -323,15 +327,21 @@ class TestTopLevelSheets:
     def test_order_by_hash(self, tmp_path):
         # The two top-level sheets have page "1" and DFS count 1: KiCad 10 repairs the
         # page of one of them, in the order of a hash of the path.
-        check = check_annotation(self.write(tmp_path, ("1", "1")), 10)
+        check = check_annotation(self.write(tmp_path, ("1", "1")), "10.0.6")
         assert [e.message for e in check.errors] == ["Duplicate items R1"]
         assert any("cannot know" in problem for problem in check.problems)
         # kicad-cli loads only the root schematic: this project has none.
         with pytest.raises(ValueError, match="cannot load the top-level sheet"):
-            check_annotation(self.write(tmp_path, ("1", "1")), 10, "cli")
+            check_annotation(self.write(tmp_path, ("1", "1")), "10.0.6", "cli")
+
+    def test_kicad_cli_loads_all_top_level_sheets_from_10_0_7(self, tmp_path):
+        project = self.write(tmp_path, ("1", "2"), first="board.kicad_sch")
+        assert check_annotation(project, "10.0.6", "cli").errors == []  # only board.kicad_sch
+        check = check_annotation(project, "10.0.7", "cli")
+        assert [e.message for e in check.errors] == ["Duplicate items R1"]
 
     def test_known_order(self, tmp_path):
-        check = check_annotation(self.write(tmp_path, ("1", "2")), 10)
+        check = check_annotation(self.write(tmp_path, ("1", "2")), "10.0.6")
         assert [e.message for e in check.errors] == ["Duplicate items R1"]
         assert [e.first.sheet for e in check.errors] == ["/Top0/"]
         assert check.problems == []
@@ -362,7 +372,7 @@ class TestReviewFindings:
     def test_symbols_in_an_unknown_order(self, tmp_path):
         # Two symbols with no UUID at one position: std::sort gives them in any order.
         project = write_project(tmp_path, symbol("R1") + symbol("R1"))
-        check = check_annotation(project, 10)
+        check = check_annotation(project, "10.0.6")
         assert [e.message for e in check.errors] == ["Duplicate items R1"]
         assert any("symbols in an order" in problem for problem in check.problems)
 
@@ -374,3 +384,63 @@ class TestReviewFindings:
         big = [[object() for _ in range(11)]]
         assert len(next(_orders(big))) == 11  # type: ignore[arg-type]
         assert sum(1 for _ in _orders([[a, b, c]])) == 6  # type: ignore[list-item]
+
+
+class TestErcDialog:
+    UUIDS = ("aaaaaaaa-0000-0000-0000-000000000001", "aaaaaaaa-0000-0000-0000-000000000002")
+
+    def project(self, directory: Path, erc: dict) -> Path:
+        symbols = symbol("R1", uuid=self.UUIDS[0]) + symbol("R1", uuid=self.UUIDS[1], at=(5, 0))
+        project = write_project(directory, symbols)
+        project.write_text(json.dumps({"erc": erc}), encoding="utf-8")
+        return project
+
+    def test_marker_text(self, tmp_path):
+        project = self.project(tmp_path, {})
+        (error,) = check_annotation(project, "10.0.6").errors
+        assert marker_text(error) == f"duplicate_reference|0|0|{self.UUIDS[0]}|{self.UUIDS[1]}|||"
+
+    @pytest.mark.parametrize(
+        "severity, expected", [(None, "error"), ("warning", "warning"), ("ignore", None)]
+    )
+    def test_severity(self, tmp_path, severity, expected):
+        erc = {"rule_severities": {"duplicate_reference": severity}} if severity else {}
+        violations, notes = erc_violations(self.project(tmp_path, erc), "10.0.6")
+        assert [v.severity for v in violations] == ([expected] if expected else [])
+        if violations:
+            assert violations[0].description == "Duplicate items R1"
+            assert [i.description for i in violations[0].items] == ["Symbol R1 [R]"] * 2
+            assert violations[0].items[1].x_mm == 5.0
+        assert notes == []
+
+    def test_exclusion(self, tmp_path):
+        # kicad-cli gives an exclusion as an excluded violation: the tool does not add it.
+        text = f"duplicate_reference|0|0|{self.UUIDS[0]}|{self.UUIDS[1]}|||"
+        project = self.project(tmp_path, {"erc_exclusions": [[text, "a comment"]]})
+        assert erc_violations(project, "10.0.6") == ([], [])
+        # KiCad 8 reads only texts: it stops at the list, and ignores the exclusion.
+        project = write_project(tmp_path, "", version=VERSION_8)
+        project.write_text(json.dumps({"erc": {"erc_exclusions": [None, "x", [text, ""]]}}))
+        exclusions = erc_exclusions(project, 8)
+        assert exclusions.comments == {"x": ""} and "cannot read" in (exclusions.problem or "")
+
+    @pytest.mark.parametrize(
+        "kicad, entries, comments, stopped",
+        [
+            # KiCad 8 skips null, [] and {}.
+            (8, [None, [], {}, "a"], {"a": ""}, False),
+            (8, ["a", 1, "b"], {"a": ""}, True),
+            # KiCad 9 and 10 skip each entry that is not a text or an array.
+            (10, [None, 1, {}, "a", ["b", "c"]], {"a": "", "b": "c"}, False),
+            # They keep the text of [text, <not a text>], then stop.
+            (10, [["a", 1], "b"], {"a": ""}, True),
+            (9, [[1, "x"], "b"], {}, True),
+            (9, [["a"], "b"], {}, True),
+        ],
+    )
+    def test_exclusion_entries(self, tmp_path, kicad, entries, comments, stopped):
+        project = tmp_path / "p.kicad_pro"
+        project.write_text(json.dumps({"erc": {"erc_exclusions": entries}}))
+        exclusions = erc_exclusions(project, kicad)
+        assert exclusions.comments == comments
+        assert (exclusions.problem is not None) == stopped

@@ -223,6 +223,21 @@ class TestKicadCliIntegration:
         assert "'NET_A'" in out
         assert "(50.80, 63.50)" in out
 
+    async def test_no_annotation_check_gives_no_pass(self, tmp_path, monkeypatch):
+        """With no annotation check (a nightly build), the tool does not give "✅"."""
+        sch = tmp_path / "empty.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))\n', "utf-8")
+
+        async def nightly():
+            return "10.99.0"
+
+        monkeypatch.setattr(validation, "get_kicad_version", nightly)
+        out = await validation.run_erc(str(sch))
+        assert out.startswith("⚠️ **ERC: no violation in the report of kicad-cli**")
+        assert "no verified rules of the annotation check for KiCad 10.99.0" in out
+        out = await validation.get_erc_violations(str(sch))
+        assert out.startswith("⚠️ **No violation in the report of kicad-cli**")
+
     async def test_get_erc_violations_gives_table_not_run_summary(self, tmp_path):
         sch = tmp_path / "dangling_label.kicad_sch"
         shutil.copy(LABEL_SCH, sch)

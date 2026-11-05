@@ -1,20 +1,31 @@
 """Design Rule Checking (DRC) and Electrical Rules Check (ERC) tools for KiCad Workbench."""
 
+import asyncio
 import hashlib
 import json
 import tempfile
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..models.types import DRCError, ERCError, ERCItem
+from ..parsers.annotation import ANNOTATION_TYPES, erc_violations
 from ..parsers.check_report_parser import (
     erc_position_scale,
     parse_drc_report,
     parse_erc_report,
 )
+from ..parsers.kicad_versions import KicadFileError
+from ..parsers.sexpr import SExprError
 from ..server import mcp
-from ..utils.kicad_cli import decode_output, run_kicad_cli
-from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic, sheet_files
+from ..utils.kicad_cli import decode_output, get_kicad_version, run_kicad_cli
+from ..utils.kicad_text import KiCadEncodingError
+from ..utils.sch_hierarchy import (
+    AmbiguousRootError,
+    find_root_schematic,
+    schematic_project_file,
+    sheet_files,
+)
 
 
 def _temp_dir() -> Path:
@@ -197,6 +208,63 @@ def _parse_erc_report(
     return errors
 
 
+@dataclass
+class _ErcResult:
+    """The violations of an ERC run and the notes about the annotation check."""
+
+    errors: list[ERCError]  # the annotation errors of the ERC dialog, then the report
+    notes: list[str]  # Markdown lines
+    annotation_checked: bool  # False: the result has no annotation check
+
+
+async def _annotation_errors(root: Path) -> tuple[list[ERCError], list[str], bool]:
+    """The annotation errors of the ERC dialog, which kicad-cli does not give, the
+    notes about them (Markdown lines), and True when the check ran.
+
+    ``kicad-cli sch erc`` does not run CheckAnnotate. The ERC dialog of the
+    schematic editor runs it before the other checks (parsers/annotation.py).
+    """
+    version = await get_kicad_version()
+    if version is None:
+        return (
+            [],
+            [
+                "⚠️ The version of KiCad is not known: the result has no annotation check of "
+                "the ERC dialog."
+            ],
+            False,
+        )
+    try:
+        project = await asyncio.to_thread(schematic_project_file, root)
+        errors, notes = await asyncio.to_thread(erc_violations, project, version)
+    except (
+        ValueError,
+        KicadFileError,
+        KiCadEncodingError,
+        SExprError,
+        OSError,
+        AmbiguousRootError,
+    ) as e:
+        return [], [f"⚠️ The result has no annotation check of the ERC dialog: {e}"], False
+    lines = [
+        f"_The annotation check is the check of the ERC dialog of KiCad {version} (kicad-cli "
+        "does not run it): the server runs it with the rules of the KiCad source._"
+    ]
+    return errors, lines + [f"⚠️ {note}" for note in notes], True
+
+
+async def _erc_result(report_path: Path, root: Path) -> _ErcResult:
+    """The violations of the kicad-cli report and of the annotation check of the ERC
+    dialog, and the notes about the annotation check."""
+    errors = await asyncio.to_thread(lambda: _parse_erc_report(report_path, sheet_files(root)))
+    annotation, notes, checked = await _annotation_errors(root)
+    return _ErcResult(annotation + errors, notes, checked)
+
+
+def _notes_text(notes: list[str]) -> str:
+    return "".join(f"\n\n{note}" for note in notes)
+
+
 def _parse_drc_report(report_path: Path) -> list[DRCError]:
     """Parse DRC report file (JSON or XML format).
 
@@ -293,6 +361,9 @@ async def run_erc(
     - Power conflicts
     - Multiple outputs on same net
     - Pin type mismatches
+    - Annotation errors (symbols that are not annotated, duplicate references,
+      units with different values), as the ERC dialog of KiCad finds them.
+      kicad-cli does not run this check: the server runs it.
 
     Args:
         schematic_path: Path to .kicad_sch file
@@ -300,6 +371,11 @@ async def run_erc(
     Returns:
         ERC report with violations and recommendations
     """
+    return await _run_erc(schematic_path, [])
+
+
+async def _run_erc(schematic_path: str, results: list[_ErcResult]) -> str:
+    """run_erc. It appends the result of a parsed report to results."""
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
@@ -384,17 +460,25 @@ verified. Ensure KiCad 9+ is installed and the schematic has a matching
 
         # Parse and format results
         try:
-            errors = _parse_erc_report(erc_report_path, sheet_files(sch_path))
+            result = await _erc_result(erc_report_path, sch_path)
+            results.append(result)
+            errors = result.errors
+            notes_text = _notes_text(result.notes)
 
             if not any(not e.excluded for e in errors):
                 excluded_note = (
                     f"\n\n{len(errors)} excluded violation(s) are not counted." if errors else ""
                 )
-                return f"""✅ **ERC Check Passed**
+                title = (
+                    "✅ **ERC Check Passed**"
+                    if result.annotation_checked
+                    else "⚠️ **ERC: no violation in the report of kicad-cli**"
+                )
+                return f"""{title}
 
 **Schematic:** {schematic_path}
 
-No electrical violations detected!{excluded_note}{subsheet_note}"""
+No electrical violations detected!{excluded_note}{notes_text}{subsheet_note}"""
 
             # Format violations
             violations_table = _ERC_TABLE_HEADER
@@ -408,7 +492,7 @@ No electrical violations detected!{excluded_note}{subsheet_note}"""
 
 **Schematic:** {schematic_path}
 **Total Violations:** {len(errors)}
-{_count_text(errors)}{subsheet_note}
+{_count_text(errors)}{notes_text}{subsheet_note}
 
 ## Violations
 
@@ -676,22 +760,30 @@ async def get_erc_violations(
             return f"❌ **{e}.** Run the check on the root schematic that you want."
         erc_report_path = _report_path(root, "erc")
 
+        results: list[_ErcResult] = []
         if _report_is_stale(erc_report_path, _erc_sources(root)):
             # Run ERC first. run_erc gives "❌" also when it found violations,
             # thus only a missing report is a failure.
-            initial_result = await run_erc(schematic_path)
+            initial_result = await _run_erc(schematic_path, results)
             if not erc_report_path.exists():
                 return initial_result
 
         # Parse ERC report
-        errors = _parse_erc_report(erc_report_path, sheet_files(root))
+        result = results[0] if results else await _erc_result(erc_report_path, root)
+        errors = result.errors
+        notes_text = _notes_text(result.notes)
 
         if not errors:
-            return f"""✅ **No ERC Violations**
+            title = (
+                "✅ **No ERC Violations**"
+                if result.annotation_checked
+                else "⚠️ **No violation in the report of kicad-cli**"
+            )
+            return f"""{title}
 
 **Schematic:** {schematic_path}
 
-No electrical violations detected."""
+No electrical violations detected.{notes_text}"""
 
         # Apply filter
         filtered_errors = _filter_erc_errors(errors, severity)
@@ -702,14 +794,14 @@ No electrical violations detected."""
 **Schematic:** {schematic_path}
 **Filter:** severity = '{severity or 'all'}'
 
-No violations match the specified filter."""
+No violations match the specified filter.{notes_text}"""
 
         # Format results
         result = f"""# ERC Violations
 
 **Schematic:** {schematic_path}
 **Filter:** severity = '{severity or 'all'}'
-**Count:** {len(filtered_errors)}
+**Count:** {len(filtered_errors)}{notes_text}
 
 ## Violations
 
@@ -846,7 +938,8 @@ async def export_erc_report(
 
         # Run ERC first to generate a current report. run_erc gives "❌" also
         # when it found violations, thus only a missing report is a failure.
-        initial_result = await run_erc(schematic_path)
+        results: list[_ErcResult] = []
+        initial_result = await _run_erc(schematic_path, results)
 
         if not erc_report_path.exists():
             return f"❌ **ERC Check Failed**\n\n{initial_result}"
@@ -861,13 +954,27 @@ async def export_erc_report(
         import shutil
 
         shutil.copy(erc_report_path, output)
+        result = results[0] if results else await _erc_result(erc_report_path, root)
+        notes = list(result.notes)
+        active = [
+            error
+            for error in result.errors
+            if error.type in ANNOTATION_TYPES and not error.excluded
+        ]
+        if active:
+            notes.insert(
+                0,
+                f"⚠️ The report is the report of kicad-cli: it does not have the "
+                f"{len(active)} annotation error(s) of the ERC dialog. run_erc and "
+                "get_erc_violations show them.",
+            )
 
         return f"""✅ **ERC Report Exported**
 
 **Schematic:** {schematic_path}
 **Output:** {output}
 
-The ERC report has been successfully exported to the specified location."""
+The ERC report has been successfully exported to the specified location.{_notes_text(notes)}"""
 
     except Exception as e:
         import traceback

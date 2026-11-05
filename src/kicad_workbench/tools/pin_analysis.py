@@ -531,8 +531,33 @@ async def detect_pin_conflicts(
                         "description": f"{ref} pin {pin_num} is unconnected ({net_name})",
                     })
 
-        if not conflicts:
-            return f"""✅ **No Pin Conflicts Detected**
+        # The title gives the worst severity: an error is a conflict, a warning can be
+        # one, an unconnected pin is only information.
+        errors = [c for c in conflicts if c["severity"] == "error"]
+        warnings = [c for c in conflicts if c["severity"] == "warning"]
+        infos = [c for c in conflicts if c["severity"] == "info"]
+        icons = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}
+
+        def table(items: list[dict]) -> str:
+            text = "| Severity | Type | Location | Description |\n"
+            text += "|----------|------|----------|-------------|\n"
+            for conflict in items[:50]:  # Limit to first 50
+                location = conflict.get("net", conflict.get("component", "Unknown"))
+                text += (
+                    f"| {icons[conflict['severity']]} {conflict['severity']} "
+                    f"| {conflict['type']} | {location} | {conflict['description']} |\n"
+                )
+            if len(items) > 50:
+                text += f"\n*... and {len(items) - 50} more*\n"
+            return text
+
+        if not errors and not warnings:
+            unconnected = (
+                f"ℹ️ {len(infos)} unconnected pin(s), listed below"
+                if infos
+                else "✅ No unconnected pins"
+            )
+            result = f"""✅ **No Pin Conflicts Detected**
 
 **Schematic:** {schematic_path}
 
@@ -541,30 +566,24 @@ The schematic has been analyzed and no pin conflicts were found.
 **Checked:**
 - ✅ No multiple output/driver pins on the same net
 - ✅ No single-pin (potentially unconnected) nets
-- ✅ No unconnected pins"""
+- {unconnected}
+"""
+            if infos:
+                result += f"\n## Unconnected Pins\n\n{table(infos)}"
+            return result
 
         # Format conflicts
-        result = f"""❌ **Pin Conflicts Detected**
+        title = "❌ **Pin Conflicts Detected**" if errors else "⚠️ **Possible Pin Conflicts**"
+        result = f"""{title}
 
 **Schematic:** {schematic_path}
-**Total Conflicts:** {len(conflicts)}
+- Errors: {len(errors)}
+- Warnings: {len(warnings)}
+- Unconnected pins (info): {len(infos)}
 
 ## Conflicts
 
-| Severity | Type | Location | Description |
-|----------|------|----------|-------------|
-"""
-
-        for conflict in conflicts[:50]:  # Limit to first 50
-            severity_icon = "❌" if conflict["severity"] == "error" else "⚠️"
-            conflict_type = conflict["type"]
-            location = conflict.get("net", conflict.get("component", "Unknown"))
-            description = conflict["description"]
-
-            result += f"| {severity_icon} {conflict['severity']} | {conflict_type} | {location} | {description} |\n"
-
-        if len(conflicts) > 50:
-            result += f"\n*... and {len(conflicts) - 50} more conflicts*\n"
+{table(errors + warnings + infos)}"""
 
         result += "\n## Recommendations\n\n"
         result += "1. **Fix all errors** before proceeding to PCB layout\n"

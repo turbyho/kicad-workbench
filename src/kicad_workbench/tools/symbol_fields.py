@@ -64,12 +64,7 @@ from ..parsers.sexpr import (
 from ..parsers.symbol_info import letter_reference
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
-from ..utils.kicad_lock import (
-    check_schematic_not_open,
-    file_stamp,
-    writable_schematic_version,
-    write_schematic,
-)
+from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
 from ..utils.library_tables import kicad_environment
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
@@ -658,21 +653,14 @@ def _output(project: Path, rows: list[_Row], written: list[Path], problems: list
     return "\n".join(lines)
 
 
-def _check_files(texts: dict[Path, str], files: dict[Path, SchematicFile]) -> str | None:
-    """Return the first error of the checks of write_schematic for the files, or None.
-    The new text of each file must also be a list that the parser reads: a fault of
-    an edit does not go to the disk."""
+def _check_texts(texts: dict[Path, str]) -> str | None:
+    """Return an error when the new text of a file is not a list that the parser
+    reads, or None: a fault of an edit does not go to the disk."""
     for file, text in texts.items():
         try:
             parse(text)
         except SExprError as e:
             return f"The new text of {file.name} is not valid ({e}): this is an error of the tool."
-        version = writable_schematic_version(file, text)
-        error = version if isinstance(version, str) else check_schematic_not_open(file)
-        if not error and file_stamp(file) != files[file].stamp:
-            error = f"The file {file} changed after this tool read it. Do this operation again."
-        if error:
-            return error
     return None
 
 
@@ -701,38 +689,16 @@ async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) ->
         texts, rows, files, problems = await asyncio.to_thread(_plan, project, kicad, changes, size)
     except (OSError, KiCadEncodingError, SExprError, KicadFileError) as e:
         return f"❌ The schematic files of {project} cannot be read: {e}"
-    # The checks of all files first: the tool writes no file when one check fails.
-    error = await asyncio.to_thread(_check_files, texts, files)
+    error = await asyncio.to_thread(_check_texts, texts)
     if error:
-        return f"❌ {error.removeprefix('Error: ').removeprefix('❌ ')} The tool wrote no file."
-    written = await asyncio.to_thread(_write_files, texts, files)
-    if isinstance(written, str):
-        return f"❌ {written}"
-    return _output(project, rows, written, problems)
-
-
-def _write_files(texts: dict[Path, str], files: dict[Path, SchematicFile]) -> list[Path] | str:
-    """Write the files; when one write fails, write the old text into the files that
-    were written already (the units of one package must not get different fields).
-    Return the written files, or the error."""
-    written: list[Path] = []
-    for file, text in texts.items():
-        error = write_schematic(file, text, files[file].stamp)
-        if error is None:
-            written.append(file)
-            continue
-        kept = []
-        for done in written:
-            old = files[done].root.source
-            if write_schematic(done, old, file_stamp(done)) is not None:
-                kept.append(done.name)
-        if kept:
-            return (
-                f"{error} The tool could not write the old text into {', '.join(kept)} again: "
-                "these files have the new fields, the other files do not."
-            )
-        return f"{error} The tool wrote no file (it wrote the old text again)."
-    return written
+        return f"❌ {error} The tool wrote no file."
+    # All files or no file: the units of one package must not get different fields.
+    stamps = {file: files[file].stamp for file in texts}
+    result = await asyncio.to_thread(write_schematics, texts, stamps)
+    if isinstance(result, str):
+        return result
+    written, warnings = result
+    return _output(project, rows, written, problems + warnings)
 
 
 @mcp.tool()
@@ -745,8 +711,9 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
     Value_Confirmed: always hidden). With a variant (KiCad 10), the tool writes the fields
     of that variant into each unit: a value equal to the field of the symbol
     removes the field from the variant. The tool checks all changes and all
-    files first, and writes no file when a check fails. KiCad must not have
-    the files open.
+    files first, and writes no file when a check fails. It writes all files or
+    no file: an error of the disk also changes no file. KiCad must not have the
+    files open.
 
     A symbol in a sheet that the hierarchy uses more than one time has one set
     of fields for all its references (U201 and U301): give the same fields for

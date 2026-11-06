@@ -5,6 +5,8 @@ and 10.0.6.
 """
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -242,7 +244,7 @@ class TestSymbolFields:
             FieldChange(reference="U5", fields={"MPN": "X"}),
             FieldChange(reference="U6", fields={"MPN": "X"}),
         )
-        assert out.startswith("❌") and out.endswith("The tool wrote no file.")
+        assert out.startswith("❌ The tool wrote no file: KiCad has the schematic open"), out
         assert {
             p.name: p.read_text(encoding="utf-8") for p in tmp_path.glob("*.kicad_sch")
         } == before
@@ -295,29 +297,66 @@ class TestReviewCases:
         assert (tmp_path / "sub.kicad_sch").read_text(encoding="utf-8").count('"MPN" "X"') == 0
 
     async def test_failed_write_restores_the_written_files(self, tmp_path, monkeypatch):
+        before, out = await _write_with(tmp_path, monkeypatch, fail_commit=2)
+        assert out.startswith("❌ The tool could not write "), out
+        assert out.endswith("again)."), out
+        assert "The tool wrote no file (it wrote the old content into " in out
+        assert _texts(tmp_path) == before
+        assert not list(tmp_path.glob("*.kicad-save-*"))
+
+    async def test_a_disk_error_before_the_renames_changes_no_file(self, tmp_path, monkeypatch):
+        # The temporary file of the second file cannot be written: before, the
+        # first file had the new fields already.
+        before, out = await _write_with(tmp_path, monkeypatch, fail_temp=2)
+        sub = tmp_path / "sub.kicad_sch"
+        assert out == f"❌ The tool wrote no file. {sub}: [Errno 28] No space left on device.", out
+        assert _texts(tmp_path) == before
+        assert not list(tmp_path.glob("*.kicad-save-*"))
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions of a user"
+    )
+    async def test_a_read_only_file_changes_no_file(self, tmp_path):
         sub = symbol("U5", 1, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6")))
         path = write_project(tmp_path, symbol("U1", 1), sub)
-        before = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.glob("*.kicad_sch")}
-        real = symbol_fields.write_schematic
+        (tmp_path / "sub.kicad_sch").chmod(0o444)
+        before = _texts(tmp_path)
+        out = await write(path, *_CHANGES)
+        assert out.startswith(f"❌ The tool wrote no file. {tmp_path / 'sub.kicad_sch'}: "), out
+        assert "is read only" in out, out
+        assert _texts(tmp_path) == before
+
+    async def test_an_error_after_a_save_is_a_warning(self, tmp_path, monkeypatch):
+        from kicad_workbench.utils import file_save
+
+        real = file_save.PendingSave.commit
         calls = []
 
-        def failing(file, text, stamp):
-            calls.append(file.name)
-            if len(calls) == 2:
-                return "❌ KiCad has the schematic open."
-            return real(file, text, stamp)
+        def commit(save):
+            real(save)
+            calls.append(save.target)
+            if len(calls) == 1:
+                raise file_save.AfterSaveError(f"The tool wrote {save.target}, but no flush")
 
-        monkeypatch.setattr(symbol_fields, "write_schematic", failing)
-        out = await write(
-            path,
-            FieldChange(reference="U1", fields={"MPN": "X"}),
-            FieldChange(reference="U5", fields={"MPN": "X"}),
-            FieldChange(reference="U6", fields={"MPN": "X"}),
-        )
-        assert out.endswith("The tool wrote no file (it wrote the old text again).")
-        assert {
-            p.name: p.read_text(encoding="utf-8") for p in tmp_path.glob("*.kicad_sch")
-        } == before
+        monkeypatch.setattr(file_save.PendingSave, "commit", commit)
+        sub = symbol("U5", 1, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6")))
+        path = write_project(tmp_path, symbol("U1", 1), sub)
+        out = await write(path, *_CHANGES)
+        assert out.startswith("# Fields"), out
+        assert f"⚠️ The tool wrote {calls[0]}, but no flush" in out
+        for name in ("board.kicad_sch", "sub.kicad_sch"):
+            assert '"MPN" "X"' in (tmp_path / name).read_text(encoding="utf-8")
+
+    async def test_a_failed_restore_names_the_file(self, tmp_path, monkeypatch):
+        from kicad_workbench.utils import kicad_lock
+
+        def save_file(path, data):
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(kicad_lock, "save_file", save_file)
+        _, out = await _write_with(tmp_path, monkeypatch, fail_commit=2)
+        assert "could not write the old content into these files again: " in out, out
+        assert out.endswith("These files have the new content, the other files do not."), out
 
     async def test_instances_of_an_other_project(self, tmp_path):
         text = symbol("U1", 1).replace(
@@ -400,3 +439,42 @@ class TestReviewCases:
         # Two units of one symbol: two field values, also with two references.
         assert "✅ The tool wrote 2 field values into `sub.kicad_sch`." in out
         assert "| A\\|B |" in out
+
+
+_CHANGES = (
+    FieldChange(reference="U1", fields={"MPN": "X"}),
+    FieldChange(reference="U5", fields={"MPN": "X"}),
+    FieldChange(reference="U6", fields={"MPN": "X"}),
+)
+
+
+def _texts(folder):
+    return {p.name: p.read_text(encoding="utf-8") for p in folder.glob("*.kicad_sch")}
+
+
+async def _write_with(tmp_path, monkeypatch, fail_commit=0, fail_temp=0):
+    """Write U1 (board.kicad_sch) and U5, U6 (sub.kicad_sch). The rename or the
+    temporary file of the file number fail_commit or fail_temp fails."""
+    from kicad_workbench.utils import file_save
+
+    sub = symbol("U5", 1, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6")))
+    path = write_project(tmp_path, symbol("U1", 1), sub)
+    before = _texts(tmp_path)
+    renames, temps = [], []
+    real_rename, real_write = file_save._rename, file_save._write_all
+
+    def rename(temp, target):
+        renames.append(target)
+        if len(renames) == fail_commit:
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(temp, target)
+
+    def write_all(fd, data):
+        temps.append(fd)
+        if len(temps) == fail_temp:
+            raise OSError(28, "No space left on device")
+        real_write(fd, data)
+
+    monkeypatch.setattr(file_save, "_rename", rename)
+    monkeypatch.setattr(file_save, "_write_all", write_all)
+    return before, await write(path, *_CHANGES)

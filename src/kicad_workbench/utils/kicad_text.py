@@ -117,6 +117,16 @@ def write_kicad_text(path: Path, content: str) -> None:
         AfterSaveError: The file has the new content, but its folder is not
             flushed to the disk.
     """
+    save_file(path, kicad_text_bytes(path, content))
+
+
+def kicad_text_bytes(path: Path, content: str) -> bytes:
+    """The bytes of the text of a KiCad file, as write_kicad_text writes them: UTF-8,
+    with the line ends of KiCad.
+
+    Raises:
+        InputError: The text holds a lone surrogate (from an argument of a tool).
+    """
     try:
         data = content.encode("utf-8")
     except UnicodeEncodeError as e:
@@ -125,7 +135,7 @@ def write_kicad_text(path: Path, content: str) -> None:
         ) from e
     if os.linesep != "\n":
         data = data.replace(b"\n", os.linesep.encode("ascii"))
-    save_file(path, data)
+    return data
 
 
 # A JSON string, a comment to the end of the line, or a block comment.

@@ -394,3 +394,32 @@ class TestWriteInThreads:
         result = asyncio.run(call(str(sub)))
         assert result.startswith("✅"), result
         assert result.rstrip().endswith(f"⚠️ The tool wrote {sub}, but it could not flush"), result
+
+    def test_more_files_with_a_changed_stamp_write_no_file(self, tmp_path):
+        from kicad_workbench.utils.kicad_lock import write_schematics
+
+        text = '(kicad_sch\n\t(version 20250114)\n\t(generator "eeschema")\n)\n'
+        a, b = tmp_path / "a.kicad_sch", tmp_path / "b.kicad_sch"
+        for path in (a, b):
+            path.write_text(text, encoding="utf-8")
+        stamps = {a: file_stamp(a), b: (0, 0)}  # b changed after the read
+        new = text.replace("eeschema", "eeschema2")
+        result = write_schematics({a: new, b: new}, stamps)
+        assert result.startswith(f"❌ The tool wrote no file: The file {b} changed after"), result
+        assert a.read_text(encoding="utf-8") == text and b.read_text(encoding="utf-8") == text
+
+    @pytest.mark.skipif(os.name == "nt", reason="a symbolic link needs a privilege on Windows")
+    def test_two_names_of_one_file_write_no_file(self, tmp_path):
+        # The locks are not reentrant: the second name waited for the lock of the
+        # first. On a file system that ignores the case, one change was lost.
+        from kicad_workbench.utils.kicad_lock import write_schematics
+
+        text = '(kicad_sch\n\t(version 20250114)\n\t(generator "eeschema")\n)\n'
+        a = tmp_path / "a.kicad_sch"
+        a.write_text(text, encoding="utf-8")
+        link = tmp_path / "link.kicad_sch"
+        link.symlink_to(a.name)
+        stamps = {a: file_stamp(a), link: file_stamp(link)}
+        result = write_schematics({a: text + " ", link: text + "  "}, stamps)
+        assert result.startswith(f"❌ The tool wrote no file: {a} and {link} are one file"), result
+        assert a.read_text(encoding="utf-8") == text

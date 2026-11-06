@@ -50,11 +50,12 @@ the schematic tools when the connection is important.
 ## Boards
 
 These tools import `pcbnew` in the server process. Without `pcbnew`, they read the
-board file as text, with approximate lengths and no design rules (see
-[installation.md](installation.md)). `analyze_pcb_nets`, `find_tracks_by_net`,
-`analyze_pcb_signal_integrity` and `analyze_pcb_power_integrity` then give the
-warning "pcbnew not available". `list_pcb_footprints` and `get_pcb_statistics` do not
-tell it yet.
+board file as text, with no design rules and no board outline, and each answer
+has the warning "pcbnew not available" (see [installation.md](installation.md)).
+When `pcbnew` cannot read the board (for example a board of a newer KiCad), the
+tools give an error: the text reader does not know the rules of such a board. The
+text reader reads only the boards of KiCad 8 to 10; an older board needs `pcbnew`, or
+a save in KiCad 8 or later.
 
 | Tool | What it does |
 |---|---|

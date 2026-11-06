@@ -131,6 +131,37 @@ def check_schematic_version(version: int | None) -> int:
     return version
 
 
+def check_board_version(version: int | None) -> int:
+    """Return the version of a board if the text reader of this server reads it:
+    the board version of the releases KiCad 8, 9 and 10 (the text reader has no
+    rules of a nightly build).
+
+    Raises:
+        KicadFileError: The board has no version, or not the version of KiCad 8.0,
+            9.0 or 10.0.
+    """
+    if version is None:
+        raise KicadFileError("The board has no file version, (version N).")
+    if version < KICAD8.board:
+        raise KicadFileError(
+            f"The board has the file version {version}, which is older than the version of "
+            f"KiCad 8.0 ({KICAD8.board}). Open the board in KiCad 8 or later and save it."
+        )
+    if version > KICAD10.board:
+        raise KicadFileError(
+            f"The board has the file version {version}, which is newer than the version of "
+            f"KiCad 10.0 ({KICAD10.board}). The text reader of this server has no rules for "
+            "it: use a Python with pcbnew of that KiCad."
+        )
+    if version not in {release.board for release in RELEASES}:
+        raise KicadFileError(
+            f"The board has the file version {version} of a nightly build, not of a release "
+            "of KiCad 8, 9 or 10. The text reader of this server has no rules for it: use a "
+            "Python with pcbnew of that KiCad, or save the board in a release."
+        )
+    return version
+
+
 def schematic_version(root: Node) -> int:
     """Return the version of a parsed schematic (see check_schematic_version)."""
     return check_schematic_version(file_version(root))

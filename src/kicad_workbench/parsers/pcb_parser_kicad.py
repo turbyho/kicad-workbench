@@ -6,6 +6,34 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..utils.file_handlers import validate_kicad_file
+from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
+from .kicad_versions import header_version, kicad_release
+
+
+class BoardLoadError(ValueError):
+    """pcbnew cannot read the board."""
+
+
+def _no_board_reason(path, kicad: str) -> str:
+    """The text for a board that pcbnew of KiCad 9 or 10 does not load: LoadBoard
+    then gives None and no reason. A file version that is newer than the board
+    version of the KiCad release is a known reason."""
+    prefix = f"pcbnew of KiCad {kicad} cannot read {path}"
+    try:
+        version = header_version(read_as_kicad(path), "kicad_pcb")
+    except (OSError, KiCadEncodingError):
+        version = None
+    release = kicad_release(kicad)
+    if version is not None and release is not None and version > release.board:
+        return (
+            f"{prefix}: its file version {version} is newer than the version that KiCad "
+            f"{kicad} writes ({release.board}). Open it with a newer KiCad."
+        )
+    return (
+        f"{prefix}, and pcbnew gives no reason. Open the board in the PCB editor of KiCad "
+        "to see the error."
+    )
+
 
 # pcbnew returns user-facing layer names (TOP, BOTTOM, L2 INNER, etc.)
 # but users typically reference canonical names (F.Cu, B.Cu, In1.Cu, etc.)
@@ -101,7 +129,16 @@ class PCBParserKiCad:
                 f"Error: {e}"
             ) from e
 
-        self.board = pcbnew.LoadBoard(str(self.file_path))
+        kicad = pcbnew.GetMajorMinorPatchVersion()
+        try:
+            board = pcbnew.LoadBoard(str(self.file_path))
+        except OSError as e:  # KiCad 8: the IO_ERROR of the board reader
+            raise BoardLoadError(
+                f"pcbnew of KiCad {kicad} cannot read {self.file_path}: {e}"
+            ) from e
+        if board is None:  # KiCad 9 and 10
+            raise BoardLoadError(_no_board_reason(self.file_path, kicad))
+        self.board = board
         self._pcbnew = pcbnew
 
     def _to_mm(self, iu_value: int | float) -> float:

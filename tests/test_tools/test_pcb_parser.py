@@ -4,8 +4,9 @@ import math
 
 import pytest
 
-from kicad_workbench.parsers.pcb_parser import PCBParser
-from kicad_workbench.parsers.sexpr import SExprError
+from kicad_workbench.parsers.kicad_versions import KicadFileError
+from kicad_workbench.parsers.pcb_parser import PCBParser, _field
+from kicad_workbench.parsers.sexpr import SExprError, parse
 
 # A board in the format of KiCad 9: the nets are codes of the net table.
 KICAD9 = """(kicad_pcb
@@ -156,18 +157,20 @@ class TestMoreItems:
         assert parse_board(tmp_path, MORE)["zones"] == [{"net_name": "", "layer": "B.Cu"}]
 
 
-def test_kicad5_design_rules(tmp_path):
-    text = (
-        "(kicad_pcb (version 20171130) (layers (0 F.Cu signal) (31 B.Cu signal))\n"
-        "  (setup (trace_clearance 0.25) (trace_min 0.15) (via_min_size 0.6)))\n"
-    )
-    setup = parse_board(tmp_path, text)["setup"]
-    assert setup == {"trace_min": 0.15, "via_min": 0.6, "clearance": 0.25}
+@pytest.mark.parametrize("version", [20171130, 20211014, 20991231])
+def test_only_boards_of_kicad_8_to_10(tmp_path, version):
+    """CLAUDE.md rule 4: the text reader has rules of KiCad 8 to 10 only."""
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(f"(kicad_pcb (version {version}))", encoding="utf-8")
+    with pytest.raises(KicadFileError, match=f"file version {version}"):
+        PCBParser(str(path)).get_statistics()
 
 
-def test_kicad6_fields(tmp_path):
-    (footprint,) = parse_board(tmp_path, KICAD6)["footprints"]
-    assert (footprint["reference"], footprint["value"]) == ("D1", "red")
+def test_kicad6_fields():
+    """_field also reads the (fp_text ...) of KiCad 6 and 7 (board_models.py reads
+    the boards of each version)."""
+    (footprint,) = parse(KICAD6).children("footprint")
+    assert (_field(footprint, "Reference"), _field(footprint, "Value")) == ("D1", "red")
 
 
 def test_statistics(tmp_path):
@@ -180,6 +183,7 @@ def test_statistics(tmp_path):
 
 def test_file_that_is_not_an_s_expression(tmp_path):
     path = tmp_path / "board.kicad_pcb"
-    path.write_text("(kicad_pcb (version 1)", encoding="utf-8")
+    # A board of KiCad 10 with no closing parenthesis.
+    path.write_text("(kicad_pcb (version 20260206)", encoding="utf-8")
     with pytest.raises(SExprError):
         PCBParser(str(path))._parse_file()

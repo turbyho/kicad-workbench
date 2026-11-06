@@ -2,26 +2,97 @@
 
 from __future__ import annotations
 
+import functools
+import traceback
+
+from ..parsers.kicad_versions import KicadFileError
 from ..server import mcp
 
 
-def _get_parser(file_path: str):
-    """Try pcbnew parser first, fall back to text parser."""
+class PcbnewImportError(ValueError):
+    """The server process finds pcbnew, but cannot import it."""
+
+
+@functools.cache
+def _pcbnew_importable() -> bool:
+    """True when the server process can import pcbnew, False when it has no pcbnew
+    (checked one time).
+
+    Raises:
+        PcbnewImportError: pcbnew is there, but its import fails (for example a
+            build for a different wx or Python). The tools give the error: the text
+            reader would hide it.
+    """
     try:
-        from ..parsers.pcb_parser_kicad import PCBParserKiCad
-        return PCBParserKiCad(file_path)
-    except (ImportError, Exception):
+        import pcbnew  # noqa: F401
+    except ImportError:
+        return False
+    except Exception as e:
+        raise PcbnewImportError(f"The import of pcbnew failed: {type(e).__name__}: {e}") from e
+    return True
+
+
+TEXT_READER_WARNING = (
+    "⚠️ pcbnew not available — text-based analysis: the tool reads the board file as "
+    "text, not with pcbnew of KiCad"
+)
+
+
+def _board_tool(limits: str):
+    """A board tool: with no pcbnew, its answer gets TEXT_READER_WARNING and the
+    limits of the text reader for this tool (each answer that is not an error)."""
+
+    def decorator(function):
+        @functools.wraps(function)
+        async def wrapper(*args, **kwargs):
+            try:
+                text_reader = not _pcbnew_importable()
+            except PcbnewImportError as e:
+                return f"❌ {e}"
+            result = await function(*args, **kwargs)
+            if text_reader and not result.startswith("❌"):
+                result += f"\n\n{TEXT_READER_WARNING}{limits}."
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def _get_parser(file_path: str):
+    """The reader of the board: pcbnew when the server can import it, else the text
+    reader (the tool then gives TEXT_READER_WARNING, see _board_tool).
+
+    Raises:
+        FileNotFoundError, ValueError: The file is not there, or it is not a board.
+        BoardLoadError: pcbnew cannot read the board. The tool gives the error: the
+            text reader does not know the rules of a board that KiCad cannot read.
+    """
+    if not _pcbnew_importable():
         from ..parsers.pcb_parser import PCBParser
+
         return PCBParser(file_path)
+    from ..parsers.pcb_parser_kicad import PCBParserKiCad
+
+    return PCBParserKiCad(file_path)
+
+
+def _failure(e: Exception) -> str:
+    """The answer for an error: "❌ <message>" for an expected error, else also the
+    traceback."""
+    if isinstance(e, (FileNotFoundError, ValueError, KicadFileError)):
+        return f"❌ {e}"
+    return f"❌ Error parsing PCB: {e}\n\n{traceback.format_exc()}"
 
 
 def _is_pcbnew(parser) -> bool:
-    """Check if parser is the pcbnew-based one."""
-    from ..parsers.pcb_parser_kicad import PCBParserKiCad
-    return isinstance(parser, PCBParserKiCad)
+    """True for the pcbnew reader. _get_parser gives it when pcbnew is importable:
+    the one source of this fact (also for the warning of _board_tool)."""
+    return _pcbnew_importable()
 
 
 @mcp.tool()
+@_board_tool("")
 async def list_pcb_footprints(
     file_path: str,
     filter_layer: str | None = None,
@@ -82,13 +153,12 @@ async def list_pcb_footprints(
                 )
             return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing PCB: {e}"
+        return _failure(e)
 
 
 @mcp.tool()
+@_board_tool(": no board outline, no design rules")
 async def get_pcb_statistics(file_path: str) -> str:
     """Get statistics about a KiCad PCB design.
 
@@ -133,7 +203,7 @@ async def get_pcb_statistics(file_path: str) -> str:
                 f"# PCB Statistics: {file_path}",
                 "",
                 "## Board Information",
-                f"**Dimensions:** {stats['board_width']:.2f} x {stats['board_height']:.2f} mm",
+                "**Dimensions:** not known (the text reader does not read the board outline)",
                 f"**Layers:** {stats['layers']}",
                 f"**Thickness:** {stats['thickness']:.2f} mm",
                 "",
@@ -149,13 +219,12 @@ async def get_pcb_statistics(file_path: str) -> str:
             ]
             return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing PCB: {e}"
+        return _failure(e)
 
 
 @mcp.tool()
+@_board_tool(": no design rules")
 async def analyze_pcb_nets(file_path: str) -> str:
     """Analyze nets in a KiCad PCB file.
 
@@ -179,8 +248,6 @@ async def analyze_pcb_nets(file_path: str) -> str:
 
             lines = [
                 f"# PCB Routing Analysis: {file_path}",
-                "",
-                "⚠️ pcbnew not available — text-based analysis (limited precision)",
                 "",
                 "## Overview",
                 f"**Track Segments:** {len(tracks)}",
@@ -352,13 +419,12 @@ async def analyze_pcb_nets(file_path: str) -> str:
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing PCB: {e}"
+        return _failure(e)
 
 
 @mcp.tool()
+@_board_tool("")
 async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     """Find track segments belonging to a specific net.
 
@@ -373,7 +439,7 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
         parser = _get_parser(file_path)
 
         if not _is_pcbnew(parser):
-            # Text parser fallback — tracks have net names from KiCad 10 format
+            # The text reader: _net gives the net names of each file version.
             data = parser._parse_file()
             matched_tracks = [t for t in data["tracks"] if t.get("net") == net_name]
             matched_vias = [v for v in data["vias"] if v.get("net") == net_name]
@@ -400,12 +466,10 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
             lines = [
                 f"# Track Analysis: {net_name}",
                 "",
-                "⚠️ pcbnew not available — text-based analysis (lengths are Euclidean approximations)",
-                "",
                 f"**Track Segments:** {len(matched_tracks)}",
                 f"**Vias:** {len(matched_vias)}",
                 f"**Copper Zones:** {len(matched_zones)}",
-                f"**Total Track Length:** {total_length:.3f} mm (Euclidean approximation)",
+                f"**Total Track Length:** {total_length:.3f} mm",
                 f"**Layers Used:** {', '.join(layers) if layers else 'N/A'}",
             ]
 
@@ -536,13 +600,12 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing PCB: {e}"
+        return _failure(e)
 
 
 @mcp.tool()
+@_board_tool(": no design rules")
 async def analyze_pcb_signal_integrity(
     file_path: str,
     net_name: str = "",
@@ -582,8 +645,6 @@ async def analyze_pcb_signal_integrity(
 
             lines = [
                 f"# Signal Integrity Analysis: {file_path}",
-                "",
-                "⚠️ pcbnew not available — text-based analysis (limited)",
             ]
 
             # Auto-detect differential pairs
@@ -731,13 +792,12 @@ async def analyze_pcb_signal_integrity(
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing PCB: {e}"
+        return _failure(e)
 
 
 @mcp.tool()
+@_board_tool(": no fill state of the zones")
 async def analyze_pcb_power_integrity(file_path: str) -> str:
     """Analyze power integrity: copper zones, power net routing, GND coverage.
 
@@ -757,8 +817,6 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
 
             lines = [
                 f"# Power Integrity Analysis: {file_path}",
-                "",
-                "⚠️ pcbnew not available — text-based analysis (limited)",
             ]
 
             # Power zones
@@ -907,10 +965,8 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing PCB: {e}"
+        return _failure(e)
 
 
 # ── Helpers ──────────────────────────────────────────────────

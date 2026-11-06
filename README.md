@@ -83,7 +83,7 @@ All tools are in [docs/tools.md](https://github.com/turbyho/kicad-workbench/blob
 - Python 3.10 or later.
 - For exact board data: a Python that can import the module `pcbnew` of KiCad.
   Without it, the board tools (statistics, tracks, nets, zones) read the board file
-  as text, with approximate lengths and no design rules.
+  as text, with no design rules and no board outline.
 
 ## Installation
 

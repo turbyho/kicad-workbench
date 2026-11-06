@@ -8,6 +8,7 @@ from typing import Any
 
 from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import read_as_kicad
+from .kicad_versions import check_board_version, header_version
 from .sexpr import Node, parse
 
 
@@ -42,10 +43,6 @@ class PCBFootprint:
 
 
 _COPPER_LAYER = re.compile(r"F\.Cu|B\.Cu|In\d+\.Cu")
-
-# The result keys of the design rules, and the heads that KiCad 5 wrote.
-_SETUP_RULES = {"trace_min": "trace_min", "via_min": "via_min_size", "clearance": "trace_clearance"}
-
 
 def _net(item: Node, nets: dict[str, str]) -> str:
     """Return the net name of a track, a via or a zone.
@@ -141,11 +138,16 @@ class PCBParser:
 
         Raises:
             SExprError: The file is not a valid S-expression.
+            KicadFileError: The board is not of KiCad 8 to 10.
         """
         if self._data is not None:
             return self._data
 
-        root = parse(read_as_kicad(self.file_path))
+        text = read_as_kicad(self.file_path)
+        # The version first: a board of an other KiCad needs no parse, and its error
+        # is the version, not a syntax error of its format.
+        check_board_version(header_version(text, "kicad_pcb"))
+        root = parse(text)
         # The board items, by their head. A large board has some 100 000.
         items: dict[str, list[Node]] = defaultdict(list)
         for item in root.children():
@@ -159,7 +161,6 @@ class PCBParser:
             "tracks": self._parse_tracks(items["segment"], items["arc"], nets),
             "vias": self._parse_vias(items["via"], nets),
             "zones": self._parse_zones(items["zone"], nets),
-            "setup": self._parse_setup(root),
         }
 
         return self._data
@@ -182,7 +183,7 @@ class PCBParser:
         }
 
     def _parse_footprints(self, items: list[Node]) -> list[dict[str, Any]]:
-        """Parse the footprints (KiCad 6 and later)."""
+        """Parse the footprints."""
         footprints = []
         for footprint in items:
             at = footprint.first("at")
@@ -267,25 +268,6 @@ class PCBParser:
             })
         return zones
 
-    def _parse_setup(self, root: Node) -> dict[str, Any]:
-        """Parse the design rules of the setup section.
-
-        KiCad 6 and later keep the design rules in the project file, thus the
-        defaults stay for these boards. KiCad 5 wrote them in (setup ...).
-        """
-        setup = {
-            "trace_min": 0.2,
-            "via_min": 0.4,
-            "clearance": 0.15,
-        }
-        section = root.first("setup")
-        if section:
-            for key, head in _SETUP_RULES.items():
-                item = section.first(head)
-                if item:
-                    setup[key] = item.number(0, setup[key])
-        return setup
-
     def get_footprints(self) -> list[PCBFootprint]:
         """Get all footprints from PCB.
 
@@ -303,20 +285,6 @@ class PCBParser:
         """
         data = self._parse_file()
 
-        # Calculate board dimensions from footprint positions
-        footprints = self.get_footprints()
-        if footprints:
-            x_coords = [f.position[0] for f in footprints]
-            y_coords = [f.position[1] for f in footprints]
-            min_x, max_x = min(x_coords), max(x_coords)
-            min_y, max_y = min(y_coords), max(y_coords)
-            # Add margin for board edge
-            margin = 5.0
-            width = max_x - min_x + (2 * margin)
-            height = max_y - min_y + (2 * margin)
-        else:
-            width = height = 0.0
-
         # Calculate total pads from pad_count field
         total_pads = sum(f.get("pad_count", 0) for f in data["footprints"])
 
@@ -326,8 +294,6 @@ class PCBParser:
             "total_tracks": len(data["tracks"]),
             "total_vias": len(data["vias"]),
             "total_zones": len(data["zones"]),
-            "board_width": width,
-            "board_height": height,
             "layers": data["general"]["layers"],
             "thickness": data["general"]["thickness"],
         }

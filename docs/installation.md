@@ -10,7 +10,7 @@
   (`list_pcb_footprints`, `get_pcb_statistics`, `find_tracks_by_net`,
   `analyze_pcb_nets`, `analyze_pcb_signal_integrity`, `analyze_pcb_power_integrity`).
   These tools import `pcbnew` in the server process. Without it, they read the board
-  file as text: they give approximate track lengths and no design rules.
+  file as text: they give no design rules and no board outline.
 
 Other tools also use `pcbnew`: `get_library_footprint`, `check_pin_pad_mapping`,
 `check_schematic_pin_pad_mapping`, `check_library_links` and

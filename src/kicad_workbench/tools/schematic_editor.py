@@ -65,7 +65,12 @@ from ..parsers.sexpr import (
 )
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
-from ..utils.kicad_lock import file_stamp, writable_schematic_version, write_schematic
+from ..utils.kicad_lock import (
+    file_stamp,
+    writable_schematic_version,
+    write_in_thread,
+    write_schematic,
+)
 from ..utils.kicad_text import read_for_write
 from ..utils.library_lookup import LibraryLookupError, find_library_symbol
 from ..utils.sch_hierarchy import (
@@ -939,10 +944,12 @@ async def add_hierarchical_label(
             f'\t\t(uuid "{uuid.uuid4()}")\n'
             f"\t)\n"
         )
-        open_error = write_schematic(path, _append_top_level(content, entry), stamp)
+        open_error, saved = await write_in_thread(
+            write_schematic, path, _append_top_level(content, entry), stamp
+        )
         if open_error:
             return open_error
-        return f"✅ Hierarchical label '{name}' ({shape}) {where} angle {angle}°{note}"
+        return f"✅ Hierarchical label '{name}' ({shape}) {where} angle {angle}°{note}{saved}"
     except Exception as e:
         return error_answer(e, "Error adding hierarchical label")
 
@@ -1005,10 +1012,12 @@ async def add_global_label(
             f"\t\t)\n"
             f"\t)\n"
         )
-        open_error = write_schematic(path, _append_top_level(content, entry), stamp)
+        open_error, saved = await write_in_thread(
+            write_schematic, path, _append_top_level(content, entry), stamp
+        )
         if open_error:
             return open_error
-        return f"✅ Global label '{label_name}' ({shape}) {where} angle {angle}°{note}"
+        return f"✅ Global label '{label_name}' ({shape}) {where} angle {angle}°{note}{saved}"
     except Exception as e:
         return error_answer(e, "Error adding global label")
 
@@ -1218,7 +1227,7 @@ async def add_component_from_library(
             off_grid_text = _off_grid_text(off_grid, settings, installed)
         off_grid_text += _no_connect_text(off_grid_nc, settings, version)
 
-        open_error = write_schematic(path, content, stamp)
+        open_error, saved = await write_in_thread(write_schematic, path, content, stamp)
         if open_error:
             return open_error
 
@@ -1251,7 +1260,7 @@ async def add_component_from_library(
 **Sheet:** {sheet.shown}
 **Symbol definition:** {definition}
 **Pins:** {len(pins)} pins detected
-{_junction_report(items)}{off_grid_text}{_grid_note(settings)}{shared}
+{_junction_report(items)}{off_grid_text}{_grid_note(settings)}{shared}{saved}
 """
 
     except Exception as e:
@@ -1369,7 +1378,7 @@ async def add_wire(
             if off_grid:
                 installed = await _installed_off_grid(settings, None, version)
                 off_grid_text = _off_grid_text(off_grid, settings, installed)
-        open_error = write_schematic(path, content, stamp)
+        open_error, saved = await write_in_thread(write_schematic, path, content, stamp)
         if open_error:
             return open_error
 
@@ -1388,7 +1397,7 @@ async def add_wire(
             )
         text += _junction_report(sheet)
         if isinstance(settings, _NoGrid):
-            return text + _grid_note(settings)
+            return text + _grid_note(settings) + saved
         grid = settings.connection_grid
         moves = [
             f"{_shown(old)} to {_shown(new)}"
@@ -1433,7 +1442,7 @@ async def add_wire(
                 "connection point of the sheet, thus the wire connects there: "
                 f"{', '.join(_shown(point) for point in connects)}.\n"
             )
-        return text + off_grid_text + _grid_note(settings)
+        return text + off_grid_text + _grid_note(settings) + saved
     except Exception as e:
         return error_answer(e, "Error adding wire")
 
@@ -1479,9 +1488,9 @@ async def add_label(
         )
         content = _append_top_level(content, label_entry)
 
-        open_error = write_schematic(path, content, stamp)
+        open_error, saved = await write_in_thread(write_schematic, path, content, stamp)
         if open_error:
             return open_error
-        return f"✅ Label '{text}' added {where}{note}"
+        return f"✅ Label '{text}' added {where}{note}{saved}"
     except Exception as e:
         return error_answer(e, "Error adding label")

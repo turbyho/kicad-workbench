@@ -23,7 +23,11 @@ def write_atomic(file: Path, data: str | bytes) -> None:
     temporary file, because a different server process can write the same file.
     After an error (for example a full disk at the write or at the flush of the
     close), the temporary file goes and the old file stays. The errors (OSError)
-    go to the caller."""
+    go to the caller.
+
+    Only for the cache files of the server, which the server can make again: no
+    flush to the disk, no copy of the permissions. A KiCad file goes through
+    file_save.save_file (the save of KiCad 10.0.7)."""
     file.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(data, bytes):
         temp = tempfile.NamedTemporaryFile("wb", dir=file.parent, suffix=".tmp", delete=False)

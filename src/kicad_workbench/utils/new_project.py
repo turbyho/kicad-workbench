@@ -29,6 +29,8 @@ from pathlib import Path
 
 from ..errors import InputError
 from ..parsers.kicad_versions import Release, kicad_release, version_triple
+from .file_save import AfterSaveError, save_file
+from .kicad_text import write_kicad_text
 from .library_tables import KicadEnvironment, expand, kicad_documents_dir
 
 PROJECT_EXT = ".kicad_pro"
@@ -552,7 +554,8 @@ def ensure_default_template(
     and default.kicad_pro. KiCad makes them at each "New Project".
 
     Returns:
-        (the template folder, True when the tool made a file of it, None), or
+        (the template folder, True when the tool made a file of it, None or a
+        warning: the file has its content, but a step after the save failed), or
         (None, False, the reason) when KiCad has no template "default": KiCad 8
         and 9, no usable KICAD_USER_TEMPLATE_DIR (10.0.0 to 10.0.4), or a file
         of the template that cannot be written (KiCad then gives an invalid
@@ -564,23 +567,26 @@ def ensure_default_template(
             return None, False, 'KiCad 8 and 9 have no template "default"'
         return None, False, "KICAD_USER_TEMPLATE_DIR is empty or holds an unresolved variable"
     made = False
+    saved: list[str] = []
     try:
         info = folder / META_DIR / "info.html"
         if not info.is_file():
             info.parent.mkdir(parents=True, exist_ok=True)
-            info.write_text(
+            # wxFFile "w": text mode, as write_kicad_text.
+            _save_new(
+                info,
                 "<html><head><title>Default</title></head><body>"
                 "<h3>Default KiCad project template.</h3></body></html>",
-                encoding="utf-8",
+                saved,
             )
             made = True
         project_file = folder / f"{DEFAULT_TEMPLATE}{PROJECT_EXT}"
         if not project_file.is_file():
-            project_file.write_text(default_project_file(rules), encoding="utf-8")
+            _save_new(project_file, default_project_file(rules), saved)
             made = True
     except OSError as e:
         return None, made, f"{folder} cannot be made ({e.strerror or e})"
-    return folder, made, None
+    return folder, made, " ".join(saved) or None
 
 
 @dataclass
@@ -722,15 +728,33 @@ def write_project(rules: Rules, plan: Plan) -> tuple[list[Path], list[str]]:
                     f"KiCad cannot copy {source} ({e.strerror or e}): the project file is "
                     "the empty project file, as KiCad writes it."
                 )
-            target.write_bytes(EMPTY_PROJECT_FILE.encode("utf-8"))
+            _save_new(target, EMPTY_PROJECT_FILE.encode("utf-8"), warnings)
         written.append(target)
+    # CreateNewProject writes the stub files with wxFFile "wb": LF on each system.
     if plan.write_schematic:
-        plan.path(".kicad_sch").write_bytes(schematic_stub(rules).encode("utf-8"))
+        _save_new(plan.path(".kicad_sch"), schematic_stub(rules).encode("utf-8"), warnings)
         written.append(plan.path(".kicad_sch"))
     if plan.write_board:
-        plan.path(".kicad_pcb").write_bytes(board_stub(rules).encode("utf-8"))
+        _save_new(plan.path(".kicad_pcb"), board_stub(rules).encode("utf-8"), warnings)
         written.append(plan.path(".kicad_pcb"))
     return written, warnings
+
+
+def _save_new(path: Path, data: str | bytes, warnings: list[str]) -> None:
+    """Save a file of the new project: a text in text mode (write_kicad_text), bytes as
+    they are. An error after the save (the file has its content) goes into the
+    warnings, and the tool makes the other files.
+
+    Raises:
+        OSError: The file cannot be written.
+    """
+    try:
+        if isinstance(data, str):
+            write_kicad_text(path, data)
+        else:
+            save_file(path, data)
+    except AfterSaveError as e:
+        warnings.append(str(e))
 
 
 def copy_file(rules: Rules, source: Path, target: Path, writable: bool = True) -> str | None:

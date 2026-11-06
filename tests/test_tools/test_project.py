@@ -378,6 +378,47 @@ class TestTemplateProject:
         assert "Project Created" in result
         assert "⚠️ The tool did not write the title block of shield.kicad_sch" in result
 
+    def test_a_folder_flush_error_after_the_title_block(self, tmp_path, kicad, monkeypatch):
+        """The schematic has the title block: the note must not say that it does not."""
+        from kicad_workbench.utils import file_save
+
+        kicad("9.0.9")
+        written = []
+
+        def write(path, content):
+            written.append(path)
+            raise file_save.AfterSaveError(f"The tool wrote {path}, but it could not flush")
+
+        monkeypatch.setattr(project, "write_kicad_text", write)
+        result = make(tmp_path / "proj", "shield")
+        assert "Project Created" in result
+        assert f"⚠️ The tool wrote {written[0]}, but it could not flush" in result
+        assert "did not write the title block" not in result
+
+    def test_an_error_after_a_save_does_not_stop_the_project(self, tmp_path, kicad, monkeypatch):
+        """The project file has its content: the tool makes the other files."""
+        from kicad_workbench.utils import file_save, new_project
+
+        kicad("9.0.9")
+        real_save = new_project.save_file
+
+        def save(path, data):
+            real_save(path, data)
+            if path.suffix == ".kicad_pro":
+                raise file_save.AfterSaveError(f"The tool wrote {path}, but it could not flush")
+
+        monkeypatch.setattr(new_project, "save_file", save)
+        monkeypatch.setattr(new_project, "copy_file", _no_copy)
+        result = make(tmp_path / "proj", "shield")
+        assert "Project Created" in result, result
+        assert "⚠️ The tool wrote" in result and "shield.kicad_pro, but it could not flush" in result
+        for ext in (".kicad_pro", ".kicad_sch", ".kicad_pcb"):
+            assert (tmp_path / "proj" / f"shield{ext}").is_file()
+
+
+def _no_copy(rules, source, target, writable=True):
+    raise FileNotFoundError("no kicad.kicad_pro")
+
 
 def _kicad_10_installed() -> bool:
     if find_kicad_cli() is None:

@@ -325,3 +325,72 @@ class TestWriteToolsRefuseOpenFiles:
         result = asyncio.run(setup_pcb_layout(str(root), overwrite=True))
         assert result.startswith("❌ KiCad has the board open"), result
         assert pcb.read_text(encoding="utf-8") == "(kicad_pcb)"
+
+
+class TestWriteInThreads:
+    """The tools write in threads (the save flushes the file to the disk)."""
+
+    def test_two_writes_of_one_stamp(self, tmp_path, monkeypatch):
+        # Two tools read the same stamp. Before, the check and the write ran on the
+        # event loop with no await between them: the second tool got the refusal.
+        # In threads, the lock keeps it so: no change is lost.
+        import threading
+        import time
+
+        from kicad_workbench.utils import kicad_lock
+
+        path = tmp_path / "a.kicad_sch"
+        path.write_text("(kicad_sch)", encoding="utf-8")
+        stamp = file_stamp(path)
+        real_write = kicad_lock.write_kicad_text
+
+        def slow_write(target, content):
+            time.sleep(0.1)  # the time of the fsync
+            real_write(target, content)
+
+        monkeypatch.setattr(kicad_lock, "write_kicad_text", slow_write)
+        start = threading.Barrier(2)
+        results = []
+
+        def write(content):
+            start.wait()
+            results.append(kicad_lock._guarded_write(path, content, stamp, None))
+
+        threads = [threading.Thread(target=write, args=(c,)) for c in ("(kicad_sch 1)", "(k 22)")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert results.count(None) == 1, results
+        assert [r for r in results if r][0].startswith("❌ The file"), results
+
+    def test_an_error_after_the_save_is_a_warning(self, tmp_path):
+        from kicad_workbench.utils.file_save import AfterSaveError
+        from kicad_workbench.utils.kicad_lock import write_in_thread
+
+        def write(path, content, stamp):
+            raise AfterSaveError(f"The tool wrote {path}, but it could not flush")
+
+        path = tmp_path / "a.kicad_sch"
+        assert asyncio.run(write_in_thread(write, path, "", None)) == (
+            None,
+            f"\n\n⚠️ The tool wrote {path}, but it could not flush",
+        )
+
+    @pytest.mark.parametrize("call", WRITE_TOOLS)
+    def test_a_tool_gives_its_result_and_the_warning(self, board, call, monkeypatch):
+        # The change is in the file: an error ("❌") would let the model add it again.
+        from kicad_workbench.utils import kicad_lock
+        from kicad_workbench.utils.file_save import AfterSaveError
+
+        real_write = kicad_lock.write_kicad_text
+
+        def write(target, content):
+            real_write(target, content)
+            raise AfterSaveError(f"The tool wrote {target}, but it could not flush")
+
+        monkeypatch.setattr(kicad_lock, "write_kicad_text", write)
+        _, sub = board
+        result = asyncio.run(call(str(sub)))
+        assert result.startswith("✅"), result
+        assert result.rstrip().endswith(f"⚠️ The tool wrote {sub}, but it could not flush"), result

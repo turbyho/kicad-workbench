@@ -14,7 +14,7 @@ from ..parsers.kicad_versions import (
 )
 from ..server import mcp
 from ..utils.kicad_cli import decode_output, run_kicad_cli
-from ..utils.kicad_lock import check_board_not_open, file_stamp, write_board
+from ..utils.kicad_lock import check_board_not_open, file_stamp, write_board, write_in_thread
 from ..utils.kicad_python import KicadPythonError, board_text
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.tool_errors import error_answer
@@ -138,7 +138,7 @@ async def setup_pcb_layout(
             return "❌ pcbnew wrote a board with no file version. The tool did not write the board."
         warning = _version_warning(board_version, kicad, version)
 
-        open_error = write_board(pcb_path, pcb_content, stamp)
+        open_error, saved = await write_in_thread(write_board, pcb_path, pcb_content, stamp)
         if open_error:
             return open_error
 
@@ -156,7 +156,7 @@ async def setup_pcb_layout(
 Next steps:
 1. Import the netlist from the schematic (Update PCB from schematic)
 2. Place footprints and route connections
-3. Run DRC, then export Gerbers (export_gerber)
+3. Run DRC, then export Gerbers (export_gerber){saved}
 """
 
     except Exception as e:

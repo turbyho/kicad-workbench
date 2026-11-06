@@ -16,11 +16,15 @@ KiCad still runs, thus it also refuses the write for such a lock file. The
 error message tells how to remove it.
 """
 
+import asyncio
 import json
 import os
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from ..parsers.kicad_versions import KicadFileError, schematic_text_version
+from .file_save import AfterSaveError
 from .kicad_text import write_kicad_text
 from .sch_hierarchy import (
     PRO_SUFFIX,
@@ -147,6 +151,21 @@ def check_project_not_open(file_path: str | Path) -> str | None:
 
 FileStamp = tuple[int, int] | None
 
+# The tools write in threads (the save flushes the file to the disk). A lock for
+# each file keeps the check of the stamp and the write together: of two tools that
+# read the same stamp, the second gets the refusal, and no change is lost. The
+# writes of different files do not wait for each other.
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock(path: Path) -> threading.Lock:
+    """The lock of the file (also through a symbolic link: the save writes the file
+    that the link points to)."""
+    key = os.path.normcase(os.path.realpath(path))
+    with _WRITE_LOCKS_GUARD:
+        return _WRITE_LOCKS.setdefault(key, threading.Lock())
+
 
 def file_stamp(path: Path) -> FileStamp:
     """Return the modification time and the size of a file, or None if no file.
@@ -168,18 +187,38 @@ def _guarded_write(
 ) -> str | None:
     if open_error:
         return open_error
-    if file_stamp(path) != stamp:
-        return (
-            f"❌ The file {path} changed after this tool read it. "
-            "Thus the tool did not write the file, to keep that change. "
-            "Do this operation again."
-        )
-    # KiCad reads and writes its files as UTF-8 on each platform. The locale
-    # encoding (on Windows the code page of the region, for example cp1252, cp936
-    # or cp1256) cannot encode all characters, and KiCad reads its bytes
-    # incorrectly.
-    write_kicad_text(path, content)
+    with _write_lock(path):
+        if file_stamp(path) != stamp:
+            return (
+                f"❌ The file {path} changed after this tool read it. "
+                "Thus the tool did not write the file, to keep that change. "
+                "Do this operation again."
+            )
+        # KiCad reads and writes its files as UTF-8 on each platform. The locale
+        # encoding (on Windows the code page of the region, for example cp1252, cp936
+        # or cp1256) cannot encode all characters, and KiCad reads its bytes
+        # incorrectly.
+        write_kicad_text(path, content)
     return None
+
+
+async def write_in_thread(
+    write: Callable[[Path, str, FileStamp], str | None], path: Path, content: str, stamp: FileStamp
+) -> tuple[str | None, str]:
+    """Run write_schematic() or write_board() off the event loop: the save flushes
+    the file to the disk, which can take long.
+
+    Returns:
+        (the error of the write or None, a warning). The warning is "" or a
+        paragraph for the answer of the tool: the file has the new content, but a
+        step after the save failed (AfterSaveError). The tool then gives its
+        result with the warning, not an error: the change is in the file, and an
+        other call would make it two times.
+    """
+    try:
+        return await asyncio.to_thread(write, path, content, stamp), ""
+    except AfterSaveError as e:
+        return None, f"\n\n⚠️ {e}"
 
 
 def writable_schematic_version(path: Path, content: str) -> int | str:

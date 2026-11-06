@@ -76,6 +76,9 @@ example kiutils). The license of this project is MIT.
   round-trip parser and serializer, with the lexer rules of KiCad), in the format of
   the file version. Do not use regular expressions for KiCad files.
 - Before each write, `utils/kicad_lock.py` refuses a file that KiCad has open.
+- The server saves a KiCad file as KiCad 10.0.7 does (`utils/file_save.py`): a
+  temporary file in the same folder, then a rename over the file. After an error,
+  the file has its old content, not a part of the new content.
 - A write through `pcbnew` or kicad-cli is an edit by KiCad. When it writes a newer
   version than the project has, the tool gives a warning.
 
@@ -125,3 +128,4 @@ src/kicad_workbench/
 | `utils/kicad_cli.py`, `kicad_python.py` | kicad-cli and the Python of KiCad as subprocesses |
 | `utils/library_tables.py`, `library_lookup.py`, `library_index.py` | Library tables, path variables, library search |
 | `utils/kicad_lock.py`, `kicad_text.py`, `user_files.py` | Lock files, text encoding, the cache folder |
+| `utils/file_save.py` | The save of a file as KiCad 10.0.7 saves it (a temporary file, then a rename) |

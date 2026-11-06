@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 from ..errors import InputError
+from .file_save import save_file
 
 # One S-expression token, as DSNLEXER reads it: a parenthesis, a quoted string
 # with backslash escapes, or a bare token. A string starts only at the start of
@@ -106,11 +107,15 @@ def write_kicad_text(path: Path, content: str) -> None:
 
     KiCad writes its files in text mode ("wt"), thus with CRLF on Windows. The
     function encodes the text before it opens the file: text that is not valid
-    (a lone surrogate) gives an error, and the file stays as it was.
+    (a lone surrogate) gives an error, and the file stays as it was. The save is
+    the save of KiCad 10.0.7 (file_save.save_file): after an error, the file has
+    its old content, not a part of the new content.
 
     Raises:
         InputError: The text holds a lone surrogate (from an argument of a tool).
-        OSError: The file cannot be written.
+        OSError: The file cannot be written. The file did not change.
+        AfterSaveError: The file has the new content, but its folder is not
+            flushed to the disk.
     """
     try:
         data = content.encode("utf-8")
@@ -120,7 +125,7 @@ def write_kicad_text(path: Path, content: str) -> None:
         ) from e
     if os.linesep != "\n":
         data = data.replace(b"\n", os.linesep.encode("ascii"))
-    path.write_bytes(data)
+    save_file(path, data)
 
 
 # A JSON string, a comment to the end of the line, or a block comment.

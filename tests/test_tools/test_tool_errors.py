@@ -7,11 +7,12 @@ gives its exit code and its output, not a guess.
 
 import asyncio
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from kicad_workbench.errors import InputError, WorkbenchError
+from kicad_workbench.errors import InputError
 from kicad_workbench.parsers.kicad_versions import KicadFileError
 from kicad_workbench.parsers.netlist_parser import NetlistParser
 from kicad_workbench.tools import (
@@ -24,7 +25,7 @@ from kicad_workbench.tools import (
 )
 from kicad_workbench.utils.kicad_cli import CliExport, KicadCliError
 from kicad_workbench.utils.sch_hierarchy import AmbiguousRootError
-from kicad_workbench.utils.tool_errors import error_answer
+from kicad_workbench.utils.tool_errors import EXPECTED_ERRORS, error_answer
 
 SCH = '(kicad_sch (version 20250114) (generator "eeschema"))\n'
 
@@ -213,6 +214,9 @@ def _error_classes():
     for info in pkgutil.walk_packages(kicad_workbench.__path__, "kicad_workbench."):
         if info.name in ("kicad_workbench.__main__", "kicad_workbench.version_check"):
             continue
+        # The calls of Windows (ctypes.WinDLL) load only on Windows.
+        if info.name.endswith("_windows") and sys.platform != "win32":
+            continue
         module = importlib.import_module(info.name)
         for _name, value in inspect.getmembers(module, inspect.isclass):
             if issubclass(value, Exception) and value.__module__ == info.name:
@@ -220,14 +224,15 @@ def _error_classes():
     return found
 
 
-def test_each_error_of_the_modules_is_a_workbench_error():
-    # A new error class of a module must be a WorkbenchError: else the tools
-    # give it as a defect (with the traceback).
+def test_each_error_of_the_modules_is_an_expected_error():
+    # A new error class of a module must be an expected error (a WorkbenchError, or
+    # an OSError as AfterSaveError): else the tools give it as a defect (with the
+    # traceback).
     classes = _error_classes()
     assert len(classes) >= 15
     # _RefusedError of tools/project.py holds the full answer of the tool, and the
     # tool catches it itself.
-    others = [c.__qualname__ for c in classes if not issubclass(c, WorkbenchError)]
+    others = [c.__qualname__ for c in classes if not issubclass(c, EXPECTED_ERRORS)]
     assert others == ["_RefusedError"]
 
 

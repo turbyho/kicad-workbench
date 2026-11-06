@@ -14,6 +14,7 @@ from pathlib import Path
 from ..errors import InputError, WorkbenchError
 from ..parsers.sexpr import parse, quote
 from ..server import mcp
+from ..utils.file_save import AfterSaveError
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.kicad_lock import (
     check_board_not_open,
@@ -171,6 +172,8 @@ def _make_project(
             )
         elif made:
             notes.append(f'⚠️ The tool made a part of the template "default": {reason}.')
+        if default_dir is not None and reason:
+            notes.append(f"⚠️ {reason}")
         pages = user_template_dir(rule, env) or system_template_dir(rule, env)
         if default_dir is None and (rule.version < (10, 0, 5) or not pages):
             # NewProject: newProjectDirectory and CreateNewProject, with no template.
@@ -228,6 +231,8 @@ def _make_project(
         try:
             content = _set_title_block(read_for_write(schematic), title, company, date)
             write_kicad_text(schematic, content)
+        except AfterSaveError as e:  # the file has the title block
+            notes.append(f"⚠️ {e}")
         except (WorkbenchError, OSError) as e:
             notes.append(f"⚠️ The tool did not write the title block of {schematic.name}: {e}")
     names = [str(p.relative_to(path)) + ("/" if p.is_dir() else "") for p in written]

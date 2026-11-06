@@ -7,6 +7,7 @@ This module provides device tree source (.dts) generation capabilities including
 - SOC-specific device tree generation
 """
 
+import asyncio
 from pathlib import Path
 
 from jinja2 import Template
@@ -14,6 +15,7 @@ from jinja2 import Template
 from ..parsers.kicad_fields import with_field_rules_note
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
+from ..utils.file_save import AfterSaveError
 from ..utils.kicad_text import write_kicad_text
 from ..utils.tool_errors import error_answer
 
@@ -518,8 +520,13 @@ Please specify a supported SOC family."""
 
             # UTF-8 on each platform, not the locale encoding (on Windows the code
             # page of the region). write_kicad_text encodes the text before the file
-            # opens, thus an encode error keeps the old file.
-            write_kicad_text(output, device_tree)
+            # opens, thus an encode error keeps the old file. Off the event loop: the
+            # save flushes the file to the disk.
+            saved = ""
+            try:
+                await asyncio.to_thread(write_kicad_text, output, device_tree)
+            except AfterSaveError as e:  # the file has the device tree
+                saved = f"\n\n⚠️ {e}"
 
             return f"""✅ **Device Tree Generated Successfully**
 
@@ -541,7 +548,7 @@ The device tree source file has been generated and saved to the specified locati
 1. Review and customize the generated device tree
 2. Compile with device tree compiler: `dtc -I dts -O dtb -o output.dtb {output_path}`
 3. Test on target hardware
-4. Iterate as needed"""
+4. Iterate as needed{saved}"""
 
         else:
             # Return device tree content directly

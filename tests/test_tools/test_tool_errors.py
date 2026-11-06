@@ -169,10 +169,9 @@ def test_hierarchical_nets_with_a_filter_that_is_not_a_regular_expression(monkey
     path = sch.with_suffix(".xml")
     path.write_text('<export version="E"><components/><nets/></export>', encoding="utf-8")
 
-    async def fake_ensure_netlist(_sch_path):
-        return path
-
-    monkeypatch.setattr(pin_analysis, "_ensure_netlist", fake_ensure_netlist)
+    monkeypatch.setattr(
+        netlist, "export_with_kicad_cli", lambda *args: CliExport(path.read_bytes(), [])
+    )
     result = asyncio.run(hierarchical_analysis.analyze_hierarchical_nets(str(sch), "(GND"))
     assert result.startswith("❌ The filter pattern '(GND' is not a regular expression:"), result
 

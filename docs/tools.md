@@ -47,6 +47,12 @@ below. Use their result as a start for a review, not as a fact.
 The netlist of kicad-cli is the most exact source for the connections. Use it before
 the schematic tools when the connection is important.
 
+The netlist tools above read the file of `generate_netlist`: make it again after a
+change of the schematic. The pin, device tree, hierarchy and search tools, and
+`get_symbol_details`, make the netlist with kicad-cli at each call. Thus they always
+give the current state of the schematic, and they need kicad-cli. For a large
+project, each call takes some seconds.
+
 ## Boards
 
 These tools import `pcbnew` in the server process. Without `pcbnew`, they read the

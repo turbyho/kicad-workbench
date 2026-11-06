@@ -6,6 +6,8 @@ import sys
 import pytest
 
 from kicad_workbench.tools import device_tree, pin_analysis
+from kicad_workbench.tools import netlist as netlist_tools
+from kicad_workbench.utils.kicad_cli import CliExport
 
 from .locale_env import can_name, non_utf8_env, run_python
 
@@ -19,10 +21,9 @@ def no_kicad(tmp_path, monkeypatch):
     netlist = tmp_path / "board.xml"
     netlist.write_text(NETLIST, encoding="utf-8")
 
-    async def fake_ensure_netlist(_sch_path):
-        return netlist
-
-    monkeypatch.setattr(pin_analysis, "_ensure_netlist", fake_ensure_netlist)
+    monkeypatch.setattr(
+        netlist_tools, "export_with_kicad_cli", lambda *args: CliExport(netlist.read_bytes(), [])
+    )
 
 
 def _generate(sch, output):
@@ -80,7 +81,9 @@ def test_text_that_is_not_valid_does_not_empty_the_output(tmp_path, no_kicad):
 _IN_LOCALE = """
 import asyncio
 from pathlib import Path
-from kicad_workbench.tools import device_tree, pin_analysis
+from kicad_workbench.tools import device_tree
+from kicad_workbench.tools import netlist as netlist_tools
+from kicad_workbench.utils.kicad_cli import CliExport
 
 directory, name, sch_text, netlist_text = ARGS
 sch = Path(directory) / f"{name}.kicad_sch"
@@ -89,10 +92,7 @@ netlist = Path(directory) / "board.xml"
 netlist.write_text(netlist_text, encoding="utf-8")
 output = Path(directory) / "board.dts"
 
-async def fake_ensure_netlist(_sch_path):
-    return netlist
-
-pin_analysis._ensure_netlist = fake_ensure_netlist
+netlist_tools.export_with_kicad_cli = lambda *args: CliExport(netlist.read_bytes(), [])
 message = asyncio.run(device_tree.generate_device_tree(str(sch), "stm32f4", str(output)))
 result([message, output.read_bytes().hex() if output.exists() else ""])
 """
@@ -124,10 +124,9 @@ def _conflicts(tmp_path, monkeypatch, nets: str) -> str:
         encoding="utf-8",
     )
 
-    async def fake_ensure_netlist(_sch_path):
-        return netlist
-
-    monkeypatch.setattr(pin_analysis, "_ensure_netlist", fake_ensure_netlist)
+    monkeypatch.setattr(
+        netlist_tools, "export_with_kicad_cli", lambda *args: CliExport(netlist.read_bytes(), [])
+    )
     sch = tmp_path / "c.kicad_sch"
     sch.write_text(SCH, encoding="utf-8")
     return asyncio.run(pin_analysis.detect_pin_conflicts(str(sch)))

@@ -12,7 +12,6 @@ from pathlib import Path
 from jinja2 import Template
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
 from ..utils.kicad_text import write_kicad_text
@@ -390,16 +389,11 @@ async def generate_device_tree(
 
 Please specify a supported SOC family."""
 
-        # Obtain a netlist (next to schematic, in temp, or freshly generated).
-        # generate_netlist writes to the temp dir — NOT next to the schematic —
-        # so we must look there too (previously this always raised FileNotFoundError).
-        from .pin_analysis import _ensure_netlist
+        from .netlist import current_netlist
 
-        netlist_path = await _ensure_netlist(sch_path)
-
-        # Parse netlist, then the schematic with the KiCad of the netlist (the pins of
+        # The netlist that kicad-cli writes now, then the schematic with the KiCad of the netlist (the pins of
         # the components: SchematicParser._component_pins).
-        netlist_parser = NetlistParser(str(netlist_path))
+        netlist_parser = await current_netlist(sch_path)
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract device tree data
@@ -601,11 +595,10 @@ async def extract_gpio_config(
             return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Obtain netlist
-        from .pin_analysis import STM32_PIN, _ensure_netlist
+        from .netlist import current_netlist
+        from .pin_analysis import STM32_PIN
 
-        netlist_path = await _ensure_netlist(sch_path)
-
-        netlist_parser = NetlistParser(str(netlist_path))
+        netlist_parser = await current_netlist(sch_path)
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # pin number -> name from schematic lib_symbols
@@ -737,11 +730,9 @@ async def extract_i2c_devices(
             return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Obtain netlist
-        from .pin_analysis import _ensure_netlist
+        from .netlist import current_netlist
 
-        netlist_path = await _ensure_netlist(sch_path)
-
-        netlist_parser = NetlistParser(str(netlist_path))
+        netlist_parser = await current_netlist(sch_path)
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract I2C devices
@@ -843,11 +834,9 @@ async def extract_spi_devices(
             return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Obtain netlist
-        from .pin_analysis import _ensure_netlist
+        from .netlist import current_netlist
 
-        netlist_path = await _ensure_netlist(sch_path)
-
-        netlist_parser = NetlistParser(str(netlist_path))
+        netlist_parser = await current_netlist(sch_path)
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract SPI devices

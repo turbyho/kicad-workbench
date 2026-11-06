@@ -63,7 +63,8 @@ class NetlistParser:
             FileNotFoundError: If file doesn't exist
             InputError: If file is not a .xml file
         """
-        self.file_path = Path(file_path)
+        self.file_path: Path | None = Path(file_path)
+        self._origin = str(self.file_path)
         if not self.file_path.exists():
             raise FileNotFoundError(f"Netlist file not found: {file_path}")
 
@@ -74,10 +75,16 @@ class NetlistParser:
         self._text: bytes | None = None
 
     @classmethod
-    def from_bytes(cls, data: bytes, name: str = "netlist.xml") -> "NetlistParser":
-        """Return a parser of the data of an XML netlist (for example of kicad-cli)."""
+    def from_bytes(cls, data: bytes, origin: str = "of kicad-cli") -> "NetlistParser":
+        """Return a parser of the data of an XML netlist (for example of kicad-cli).
+
+        Args:
+            origin: The origin of the data for the messages ("The netlist <origin>
+                is not valid XML"), for example "of kicad-cli for <schematic>".
+        """
         parser = cls.__new__(cls)
-        parser.file_path = Path(name)
+        parser.file_path = None  # no file: the origin names the data
+        parser._origin = origin
         parser._data = None
         parser._text = data
         return parser
@@ -98,7 +105,7 @@ class NetlistParser:
                 else ET.parse(self.file_path).getroot()
             )
         except ET.ParseError as e:
-            raise InputError(f"The netlist {self.file_path} is not valid XML: {e}") from e
+            raise InputError(f"The netlist {self._origin} is not valid XML: {e}") from e
 
         # <design><tool>Eeschema 10.0.6</tool>: the KiCad that wrote the netlist.
         tool = root.findtext("design/tool") or ""

@@ -3,7 +3,6 @@
 from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
 from ..utils.tool_errors import error_answer
@@ -52,7 +51,7 @@ async def trace_hierarchical_connection(
         Complete connection trace through hierarchy
     """
     try:
-        from .pin_analysis import _ensure_netlist
+        from .netlist import current_netlist
 
         parser = SchematicParser(file_path)
         sheets = parser.get_sheets()
@@ -81,9 +80,7 @@ async def trace_hierarchical_connection(
         # The authoritative pin<->net map lives in the netlist. SchematicParser
         # nets carry no pin list (SchematicNet.pins is always empty), so tracing
         # via them always reported "no connections".
-        netlist_path = await _ensure_netlist(Path(file_path))
-
-        nl = NetlistParser(str(netlist_path))
+        nl = await current_netlist(Path(file_path))
         comp = nl.get_components().get(reference)
         if not comp or not comp.pins:
             lines.append("No connections found for this component.")
@@ -135,14 +132,12 @@ async def analyze_hierarchical_nets(
     try:
         import re
 
-        from .pin_analysis import _ensure_netlist
+        from .netlist import current_netlist
 
         parser = SchematicParser(file_path)
         sheets = parser.get_sheets()
 
-        netlist_path = await _ensure_netlist(Path(file_path))
-
-        nl = NetlistParser(str(netlist_path))
+        nl = await current_netlist(Path(file_path))
 
         # docstring promises a regex; honour it (was a plain substring check).
         try:

@@ -74,6 +74,30 @@ def _write_netlist_sync(sch_path: Path) -> tuple[Path, Path | None]:
     return netlist_path, root
 
 
+def netlist_of(sch_path: Path) -> NetlistParser:
+    """Return the netlist of the schematic as kicad-cli writes it now.
+
+    The tools that use the nets read the files of the schematic at each call: a
+    netlist file of an earlier export (of the cache, of the schematic editor, or
+    of an other project with the same sheet name) can be old. The netlist stays
+    in memory: no file of an other tool call can change it. For a sub-sheet, it
+    is the netlist of the root schematic (export_netlist). The function blocks:
+    run it off the event loop (current_netlist).
+
+    Raises:
+        AmbiguousRootError: More than one root schematic holds the sheet.
+        NetlistError: kicad-cli is not there or cannot run, did not stop in
+            time, or did not write the netlist.
+    """
+    data, root = export_netlist(sch_path)
+    return NetlistParser.from_bytes(data, f"of kicad-cli for {root or sch_path}")
+
+
+async def current_netlist(sch_path: Path) -> NetlistParser:
+    """netlist_of off the event loop."""
+    return await asyncio.to_thread(netlist_of, sch_path)
+
+
 async def write_netlist(sch_path: Path) -> tuple[Path, Path | None]:
     """Write the netlist of a schematic (export_netlist) into netlist_cache_path().
 

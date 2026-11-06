@@ -6,14 +6,13 @@ from pathlib import Path
 
 from ..errors import InputError
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser, unknown_alternate_note
 from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic
 from ..utils.tool_errors import error_answer
-from .netlist import NetlistError, export_netlist
+from .netlist import NetlistError, netlist_of
 
 
 @mcp.tool()
@@ -96,14 +95,13 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
     alternate of a pin), sorted by StrNumCmp as KiCad sorts the pins.
     """
     try:
-        data, _root = export_netlist(file_path)
+        netlist = netlist_of(file_path)
     except (AmbiguousRootError, NetlistError) as e:
         return None, f"kicad-cli gives no netlist ({e})"
-    netlist = NetlistParser.from_bytes(data)
     try:
         component = netlist.get_components().get(reference)
     except InputError as e:  # not XML
-        return None, f"the netlist of kicad-cli is not valid XML ({e.__cause__})"
+        return None, str(e)
     if component is None:
         return None, f"the netlist of kicad-cli has no pin of {reference}"
     pins = [

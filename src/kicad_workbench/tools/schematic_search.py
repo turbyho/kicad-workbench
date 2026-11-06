@@ -29,8 +29,7 @@ async def search_components_by_type(
     try:
         from pathlib import Path
 
-        from ..parsers.netlist_parser import NetlistParser
-        from .pin_analysis import _ensure_netlist
+        from .netlist import current_netlist
 
         parser = SchematicParser(file_path)
         components = parser.get_components()
@@ -43,8 +42,7 @@ async def search_components_by_type(
         # continues without it, and the answer tells it.
         net_note = ""
         try:
-            netlist_path = await _ensure_netlist(Path(file_path))
-            netlist_components = NetlistParser(str(netlist_path)).get_components()
+            netlist_components = (await current_netlist(Path(file_path))).get_components()
         except EXPECTED_ERRORS as e:  # also a netlist that is not XML (InputError)
             netlist_components = {}
             net_note = f"\n\n⚠️ The search did not use the nets of the components: {e}"

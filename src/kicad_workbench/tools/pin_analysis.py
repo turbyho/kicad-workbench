@@ -7,55 +7,14 @@ This module provides advanced pin analysis capabilities including:
 - MCU-specific pin mapping support
 """
 
-import asyncio
 import re
-import tempfile
 from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
-from ..utils.sch_hierarchy import find_root_schematic
 from ..utils.tool_errors import error_answer
-
-
-async def _ensure_netlist(sch_path: Path) -> Path:
-    """Find or generate a netlist for the given schematic.
-
-    Checks the schematic directory and the temp directory (legacy flat names
-    plus the per-schematic hashed cache name). If none exists, generates one
-    via kicad-cli (auto-redirects to root schematic for sub-sheets).
-
-    Returns:
-        The netlist file.
-
-    Raises:
-        AmbiguousRootError: More than one root schematic holds the sheet. A
-            netlist of the sheet alone does not have all nets.
-        NetlistError: kicad-cli did not write the netlist (the message tells why).
-    """
-    from .netlist import netlist_cache_path, write_netlist
-
-    # Candidate schematics: the given sheet and, for sub-sheets, the root
-    # schematic that write_netlist uses.
-    candidates: list[Path] = [sch_path]
-    root_sch = await asyncio.to_thread(find_root_schematic, sch_path)
-    if root_sch:
-        candidates.append(root_sch)
-
-    for cand in candidates:
-        for path in [
-            cand.parent / (cand.stem + ".xml"),  # GUI-exported next to sheet
-            Path(tempfile.gettempdir()) / (cand.stem + ".xml"),  # legacy flat name
-            netlist_cache_path(cand),  # current hashed name
-        ]:
-            if path.exists():
-                return path
-
-    netlist_path, _root = await write_netlist(sch_path)
-    return netlist_path
-
+from .netlist import current_netlist
 
 # MCU family component patterns
 MCU_PATTERNS = {
@@ -252,12 +211,9 @@ async def analyze_pin_functions(
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # Generate netlist for accurate connection analysis
-        netlist_path = await _ensure_netlist(sch_path)
-
-        # Parse netlist, then the schematic with the KiCad of the netlist (the pins of
+        # The netlist, then the schematic with the KiCad of the netlist (the pins of
         # the components: SchematicParser._component_pins).
-        netlist_parser = NetlistParser(str(netlist_path))
+        netlist_parser = await current_netlist(sch_path)
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Get components to analyze
@@ -459,11 +415,9 @@ async def _pin_conflicts(sch_path: Path) -> list[dict]:
         AmbiguousRootError: More than one root schematic holds the sheet.
         NetlistError: kicad-cli did not write the netlist.
     """
-    netlist_path = await _ensure_netlist(sch_path)
-
     # The netlist has the electrical type of each node as KiCad gives it (with the
     # alternate of the pin).
-    netlist_parser = NetlistParser(str(netlist_path))
+    netlist_parser = await current_netlist(sch_path)
 
     output_types = {"output", "power_out", "open_collector", "open_emitter", "tri_state"}
 
@@ -619,11 +573,8 @@ async def extract_pinmux_config(
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # Generate netlist for accurate connection analysis
-        netlist_path = await _ensure_netlist(sch_path)
-
-        # Parse netlist, then the schematic with the KiCad of the netlist.
-        netlist_parser = NetlistParser(str(netlist_path))
+        # The netlist, then the schematic with the KiCad of the netlist.
+        netlist_parser = await current_netlist(sch_path)
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Find MCU components

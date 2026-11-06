@@ -202,7 +202,8 @@ async def test_symbol_details_with_a_netlist_that_is_not_xml(example_schematic, 
     monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(b"<export", []))
     result = await schematic.get_symbol_details(str(example_schematic), "R1")
     assert (
-        "⚠️ The pins are the pins of the schematic file: the netlist of kicad-cli is not valid XML"
+        "⚠️ The pins are the pins of the schematic file: The netlist of kicad-cli for "
+        f"{example_schematic} is not valid XML"
     ) in result, result
 
 

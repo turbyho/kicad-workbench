@@ -111,7 +111,7 @@ that KiCad has open. See [editing.md](editing.md).
 
 | Tool | What it does |
 |---|---|
-| `create_kicad_project(project_path, project_name, title?, company?, template?)` | A new project: empty (the files of the installed KiCad), or from a KiCad template |
+| `create_kicad_project(project_path, project_name, title?, company?, template?, overwrite?)` | A new project as the project manager of the installed KiCad makes it: "New Project", or "New Project from Template" (see [editing.md](editing.md)) |
 | `add_component_from_library(file_path, library_name, symbol_name, reference, value, footprint?, x?, y?, unit?, sheet_path?, snap_to_grid?)` | Places a symbol of a library, as the schematic editor places it |
 | `add_wire(file_path, points, snap_to_grid?)` | A wire through two or more points, with the junctions and the wire changes of the schematic editor |
 | `add_label(file_path, text, x, y, orientation?, snap_to_grid?)` | A local label |

@@ -146,22 +146,18 @@ async def run_kicad_python(
 
 
 # Makes a new board. NewBoard() saves the board and its project file at once.
-# SaveBoard(path, board, aSkipSettings) saves the board again, and the project
-# file only when aSkipSettings is False. The script prints the KiCad version.
-# argv: board path, title, company, date, outline width and height in mm (0: no
-# outline), "project" to save the project file.
+# SaveBoard(path, board, aSkipSettings=True) saves the board again, with no
+# project file. The script prints the KiCad version.
+# argv: board path, title, outline width and height in mm (0: no outline).
 _VERSION_PREFIX = "KICAD_VERSION="
 _NEW_BOARD_SCRIPT = """\
 import sys
 import pcbnew
 
-path, title, company, date = sys.argv[1:5]
-width, height = float(sys.argv[5]), float(sys.argv[6])
+path, title = sys.argv[1:3]
+width, height = float(sys.argv[3]), float(sys.argv[4])
 board = pcbnew.NewBoard(path)
-title_block = board.GetTitleBlock()
-title_block.SetTitle(title)
-title_block.SetCompany(company)
-title_block.SetDate(date)
+board.GetTitleBlock().SetTitle(title)
 if width > 0 and height > 0:
     corners = [(0, 0), (width, 0), (width, height), (0, height)]
     for (x1, y1), (x2, y2) in zip(corners, corners[1:] + corners[:1]):
@@ -172,7 +168,7 @@ if width > 0 and height > 0:
         line.SetLayer(pcbnew.Edge_Cuts)
         line.SetWidth(pcbnew.FromMM(0.15))
         board.Add(line)
-if not pcbnew.SaveBoard(path, board, sys.argv[7] != "project"):
+if not pcbnew.SaveBoard(path, board, True):
     sys.exit("pcbnew.SaveBoard failed")
 print("KICAD_VERSION=" + pcbnew.GetMajorMinorPatchVersion())
 """
@@ -180,14 +176,7 @@ print("KICAD_VERSION=" + pcbnew.GetMajorMinorPatchVersion())
 _KICAD_VERSION = re.compile(r"\d+\.\d+\.\d+")
 
 
-def _new_board_sync(
-    path: Path,
-    title: str,
-    company: str,
-    date: str,
-    outline: tuple[float, float] | None,
-    save_project: bool,
-) -> str:
+def _new_board_sync(path: Path, title: str, outline: tuple[float, float] | None) -> str:
     """Run the script, and return the KiCad version of pcbnew that it prints
     (for example "10.0.6").
 
@@ -206,11 +195,8 @@ def _new_board_sync(
             _NEW_BOARD_SCRIPT,
             str(path),
             title,
-            company,
-            date,
             repr(float(width)),
             repr(float(height)),
-            "project" if save_project else "no-project",
         ]
     )
     if result.returncode != 0:
@@ -224,28 +210,12 @@ def _new_board_sync(
     return version
 
 
-def new_project_board_sync(path: Path, title: str, company: str = "", date: str = "") -> str:
-    """Make an empty board with pcbnew of KiCad, with its project files, and
-    return the KiCad version of pcbnew.
-
-    pcbnew writes the board and the default .kicad_pro and .kicad_prl next to
-    it, in the file format of that KiCad. Call it in the thread that owns the
-    folder (see _new_board_sync).
-
-    Raises:
-        FileNotFoundError: No Python with pcbnew is found.
-        RuntimeError: pcbnew cannot make the board, or gives no KiCad version.
-        subprocess.TimeoutExpired: pcbnew did not stop in time.
-    """
-    return _new_board_sync(path, title, company, date, None, save_project=True)
-
-
 def _board_text_sync(file_name: str, title: str, outline: tuple[float, float]) -> tuple[str, str]:
     # The thread owns the temporary directory: a cancel of the tool does not stop
     # pcbnew, and the directory goes only after pcbnew stops.
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / file_name
-        version = _new_board_sync(path, title, "", "", outline, save_project=False)
+        version = _new_board_sync(path, title, outline)
         return path.read_text(encoding="utf-8"), version
 
 

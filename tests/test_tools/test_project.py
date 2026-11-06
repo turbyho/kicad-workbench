@@ -1,73 +1,82 @@
-"""Tests for create_kicad_project (tools/project.py)."""
+"""Tests for create_kicad_project (tools/project.py).
+
+The expected files are the files of the project manager of KiCad
+(utils/new_project.py has the rules, test_new_project.py their tests).
+"""
 
 import asyncio
 import json
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from kicad_workbench.parsers.kicad_versions import schematic_version
 from kicad_workbench.parsers.sexpr import parse
 from kicad_workbench.tools import project
 from kicad_workbench.tools.project import _set_title_block, create_kicad_project
-from kicad_workbench.utils import kicad_python
+from kicad_workbench.utils import library_tables
 from kicad_workbench.utils.kicad_cli import find_kicad_cli
-from kicad_workbench.utils.kicad_python import find_kicad_python
+from kicad_workbench.utils.library_tables import kicad_documents_dir
 
-from .locale_env import can_name, non_utf8_env, run_python
-
-ROOT_UUID = "e63e39d7-6ac0-4ffd-8aa3-1841a4541b55"
-
-
-class _FakeResult:
-    def __init__(self, returncode=0, stdout=b"", stderr=b""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-@pytest.fixture(autouse=True)
-def _kicad_version(monkeypatch):
-    async def fake_version():
-        return "10.0.6"
-
-    monkeypatch.setattr(project, "get_kicad_version", fake_version)
+TEMPLATE_UUID = "e63e39d7-6ac0-4ffd-8aa3-1841a4541b55"
+KICAD_PRO = '{"meta": {"filename": "kicad.kicad_pro"}}'
 
 
 @pytest.fixture
-def template_base(tmp_path, monkeypatch):
-    """A fake KiCad template directory shaped like template/Arduino_Mega."""
-    base = tmp_path / "templates"
-    tpl = base / "Arduino_Mega"
+def kicad(tmp_path, monkeypatch):
+    """An isolated KiCad: settings, documents and the stock data folder in tmp_path.
+    Call it with the installed version: kicad("9.0.9")."""
+    for name in list(os.environ):
+        if re.fullmatch(r"KICAD\d*_.*|KICAD", name):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("KICAD_DOCUMENTS_HOME", str(tmp_path / "docs"))
+    stock = tmp_path / "share" / "kicad"
+    (stock / "template").mkdir(parents=True)
+    (stock / "template" / "kicad.kicad_pro").write_text(KICAD_PRO, encoding="utf-8")
+    monkeypatch.setattr(library_tables, "_stock_dir", lambda version_dir: stock)
+
+    def install(version):
+        async def fake_version():
+            return version
+
+        monkeypatch.setattr(project, "get_kicad_version", fake_version)
+        return stock
+
+    return install
+
+
+def make(path, name="blank", **kwargs) -> str:
+    return asyncio.run(create_kicad_project(str(path), name, **kwargs))
+
+
+def mega_template(stock: Path) -> Path:
+    """A template in the system template folder, shaped like Arduino_Mega."""
+    tpl = stock / "template" / "Arduino_Mega"
     (tpl / "meta").mkdir(parents=True)
     (tpl / "meta" / "info.html").write_text("<html/>", encoding="utf-8")
     (tpl / "Arduino_MountingHole.pretty").mkdir()
     (tpl / "Arduino_MountingHole.pretty" / "MountingHole_3.2mm.kicad_mod").write_text(
         "(footprint)", encoding="utf-8"
     )
-    (tpl / "fp-lib-table").write_text(
-        '(fp_lib_table (lib (name "Arduino_MountingHole")'
-        '(uri "${KIPRJMOD}/Arduino_MountingHole.pretty")))',
-        encoding="utf-8",
-    )
-    (tpl / "Arduino_Mega.kicad_pcb").write_text("(kicad_pcb (version 20260206))", encoding="utf-8")
+    (tpl / "fp-lib-table").write_text("(fp_lib_table)", encoding="utf-8")
+    (tpl / "Arduino_Mega.kicad_pcb").write_text("(kicad_pcb (version 20241229))", encoding="utf-8")
     (tpl / "Arduino_Mega.kicad_sch").write_text(
-        f'(kicad_sch\n\t(version 20250114)\n\t(uuid "{ROOT_UUID}")\n\t(paper "A4")\n'
-        f'\t(symbol (instances (project "Arduino_Mega" (path "/{ROOT_UUID}" (reference "J1")))))\n)\n',
+        f'(kicad_sch\n\t(version 20250114)\n\t(uuid "{TEMPLATE_UUID}")\n\t(paper "A4")\n'
+        f'\t(symbol (instances (project "Arduino_Mega" (path "/{TEMPLATE_UUID}" '
+        '(reference "J1")))))\n)\n',
         encoding="utf-8",
     )
     (tpl / "Arduino_Mega.kicad_pro").write_text(
         json.dumps(
-            {"meta": {"filename": "Arduino_Mega.kicad_pro"}, "sheets": [[ROOT_UUID, "Root"]]}
+            {"meta": {"filename": "Arduino_Mega.kicad_pro"}, "sheets": [[TEMPLATE_UUID, "Root"]]}
         ),
         encoding="utf-8",
     )
     (tpl / "custom.kicad_wks").write_text("(kicad_wks)", encoding="utf-8")
-    monkeypatch.setattr(project, "_kicad_template_dirs", lambda: [base])
-    return base
+    return tpl
 
 
 class TestSetTitleBlock:
@@ -124,509 +133,420 @@ class TestSetTitleBlock:
 
 
 class TestEmptyProject:
-    @pytest.fixture
-    def fake_kicad(self, monkeypatch):
-        """Stub pcbnew and kicad-cli; record their arguments."""
-        calls = {}
-
-        calls["pcbnew_version"] = "10.0.6"
-
-        def fake_python(args, timeout=120.0, input=None):
-            calls["python"] = args
-            pcb = Path(args[2])
-            pcb.write_text("(kicad_pcb (version 20260206))", encoding="utf-8")
-            pcb.with_suffix(".kicad_pro").write_text("{}", encoding="utf-8")
-            pcb.with_suffix(".kicad_prl").write_text("{}", encoding="utf-8")
-            return _FakeResult(stdout=f"KICAD_VERSION={calls['pcbnew_version']}\n".encode())
-
-        def fake_cli(args, timeout=60.0, english=False):
-            calls["cli"] = args
-            return _FakeResult()
-
-        monkeypatch.setattr(project, "find_kicad_python", lambda: sys.executable)
-        monkeypatch.setattr(kicad_python, "run_kicad_python_sync", fake_python)
-        monkeypatch.setattr(project, "run_kicad_cli_sync", fake_cli)
-        return calls
-
-    def test_is_the_default_and_uses_kicad_tooling(self, tmp_path, fake_kicad):
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "blank", "My Board", "ACME"))
-
-        py_args = fake_kicad["python"]
-        assert py_args[0] == "-c" and "pcbnew.NewBoard" in py_args[1]
-        # The tool makes the files in a temporary folder in the project folder.
-        assert Path(py_args[2]).name == "blank.kicad_pcb"
-        assert Path(py_args[2]).parent.parent == out_dir
-        assert py_args[3:5] == ["My Board", "ACME"]
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", py_args[5])
-        assert fake_kicad["cli"][:2] == ["sch", "upgrade"]
-        assert Path(fake_kicad["cli"][2]).name == "blank.kicad_sch"
-        # Only the files of the project stay: no temporary folder.
-        assert sorted(p.name for p in out_dir.iterdir()) == [
+    @pytest.mark.parametrize(
+        "version, board, generator, old_stub",
+        [
+            ("8.0.9", 20240108, "8.0", True),
+            ("9.0.1", 20241229, "9.0", True),
+            ("9.0.9", 20241229, "9.0", False),
+        ],
+    )
+    def test_kicad_8_and_9(self, tmp_path, kicad, version, board, generator, old_stub):
+        """CreateNewProject: a copy of kicad.kicad_pro, and the stubs."""
+        kicad(version)
+        out = tmp_path / "proj"
+        result = make(out, title="My Board", company="ACME")
+        assert result.startswith(f"# ✅ KiCad {version} Project Created"), result
+        assert sorted(p.name for p in out.iterdir()) == [
             "blank.kicad_pcb",
-            "blank.kicad_prl",
             "blank.kicad_pro",
             "blank.kicad_sch",
         ]
+        assert (out / "blank.kicad_pro").read_text(encoding="utf-8") == KICAD_PRO
+        assert (out / "blank.kicad_pcb").read_text(encoding="utf-8") == (
+            f'(kicad_pcb (version {board}) (generator "pcbnew") (generator_version "{generator}")\n)'
+        )
+        sch = (out / "blank.kicad_sch").read_text(encoding="utf-8")
+        assert ("(symbol_instances)" in sch) == old_stub
+        assert ("(uuid " in sch) == (not old_stub)
+        block = parse(sch).first("title_block")
+        assert [c.value(0) for c in block.children()] == [
+            "My Board",
+            re.search(r'\(date "([^"]+)"\)', sch).group(1),
+            "ACME",
+        ]
+        assert "copy of" in result and "kicad.kicad_pro" in result
+        # No template "default" in KiCad 8 and 9.
+        assert not (kicad_documents_dir(version) / "template").exists()
 
-        sch = (out_dir / "blank.kicad_sch").read_text(encoding="utf-8")
-        assert sch.startswith("(kicad_sch")
-        assert '(title "My Board")' in sch and '(company "ACME")' in sch
-        assert re.search(r'\(uuid "[0-9a-f-]{36}"\)', sch)
-        assert "(symbol" not in sch
+    def test_no_kicad_pro_gives_an_empty_project_file(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        (stock / "template" / "kicad.kicad_pro").unlink()
+        result = make(tmp_path / "proj")
+        assert (tmp_path / "proj" / "blank.kicad_pro").read_bytes() == b"{\n}\n"
+        assert "KiCad finds no kicad.kicad_pro" in result
 
-        assert "KiCad 10.0.6 Project Created" in result
-        assert "9.0+" not in result
-        assert "**Template:** empty" in result
-        for name in ("blank.kicad_pro", "blank.kicad_prl", "blank.kicad_sch", "blank.kicad_pcb"):
-            assert f"- {name}" in result
-        assert "Warnings" not in result
+    @pytest.mark.parametrize(
+        "version, text",
+        [("10.0.6", "{}"), ("10.0.7", '{\n  "meta": {\n    "version": 1\n  }\n}\n')],
+    )
+    def test_kicad_10_uses_the_template_default(self, tmp_path, kicad, version, text):
+        kicad(version)
+        result = make(tmp_path / "proj")
+        default = kicad_documents_dir(version) / "template" / "default"
+        assert (default / "meta" / "info.html").is_file()
+        assert (default / "default.kicad_pro").read_text(encoding="utf-8") == text
+        assert 'makes the template "default"' in result
+        assert (tmp_path / "proj" / "blank.kicad_pro").read_text(encoding="utf-8") == text
+        sch = (tmp_path / "proj" / "blank.kicad_sch").read_text(encoding="utf-8")
+        assert "(version 20260306)" in sch and '(generator_version "10.0")' in sch
+        # The template is there now: KiCad and the tool make it one time.
+        assert 'makes the template "default"' not in make(tmp_path / "proj2")
 
-    def test_title_defaults_to_project_name(self, tmp_path, fake_kicad):
-        asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert fake_kicad["python"][3] == "blank"
-        assert fake_kicad["python"][4] == ""
-        sch = (tmp_path / "blank.kicad_sch").read_text(encoding="utf-8")
-        assert '(title "blank")' in sch and "(company" not in sch
+    def test_kicad_10_uses_the_default_template_of_the_user(self, tmp_path, kicad):
+        kicad("10.0.6")
+        default = kicad_documents_dir("10.0.6") / "template" / "default"
+        (default / "meta").mkdir(parents=True)
+        (default / "meta" / "info.html").write_text("<html/>", encoding="utf-8")
+        (default / "default.kicad_pro").write_text('{"x": 1}', encoding="utf-8")
+        (default / "default.kicad_sch").write_text(
+            '(kicad_sch (version 20260306) (paper "A4"))', encoding="utf-8"
+        )
+        (default / "notes.txt").write_text("n", encoding="utf-8")
+        make(tmp_path / "proj", title="T")
+        out = tmp_path / "proj"
+        assert sorted(p.name for p in out.iterdir()) == [
+            "blank.kicad_pcb",
+            "blank.kicad_pro",
+            "blank.kicad_sch",
+            "notes.txt",
+        ]
+        assert (out / "blank.kicad_pro").read_text(encoding="utf-8") == '{"x": 1}'
+        assert '(title "T")' in (out / "blank.kicad_sch").read_text(encoding="utf-8")
 
-    def test_upgrade_failure_is_a_warning(self, tmp_path, fake_kicad, monkeypatch):
-        def failing_cli(args, timeout=60.0, english=False):
-            return _FakeResult(returncode=1, stderr=b"boom")
+    def test_kicad_10_0_4_uses_kicad_user_template_dir(self, tmp_path, kicad, monkeypatch):
+        kicad("10.0.4")
+        user = tmp_path / "my-templates"
+        monkeypatch.setenv("KICAD_USER_TEMPLATE_DIR", str(user))
+        make(tmp_path / "proj")
+        assert (user / "default" / "default.kicad_pro").is_file()
 
-        monkeypatch.setattr(project, "run_kicad_cli_sync", failing_cli)
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
+    def test_a_folder_that_is_not_empty(self, tmp_path, kicad):
+        """KiCad 8 and 9 ask before they use a folder that is not empty, then keep its files."""
+        kicad("9.0.9")
+        out = tmp_path / "proj"
+        out.mkdir()
+        (out / "blank.kicad_sch").write_text("mine", encoding="utf-8")
+        (out / "readme.txt").write_text("r", encoding="utf-8")
+        result = make(out)
+        assert result.startswith(f"❌ The folder {out} is not empty: blank.kicad_sch, readme.txt.")
+        assert sorted(p.name for p in out.iterdir()) == ["blank.kicad_sch", "readme.txt"]
+        result = make(out, overwrite=True)
         assert "Project Created" in result
-        assert "Warnings" in result and "boom" in result
-        assert (tmp_path / "blank.kicad_sch").exists()
+        assert (out / "blank.kicad_sch").read_text(encoding="utf-8") == "mine"
+        assert (out / "blank.kicad_pro").is_file() and (out / "blank.kicad_pcb").is_file()
 
-    @pytest.mark.parametrize(
-        "version, file_version, generator, fonts, upgrade",
-        [
-            # KiCad 8 and 9 have no "kicad-cli sch upgrade": their own format.
-            ("8.0.9", 20231120, "8.0", False, False),
-            ("9.0.9", 20250114, "9.0", True, False),
-            # KiCad 10 converts a schematic of KiCad 9.
-            ("10.0.6", 20250114, "9.0", True, True),
-            # A development build: kicad-cli tells if it can convert it.
-            ("9.99.0", 20250114, "9.0", True, True),
-            ("10.99.0", 20250114, "9.0", True, True),
-        ],
-    )
-    def test_schematic_of_the_installed_kicad(
-        self, tmp_path, fake_kicad, monkeypatch, version, file_version, generator, fonts, upgrade
-    ):
-        async def fake_version():
-            return version
+    def test_a_project_file_of_the_template_default(self, tmp_path, kicad):
+        kicad("10.0.6")
+        out = tmp_path / "proj"
+        out.mkdir()
+        (out / "blank.kicad_pro").write_text("mine", encoding="utf-8")
+        assert make(out).startswith(f"❌ Files of the template exist in {out}: blank.kicad_pro.")
+        assert "Project Created" in make(out, overwrite=True)
+        assert (out / "blank.kicad_pro").read_text(encoding="utf-8") == "{}"
 
-        monkeypatch.setattr(project, "get_kicad_version", fake_version)
-        fake_kicad["pcbnew_version"] = version
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank", "T"))
-        assert "Warnings" not in result
-        root = parse((tmp_path / "blank.kicad_sch").read_text(encoding="utf-8"))
-        assert schematic_version(root) == file_version
-        assert root.first("generator_version").value(0) == generator
-        assert (root.first("embedded_fonts") is not None) == fonts
-        assert root.first("title_block").first("title").value(0) == "T"
-        assert ("cli" in fake_kicad) == upgrade
+    def test_a_schematic_that_kicad_has_open(self, tmp_path, kicad):
+        kicad("10.0.6")
+        out = tmp_path / "proj"
+        out.mkdir()
+        for name in ("blank.kicad_pro", "blank.kicad_sch", "~blank.kicad_sch.lck"):
+            (out / name).write_text("x", encoding="utf-8")
+        default = kicad_documents_dir("10.0.6") / "template" / "default"
+        (default / "meta").mkdir(parents=True)
+        (default / "meta" / "info.html").write_text("<html/>", encoding="utf-8")
+        (default / "default.kicad_pro").write_text("{}", encoding="utf-8")
+        (default / "default.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
+        result = make(out, overwrite=True)
+        # The text of utils/kicad_lock.py, as the other edit tools give it.
+        assert result.startswith("Error: KiCad has the schematic open"), result
+        assert (out / "blank.kicad_sch").read_text(encoding="utf-8") == "x"
 
-    @pytest.mark.parametrize(
-        "pcbnew, file_version, warning",
-        [("10.0.6", 20250114, True), ("9.0.9", 20250114, False), ("8.0.9", 20231120, False)],
-    )
-    def test_no_kicad_cli_version(
-        self, tmp_path, fake_kicad, monkeypatch, pcbnew, file_version, warning
-    ):
-        """The format of the KiCad of pcbnew, with no conversion. A warning only when
-        the format is not the own format of that KiCad."""
+    @pytest.mark.parametrize("version", [None, "7.0.11", "10.0.8", "10.99.0"])
+    def test_a_version_with_no_rules(self, tmp_path, kicad, version):
+        kicad(version)
+        result = make(tmp_path / "proj")
+        assert result.startswith("❌") and not (tmp_path / "proj").exists()
 
-        async def no_version():
-            return None
+    def test_title_defaults_to_project_name(self, tmp_path, kicad):
+        kicad("9.0.9")
+        make(tmp_path, "board")
+        sch = (tmp_path / "board.kicad_sch").read_text(encoding="utf-8")
+        assert '(title "board")' in sch and "(company" not in sch
 
-        monkeypatch.setattr(project, "get_kicad_version", no_version)
-        fake_kicad["pcbnew_version"] = pcbnew
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        root = parse((tmp_path / "blank.kicad_sch").read_text(encoding="utf-8"))
-        assert schematic_version(root) == file_version
-        assert "cli" not in fake_kicad
-        assert ("kicad-cli gave no version (it is not found, or it failed)" in result) == warning
-        assert ("Warnings" in result) == warning
-
-    def test_a_version_text_that_the_server_cannot_read(self, tmp_path, fake_kicad, monkeypatch):
-        async def odd_version():
-            return "build abc"
-
-        monkeypatch.setattr(project, "get_kicad_version", odd_version)
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert "cli" not in fake_kicad
-        assert "kicad-cli gave the version text 'build abc'" in result
-
-    def test_pcbnew_and_kicad_cli_of_different_kicad(self, tmp_path, fake_kicad):
-        """KICAD_PYTHON of KiCad 8 and kicad-cli of KiCad 10: no file of the project."""
-        fake_kicad["pcbnew_version"] = "8.0.9"
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "blank"))
-        assert result.startswith("❌ kicad-cli is KiCad 10.0.6, but the Python with pcbnew is ")
-        # No file, and no folder: the tool made the folder, and removes it.
-        assert not out_dir.exists()
-
-    def test_all_new_folders_go_after_an_error(self, tmp_path, fake_kicad):
-        fake_kicad["pcbnew_version"] = "8.0.9"
-        result = asyncio.run(create_kicad_project(str(tmp_path / "a" / "b" / "proj"), "blank"))
-        assert result.startswith("❌") and list(tmp_path.iterdir()) == []
-
-    def test_a_failed_move_moves_the_files_back(self, tmp_path, fake_kicad, monkeypatch):
-        """All files or none: the files that moved go back."""
-        replace = project.os.replace
-        count = {"moves": 0}
-
-        def failing_replace(source, target):
-            if Path(target).parent == tmp_path:
-                count["moves"] += 1
-                if count["moves"] == 3:
-                    raise PermissionError("denied")
-            replace(source, target)
-
-        monkeypatch.setattr(project.os, "replace", failing_replace)
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert result.startswith(f"❌ The tool cannot move the files into {tmp_path}: denied")
-        assert list(tmp_path.iterdir()) == []
-
-    def test_pcbnew_of_kicad_7_is_refused(self, tmp_path, fake_kicad, monkeypatch):
-        async def no_version():
-            return None
-
-        monkeypatch.setattr(project, "get_kicad_version", no_version)
-        fake_kicad["pcbnew_version"] = "7.0.11"
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert result.startswith("❌ pcbnew is KiCad 7.0.11. The server supports KiCad 8")
-        assert list(tmp_path.iterdir()) == []
-
-    def test_kicad_cli_of_kicad_7_is_refused(self, tmp_path, fake_kicad, monkeypatch):
-        async def old_version():
-            return "7.0.11"
-
-        monkeypatch.setattr(project, "get_kicad_version", old_version)
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "blank"))
-        assert result.startswith("❌ KiCad 7.0.11 is installed.")
-        assert "python" not in fake_kicad and not out_dir.exists()
-
-    def test_an_upgrade_to_a_version_with_no_rules(self, tmp_path, fake_kicad, monkeypatch):
-        """A nightly build newer than the rules of the server: a warning."""
-
-        async def new_version():
-            return "11.99.0"
-
-        def upgrade(args, timeout=60.0, english=False):
-            fake_kicad["cli"] = args
-            path = Path(args[2])
-            path.write_text(
-                path.read_text(encoding="utf-8").replace("20250114", "20991231"), encoding="utf-8"
-            )
-            return _FakeResult()
-
-        monkeypatch.setattr(project, "get_kicad_version", new_version)
-        monkeypatch.setattr(project, "run_kicad_cli_sync", upgrade)
-        fake_kicad["pcbnew_version"] = "11.99.0"
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert "The new schematic:" in result and "The other tools cannot read it." in result
-
-    def test_pcbnew_failure_is_reported(self, tmp_path, fake_kicad, monkeypatch):
-        def failing_python(args, timeout=120.0, input=None):
-            return _FakeResult(returncode=1, stderr=b"ImportError: pcbnew")
-
-        monkeypatch.setattr(kicad_python, "run_kicad_python_sync", failing_python)
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert result.startswith("❌") and "ImportError: pcbnew" in result
-        assert not (tmp_path / "blank.kicad_sch").exists()
-
-    def test_pcbnew_timeout_is_reported(self, tmp_path, fake_kicad, monkeypatch):
-        def slow_python(args, timeout=120.0, input=None):
-            raise subprocess.TimeoutExpired("python", timeout)
-
-        monkeypatch.setattr(kicad_python, "run_kicad_python_sync", slow_python)
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert result == "❌ pcbnew did not stop in 120 s. The tool wrote no file."
-        assert list(tmp_path.iterdir()) == []
-
-    @pytest.mark.parametrize(
-        "error, text",
-        [
-            (subprocess.TimeoutExpired("kicad-cli", 120), "it did not stop in 120 s"),
-            (RuntimeError("kicad-cli cannot read a file path that is not ASCII"), "not ASCII"),
-            (FileNotFoundError("kicad-cli not found"), "kicad-cli not found"),
-        ],
-    )
-    def test_an_upgrade_error_keeps_the_project(
-        self, tmp_path, fake_kicad, monkeypatch, error, text
-    ):
-        """The schematic of KiCad 9 is valid: a warning, not an error."""
-
-        def failing(args, timeout=60.0, english=False):
-            raise error
-
-        monkeypatch.setattr(project, "run_kicad_cli_sync", failing)
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert "Project Created" in result and "`kicad-cli sch upgrade` failed" in result
-        assert text in result
-        root = parse((tmp_path / "blank.kicad_sch").read_text(encoding="utf-8"))
-        assert schematic_version(root) == 20250114
-
-    def test_a_file_that_an_other_call_made(self, tmp_path, fake_kicad, monkeypatch):
-        """A file of the project that appears during the work: no file changes."""
-        original = kicad_python.run_kicad_python_sync
-
-        def python(args, timeout=120.0, input=None):
-            (tmp_path / "blank.kicad_sch").write_text("other", encoding="utf-8")
-            return original(args, timeout, input)
-
-        monkeypatch.setattr(kicad_python, "run_kicad_python_sync", python)
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank"))
-        assert result.startswith("❌ blank.kicad_sch now exist in ")
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["blank.kicad_sch"]
-        assert (tmp_path / "blank.kicad_sch").read_text(encoding="utf-8") == "other"
-
-    def test_missing_kicad_python(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(project, "find_kicad_python", lambda: None)
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "blank"))
-        assert "pcbnew" in result and "KICAD_PYTHON" in result
-        assert not out_dir.exists()
+    @pytest.mark.parametrize("field", ["project_name", "title", "company"])
+    def test_text_that_is_not_valid_changes_no_file(self, tmp_path, kicad, field):
+        kicad("9.0.9")
+        kwargs = {"project_name": "blank", "title": "", "company": ""}
+        kwargs[field] = "\ud800"
+        result = asyncio.run(create_kicad_project(str(tmp_path / "proj"), **kwargs))
+        assert result.startswith(f"❌ The {field} is not valid text")
+        assert not (tmp_path / "proj").exists()
 
 
 class TestTemplateProject:
-    def test_copies_directories_and_renames_project_files(self, tmp_path, template_base):
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(
-            create_kicad_project(str(out_dir), "shield", "Shield", template="Arduino_Mega")
-        )
-
-        assert sorted(p.name for p in out_dir.iterdir()) == [
-            "Arduino_MountingHole.pretty",
-            "custom.kicad_wks",
-            "fp-lib-table",
-            "shield.kicad_pcb",
-            "shield.kicad_pro",
-            "shield.kicad_sch",
-        ]
-        # The footprint library the fp-lib-table points at must come along.
-        assert (out_dir / "Arduino_MountingHole.pretty" / "MountingHole_3.2mm.kicad_mod").is_file()
-        assert "KiCad 10.0.6 Project Created" in result
-        assert "9.0+" not in result
-        assert "Arduino_Mega" in result and "- Arduino_MountingHole.pretty/" in result
-
-    def test_root_uuid_is_replaced_consistently(self, tmp_path, template_base):
-        asyncio.run(create_kicad_project(str(tmp_path), "shield", template="Arduino_Mega"))
-
-        sch = (tmp_path / "shield.kicad_sch").read_text(encoding="utf-8")
-        new_uuid = re.search(r'\(uuid "([^"]*)"\)', sch).group(1)
-        assert new_uuid != ROOT_UUID and ROOT_UUID not in sch
-        assert f'(path "/{new_uuid}"' in sch
-        assert '(title "shield")' in sch
-
-        pro = json.loads((tmp_path / "shield.kicad_pro").read_text(encoding="utf-8"))
-        assert pro["meta"]["filename"] == "shield.kicad_pro"
-        assert pro["sheets"] == [[new_uuid, "Root"]]
-
-    @pytest.mark.parametrize("field", ["project_name", "title", "company"])
-    def test_text_that_is_not_valid_changes_no_file(self, tmp_path, template_base, field):
-        # A JSON string can hold a lone surrogate, which UTF-8 cannot encode.
-        args = {"project_name": "shield", "title": "T", "company": "C", field: "A\ud800"}
-        result = asyncio.run(create_kicad_project(str(tmp_path), template="Arduino_Mega", **args))
-        assert f"The {field} is not valid text" in result, result
-        assert list(tmp_path.iterdir()) == [tmp_path / "templates"]
-
-    def test_project_file_is_utf8_text(self, tmp_path, template_base):
-        # KiCad writes the project file as UTF-8 text, not with \u escapes.
-        asyncio.run(create_kicad_project(str(tmp_path), "电源板_لوحة", template="Arduino_Mega"))
-        pro = (tmp_path / "电源板_لوحة.kicad_pro").read_text(encoding="utf-8")
-        assert '"filename": "电源板_لوحة.kicad_pro"' in pro
-
-    def test_template_by_path(self, tmp_path, template_base, monkeypatch):
-        monkeypatch.setattr(project, "_kicad_template_dirs", lambda: [])
-        out_dir = tmp_path / "proj"
-        asyncio.run(
-            create_kicad_project(
-                str(out_dir), "shield", template=str(template_base / "Arduino_Mega")
-            )
-        )
-        assert (out_dir / "shield.kicad_pro").is_file()
-
-    def test_unknown_template_lists_available(self, tmp_path, template_base):
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "x", template="Nope"))
-        assert "'Nope' not found" in result and "Arduino_Mega" in result
-        assert not out_dir.exists()
-
-    def test_kicad_7_is_refused(self, tmp_path, template_base, monkeypatch):
-        """The server supports KiCad 8 and later, also for a template project."""
-
-        async def old_version():
-            return "7.0.11"
-
-        monkeypatch.setattr(project, "get_kicad_version", old_version)
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "Mega", template="Arduino_Mega"))
-        assert result.startswith("❌ KiCad 7.0.11 is installed.") and not out_dir.exists()
-
-    def test_a_template_schematic_that_the_parser_cannot_read(self, tmp_path, template_base):
-        """No (paper ...) and no title block: an error, and no file of the template."""
-        (template_base / "Arduino_Mega" / "Arduino_Mega.kicad_sch").write_text(
-            '(kicad_sch (version 20250114) (uuid "x"))', encoding="utf-8"
-        )
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "Mega", template="Arduino_Mega"))
-        assert result.startswith("❌ The template "), result
-        assert "The tool wrote no file." in result
-        assert not out_dir.exists()
-
-    def test_a_template_project_file_as_kicad_reads_it(self, tmp_path, template_base):
-        """A byte order mark and comments: KiCad reads the file (read_kicad_json)."""
-        pro = template_base / "Arduino_Mega" / "Arduino_Mega.kicad_pro"
-        pro.write_text("\ufeff// a comment\n" + pro.read_text(encoding="utf-8"), encoding="utf-8")
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "Mega", template="Arduino_Mega"))
+    def test_files_of_the_template_as_kicad_copies_them(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        tpl = mega_template(stock)
+        out = tmp_path / "proj"
+        result = make(out, "shield", template="Arduino_Mega", title="Shield")
         assert "Project Created" in result, result
-        data = json.loads((out_dir / "Mega.kicad_pro").read_text(encoding="utf-8"))
-        assert data["meta"]["filename"] == "Mega.kicad_pro"
-
-    def test_a_template_project_file_that_is_not_json(self, tmp_path, template_base):
-        (template_base / "Arduino_Mega" / "Arduino_Mega.kicad_pro").write_text("{", "utf-8")
-        out_dir = tmp_path / "proj"
-        result = asyncio.run(create_kicad_project(str(out_dir), "Mega", template="Arduino_Mega"))
-        assert result.startswith("❌ The template ") and not out_dir.exists()
-
-    def test_refuses_to_overwrite_existing_project(self, tmp_path, template_base):
-        existing = tmp_path / "shield.kicad_sch"
-        existing.write_text("mine", encoding="utf-8")
-        result = asyncio.run(create_kicad_project(str(tmp_path), "shield", template="Arduino_Mega"))
-        assert "already exists" in result
-        assert existing.read_text(encoding="utf-8") == "mine"
-        assert not (tmp_path / "shield.kicad_pcb").exists()
-
-
-class TestFindKicadPython:
-    @pytest.fixture(autouse=True)
-    def _reset(self, monkeypatch):
-        monkeypatch.setattr(kicad_python, "_cached_python", None)
-        monkeypatch.delenv("KICAD_PYTHON", raising=False)
-        monkeypatch.setattr(kicad_python.importlib.util, "find_spec", lambda name: None)
-
-    def test_env_override_wins(self, monkeypatch, tmp_path):
-        fake = tmp_path / "python.exe"
-        fake.write_bytes(b"")
-        monkeypatch.setenv("KICAD_PYTHON", str(fake))
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: None)
-        assert find_kicad_python() == str(fake)
-
-    def test_current_interpreter_when_pcbnew_importable(self, monkeypatch):
-        monkeypatch.setattr(kicad_python.importlib.util, "find_spec", lambda name: object())
-        assert find_kicad_python() == sys.executable
-
-    def test_windows_bundled_python(self, monkeypatch, tmp_path):
-        exe = tmp_path / "bin" / "python.exe"
-        exe.parent.mkdir()
-        exe.write_bytes(b"")
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: (tmp_path, "10.0"))
-        assert find_kicad_python() == str(exe)
-
-    def test_macos_bundled_python(self, monkeypatch, tmp_path):
-        contents = tmp_path / "KiCad.app" / "Contents"
-        shared_support = contents / "SharedSupport"
-        shared_support.mkdir(parents=True)
-        exe = (
-            contents
-            / "Frameworks"
-            / "Python.framework"
-            / "Versions"
-            / "Current"
-            / "bin"
-            / "python3"
+        assert sorted(str(p.relative_to(out)) for p in out.rglob("*")) == sorted(
+            [
+                "Arduino_MountingHole.pretty",
+                str(Path("Arduino_MountingHole.pretty") / "MountingHole_3.2mm.kicad_mod"),
+                "custom.kicad_wks",
+                "fp-lib-table",
+                "shield.kicad_pcb",
+                "shield.kicad_pro",
+                "shield.kicad_sch",
+            ]
         )
-        exe.parent.mkdir(parents=True)
-        exe.write_bytes(b"")
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: (shared_support, "macos"))
-        assert find_kicad_python() == str(exe)
+        # KiCad changes no file of the template: the project file, the UUID and the
+        # instances stay. The tool writes only the title block.
+        assert (out / "shield.kicad_pro").read_text(encoding="utf-8") == (
+            tpl / "Arduino_Mega.kicad_pro"
+        ).read_text(encoding="utf-8")
+        sch = (out / "shield.kicad_sch").read_text(encoding="utf-8")
+        assert sch.count(TEMPLATE_UUID) == 2
+        assert parse(sch).first("title_block").first("title").value(0) == "Shield"
+        assert (out / "shield.kicad_pcb").read_text(encoding="utf-8") == (
+            tpl / "Arduino_Mega.kicad_pcb"
+        ).read_text(encoding="utf-8")
 
-    def test_nothing_found(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: None)
-        assert find_kicad_python() is None
+    def test_missing_files_get_the_stubs(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        tpl = stock / "template" / "Only"
+        tpl.mkdir()
+        (tpl / "Only.kicad_pro").write_text("{}", encoding="utf-8")
+        make(tmp_path / "proj", template="Only")
+        out = tmp_path / "proj"
+        assert (out / "blank.kicad_pro").read_text(encoding="utf-8") == "{}"
+        assert (
+            (out / "blank.kicad_pcb")
+            .read_text(encoding="utf-8")
+            .startswith("(kicad_pcb (version 20241229)")
+        )
+        assert "(kicad_sch" in (out / "blank.kicad_sch").read_text(encoding="utf-8")
+
+    def test_template_by_path(self, tmp_path, kicad):
+        kicad("9.0.9")
+        tpl = tmp_path / "elsewhere" / "Mine"
+        tpl.mkdir(parents=True)
+        (tpl / "Mine.kicad_pro").write_text("{}", encoding="utf-8")
+        result = make(tmp_path / "proj", template=str(tpl))
+        assert "Project Created" in result and (tmp_path / "proj" / "blank.kicad_pro").is_file()
+
+    def test_unknown_template_lists_available(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        mega_template(stock)
+        result = make(tmp_path / "proj", template="Nope")
+        assert result.startswith("❌ KiCad has no template 'Nope'") and "Arduino_Mega" in result
+        assert not (tmp_path / "proj").exists()
+
+    def test_files_of_the_template_exist(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        mega_template(stock)
+        out = tmp_path / "proj"
+        out.mkdir()
+        (out / "fp-lib-table").write_text("mine", encoding="utf-8")
+        (out / "shield.kicad_pcb").write_text("mine", encoding="utf-8")
+        result = make(out, "shield", template="Arduino_Mega")
+        assert result.startswith(
+            f"❌ Files of the template exist in {out}: fp-lib-table, shield.kicad_pcb."
+        )
+        assert sorted(p.name for p in out.iterdir()) == ["fp-lib-table", "shield.kicad_pcb"]
+        assert "Project Created" in make(out, "shield", template="Arduino_Mega", overwrite=True)
+        assert (out / "fp-lib-table").read_text(encoding="utf-8") == "(fp_lib_table)"
+
+    def test_a_template_with_only_a_legacy_project_file(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        tpl = stock / "template" / "Old"
+        tpl.mkdir()
+        (tpl / "Old.pro").write_text("", encoding="utf-8")
+        result = make(tmp_path / "proj", template="Old")
+        assert result.startswith("❌") and "legacy project file" in result
+        assert not (tmp_path / "proj").exists()
+
+    def test_a_template_schematic_that_the_parser_cannot_read(self, tmp_path, kicad):
+        """The project is made as KiCad makes it; only the title block is missing."""
+        stock = kicad("9.0.9")
+        tpl = mega_template(stock)
+        (tpl / "Arduino_Mega.kicad_sch").write_text(
+            "(kicad_sch (version 20250114)", encoding="utf-8"
+        )
+        result = make(tmp_path / "proj", "shield", template="Arduino_Mega")
+        assert "Project Created" in result
+        assert "⚠️ The tool did not write the title block of shield.kicad_sch" in result
 
 
-class TestRunKicadPython:
-    # Text in different scripts. On Linux and macOS an argument holds only the
-    # characters of the locale encoding, thus the test uses the texts that
-    # the encoding can hold.
-    TEXTS = ["电源板", "لوحة", "Плата", "řídicí", "𠀀"]
-    CODE = (
-        "from kicad_workbench.utils import kicad_python\n"
-        "kicad_python.find_kicad_python = lambda: sys.executable\n"
-        "script = 'import sys; print(sys.argv[1]); sys.stderr.write(sys.argv[1])'\n"
-        "r = kicad_python.run_kicad_python_sync(['-c', script, ARGS[0]])\n"
-        "result([r.returncode, r.stdout.decode('utf-8', 'replace'),\n"
-        "        r.stderr.decode('utf-8', 'replace')])\n"
-    )
-
-    @pytest.mark.parametrize("utf8_mode", [False, True])
-    def test_child_uses_utf8_in_a_locale_that_is_not_utf8(self, utf8_mode):
-        # The server and the child Python run in the same locale, as on a
-        # system that does not use UTF-8. The child must read its arguments
-        # as the server writes them, and write its output as UTF-8.
-        env, encoding = non_utf8_env()
-        texts = [text for text in self.TEXTS if can_name(text, encoding, utf8_mode)]
-        assert texts, encoding
-        for text in texts:
-            returncode, stdout, stderr = run_python(self.CODE, env, utf8_mode, text)
-            assert returncode == 0, stderr
-            assert stdout.strip() == text
-            assert stderr == text
-
-
-def _kicad_available() -> bool:
-    python = find_kicad_python()
-    if python is None or find_kicad_cli() is None:
+def _kicad_10_installed() -> bool:
+    if find_kicad_cli() is None:
         return False
-    probe = subprocess.run([python, "-c", "import pcbnew"], capture_output=True, timeout=60)
-    return probe.returncode == 0
+    from kicad_workbench.utils.kicad_cli import kicad_cli_version_sync
+
+    version = kicad_cli_version_sync() or ""
+    return version.startswith("10.0.")
 
 
-@pytest.mark.skipif(not _kicad_available(), reason="KiCad with pcbnew not installed")
+@pytest.mark.skipif(not _kicad_10_installed(), reason="KiCad 10.0 not installed")
 class TestWithRealKicad:
     @pytest.fixture(autouse=True)
-    def _kicad_version(self):
-        """Use the real version lookup (overrides the module-level stub)."""
+    def _documents(self, tmp_path, monkeypatch):
+        # The template "default" goes into the test folder, not to the user.
+        monkeypatch.setenv("KICAD_DOCUMENTS_HOME", str(tmp_path / "docs"))
 
-    def test_empty_project_is_native_and_passes_erc(self, tmp_path):
+    def test_empty_project_passes_erc_and_drc(self, tmp_path):
         from kicad_workbench.utils.kicad_cli import run_kicad_cli_sync
 
-        result = asyncio.run(create_kicad_project(str(tmp_path), "blank", company="ACME"))
-        assert "Project Created" in result and "Warnings" not in result
-
-        pcb = (tmp_path / "blank.kicad_pcb").read_text(encoding="utf-8")
-        sch = (tmp_path / "blank.kicad_sch").read_text(encoding="utf-8")
-        assert "(footprint " not in pcb
-        assert '(company "ACME")' in pcb and '(company "ACME")' in sch
-        assert (tmp_path / "blank.kicad_pro").is_file()
-
-        # Both files carry the installed KiCad's own generator version.
-        pcb_gen = re.search(r'\(generator_version "([^"]*)"\)', pcb).group(1)
-        sch_gen = re.search(r'\(generator_version "([^"]*)"\)', sch).group(1)
-        assert pcb_gen == sch_gen
-
-        report = tmp_path / "erc.rpt"
+        out = tmp_path / "proj"
+        result = make(out, company="ACME")
+        assert "Project Created" in result, result
         erc = run_kicad_cli_sync(
-            ["sch", "erc", "-o", str(report), str(tmp_path / "blank.kicad_sch")], timeout=120
+            ["sch", "erc", "-o", str(tmp_path / "erc.rpt"), str(out / "blank.kicad_sch")],
+            timeout=120,
         )
         assert erc.returncode == 0
-        assert "ERC messages: 0" in report.read_text(encoding="utf-8")
+        assert "ERC messages: 0" in (tmp_path / "erc.rpt").read_text(encoding="utf-8")
+        drc = run_kicad_cli_sync(
+            ["pcb", "drc", "-o", str(tmp_path / "drc.rpt"), str(out / "blank.kicad_pcb")],
+            timeout=120,
+        )
+        assert drc.returncode == 0
 
     def test_arduino_mega_template_includes_footprint_library(self, tmp_path):
-        if "Arduino_Mega" not in project._list_kicad_templates():
+        result = make(tmp_path / "proj", "shield", template="Arduino_Mega")
+        if "has no template" in result:
             pytest.skip("Arduino_Mega template not installed")
-
-        asyncio.run(create_kicad_project(str(tmp_path), "shield", template="Arduino_Mega"))
-
-        fp_lib_table = (tmp_path / "fp-lib-table").read_text(encoding="utf-8")
+        out = tmp_path / "proj"
+        fp_lib_table = (out / "fp-lib-table").read_text(encoding="utf-8")
         for lib_dir in re.findall(r"\$\{KIPRJMOD\}/([^)\"]+)", fp_lib_table):
-            assert (tmp_path / lib_dir).is_dir(), lib_dir
-        assert not (tmp_path / "meta").exists()
+            assert (out / lib_dir).is_dir(), lib_dir
+        assert not (out / "meta").exists()
+
+
+class TestRefusals:
+    @pytest.mark.parametrize("name", ["", " ", ".", "..", "../other", "a/b", "a\\b"])
+    def test_a_name_that_is_not_a_file_name(self, tmp_path, kicad, name):
+        kicad("9.0.9")
+        result = make(tmp_path / "proj", name)
+        assert result.startswith("❌ The project_name"), result
+        assert not (tmp_path / "proj").exists()
+
+    def test_an_open_project_is_not_replaced(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        mega_template(stock)
+        out = tmp_path / "proj"
+        out.mkdir()
+        (out / "shield.kicad_pro").write_text("mine", encoding="utf-8")
+        (out / "~shield.kicad_pro.lck").write_text("{}", encoding="utf-8")
+        result = make(out, "shield", template="Arduino_Mega", overwrite=True)
+        assert result.startswith("Error: KiCad has the project open"), result
+        assert (out / "shield.kicad_pro").read_text(encoding="utf-8") == "mine"
+
+    def test_no_template_checks_no_lock_of_the_files_that_stay(self, tmp_path, kicad):
+        """KiCad 8 and 9 keep the files of the folder: an open other schematic is no
+        reason to refuse."""
+        kicad("9.0.9")
+        out = tmp_path / "proj"
+        out.mkdir()
+        (out / "old.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
+        (out / "~old.kicad_sch.lck").write_text("{}", encoding="utf-8")
+        result = make(out, overwrite=True)
+        assert "Project Created" in result, result
+
+
+class TestKiCad10WithNoDefault:
+    def test_10_0_4_with_no_usable_user_template_dir(self, tmp_path, kicad, monkeypatch):
+        """No template "default": KiCad makes the project with no template."""
+        kicad("10.0.4")
+        monkeypatch.setenv("KICAD_USER_TEMPLATE_DIR", "${NOT_SET_ANYWHERE}/tpl")
+        result = make(tmp_path / "proj")
+        assert "Project Created" in result and 'has no template "default"' in result
+        assert (tmp_path / "proj" / "blank.kicad_pro").read_text(encoding="utf-8") == KICAD_PRO
+        # And it shows no template selector.
+        result = make(tmp_path / "proj2", template="Arduino_Mega")
+        assert result.startswith("❌") and "shows no template selector" in result
+
+    def test_10_0_6_when_default_cannot_be_made(self, tmp_path, kicad):
+        stock = kicad("10.0.6")
+        mega_template(stock)
+        (kicad_documents_dir("10.0.6")).mkdir(parents=True)
+        (kicad_documents_dir("10.0.6") / "template").write_text("x", encoding="utf-8")
+        result = make(tmp_path / "proj")
+        assert result.startswith("❌") and "offers only the templates of its pages" in result
+        result = make(tmp_path / "proj2", "shield", template="Arduino_Mega")
+        assert "Project Created" in result, result
+
+
+class TestNames:
+    def test_the_extension_of_the_project_file_goes(self, tmp_path, kicad):
+        kicad("9.0.9")
+        make(tmp_path, "board.kicad_pro")
+        assert (tmp_path / "board.kicad_pro").is_file()
+        assert not (tmp_path / "board.kicad_pro.kicad_pro").exists()
+
+    def test_a_template_path_that_is_no_template(self, tmp_path, kicad):
+        kicad("9.0.9")
+        folder = tmp_path / "all"
+        (folder / "A").mkdir(parents=True)
+        result = make(tmp_path / "proj", template=str(folder))
+        assert result.startswith("❌") and "is no template" in result
+
+
+class TestRoundThree:
+    @pytest.mark.parametrize(
+        "name, project",
+        [
+            ("board.kicad_pro", "board"),
+            ("board.", "board"),
+            ("board.v2", "board.v2"),
+            (".kicad_pro", ".kicad_pro"),
+        ],
+    )
+    def test_the_name_as_the_file_dialog_of_kicad(self, tmp_path, kicad, name, project):
+        kicad("9.0.9")
+        result = make(tmp_path / "p", name)
+        assert "Project Created" in result, result
+        assert (tmp_path / "p" / f"{project}.kicad_pro").is_file()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the permission bits of POSIX")
+    def test_a_read_only_template_schematic(self, tmp_path, kicad):
+        """KiCad 9 keeps the mode of the template file: the title block is a warning."""
+        stock = kicad("9.0.9")
+        tpl = mega_template(stock)
+        (tpl / "Arduino_Mega.kicad_sch").chmod(0o444)
+        result = make(tmp_path / "proj", "shield", template="Arduino_Mega")
+        assert "Project Created" in result, result
+        assert "⚠️ The tool did not write the title block of shield.kicad_sch" in result
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the permission bits of POSIX")
+    def test_a_folder_that_is_not_writable(self, tmp_path, kicad):
+        kicad("9.0.9")
+        out = tmp_path / "proj"
+        out.mkdir()
+        out.chmod(0o555)
+        try:
+            result = make(out)
+        finally:
+            out.chmod(0o755)
+        assert result.startswith("❌ Insufficient permissions to write to folder"), result
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the permission bits of POSIX")
+    def test_no_copy_note_when_the_copy_failed(self, tmp_path, kicad):
+        stock = kicad("9.0.9")
+        (stock / "template" / "kicad.kicad_pro").chmod(0)
+        try:
+            result = make(tmp_path / "proj")
+        finally:
+            (stock / "template" / "kicad.kicad_pro").chmod(0o644)
+        assert "KiCad cannot copy" in result and "is a copy of" not in result
+
+    def test_kicad_10_0_1_needs_meta_for_a_template_path(self, tmp_path, kicad):
+        kicad("10.0.6")
+        folder = tmp_path / "proj_tpl"
+        folder.mkdir()
+        (folder / "proj_tpl.kicad_pro").write_text("{}", encoding="utf-8")
+        result = make(tmp_path / "proj", template=str(folder))
+        assert result.startswith("❌") and 'has no folder "meta"' in result
+        kicad("10.0.0")
+        assert "Project Created" in make(tmp_path / "proj2", template=str(folder))

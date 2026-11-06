@@ -50,7 +50,7 @@ def fake_pcbnew(monkeypatch):
         state["calls"].append(args)
         path = Path(args[2])
         path.write_text(
-            _fake_board(state["board"], args[3], float(args[6]), float(args[7])), encoding="utf-8"
+            _fake_board(state["board"], args[3], float(args[4]), float(args[5])), encoding="utf-8"
         )
         # NewBoard() also saves the project file next to the board.
         path.with_suffix(".kicad_pro").write_text("{}", encoding="utf-8")
@@ -76,11 +76,11 @@ class TestNewBoard:
         assert content == _fake_board(20260206, "board", 50.0, 40.0)
         # The script gets the title, the outline in mm, and no project save.
         args = fake_pcbnew["calls"][0]
-        assert args[3:] == ["board", "", "", "50.0", "40.0", "no-project"]
+        assert args[3:] == ["board", "50.0", "40.0"]
 
     def test_outline_in_mil(self, tmp_path, fake_pcbnew):
         setup(write_schematic(tmp_path, 20260306), width=1000, height=500, unit="mil")
-        assert fake_pcbnew["calls"][0][6:8] == ["25.4", "12.7"]
+        assert fake_pcbnew["calls"][0][4:6] == ["25.4", "12.7"]
 
     def test_project_files_are_not_changed(self, tmp_path, fake_pcbnew):
         sch = write_schematic(tmp_path, 20260306)

@@ -107,15 +107,70 @@ there. Make sure that a new connection is in the netlist: `generate_netlist` and
 
 ## Projects and boards
 
-- `create_kicad_project` makes an empty project in the file format of the installed
-  KiCad, or a project from a KiCad template (`template="Arduino_Uno"`). `pcbnew`
-  writes the board and the project file. kicad-cli cannot make a schematic: the
-  server writes an empty sheet as KiCad 8 or 9 writes it, and KiCad 10 and later
-  convert it with `kicad-cli sch upgrade`. `pcbnew` and kicad-cli must be of the same
-  KiCad version, else the tool gives an error and writes no file. KiCad 7 and older
-  give an error.
+- `create_kicad_project` makes a project as the project manager of the installed
+  KiCad makes it, with the rules of its release (8.0.0 to 10.0.7, from the KiCad
+  source). See "New projects" below.
 - `setup_pcb_layout` makes a new board with an outline, through `pcbnew` of the
   installed KiCad. The board has the file format of the installed KiCad. When that is
   newer than the KiCad of the schematic, the output has a warning: the older KiCad
   cannot open the board. The tool does not replace an existing board without
   `overwrite=True`: a new board removes all footprints, tracks and zones.
+
+## New projects
+
+`create_kicad_project` makes the files that KiCad makes. With no template, they are
+the files of "New Project":
+
+- KiCad 8 and 9: a copy of the project file `kicad.kicad_pro` of KiCad (the first one
+  in `KICAD_USER_TEMPLATE_DIR`, the user templates folder, `KICAD<version>_TEMPLATE_DIR`
+  and the data folder of KiCad), and an empty schematic and board as KiCad writes them.
+- KiCad 10: the files of the template "default" in the user templates folder (from
+  10.0.5; before it, in `KICAD_USER_TEMPLATE_DIR`), then the empty schematic and board.
+  KiCad makes this template when it is not there, and the tool does the same.
+
+With a template (`template="Arduino_Uno"`, or the path of a template folder), they
+are the files of "New Project from Template":
+
+- The files of the template, with the project name in the place of the template name.
+  A drawing sheet (`.kicad_wks`), a legacy symbol library (`.lib`, `.dcm`) and the files
+  of a footprint library (`.pretty`) keep their names, as in KiCad. KiCad 10 also
+  renames the folders with the template name.
+- KiCad does not copy the folder `meta`, the folders that end with `-backups`, hidden
+  files, `fp-info-cache` and lock files. KiCad 8 and 9 also skip the autosave files.
+  KiCad 10 skips the items that the `.gitignore` of their folder names.
+- Then the files that are missing: the project file, the schematic and the board.
+- KiCad does not change the files of the template: the UUIDs, the project file and
+  the schematic stay as they are.
+
+The tool then writes the title, the company and the date into the title block of the
+root schematic that it wrote. KiCad does not do this.
+
+Before KiCad uses a folder that is not empty (no template), or replaces files of the
+template, it asks the user. The tool then gives an error with the files. Ask the user,
+then call the tool again with `overwrite=True`. With no template, the files of the
+folder stay, as in KiCad. With a template, the files of the template replace them.
+The tool refuses to replace the files of a project, a schematic or a board that KiCad
+has open.
+
+When KiCad cannot make an item, the tool does what KiCad does: a folder that KiCad
+cannot make is skipped with the items in it; a file of a template that KiCad cannot
+copy stops the project after the other copies (no project file, schematic or board
+is added); a `kicad.kicad_pro` that KiCad cannot copy gives the empty project file.
+The output gives each of these events. KiCad 10 makes the template "default" first;
+when it cannot, KiCad 10.0.0 to 10.0.4 make only an empty project with no template,
+and KiCad 10.0.5 and later offer only the other templates.
+
+A template is a name on the template pages of KiCad (KiCad 10.0.1 and later: only the
+folders with a `meta` folder), or the path of a folder with a `meta` folder or a
+project file.
+
+Two points differ from KiCad on purpose:
+
+- KiCad 10 replaces the template name in the full path of a folder, also in the
+  folders above the project folder. Thus KiCad can write the files outside the
+  project folder. The tool renames only the folders in the project folder.
+- KiCad shows the files that it replaces with names that do not agree with the copy in
+  some cases (`GetDestinationFiles`). The tool shows the files that the copy replaces.
+
+A release with no rules (KiCad 7, a development build, a release after 10.0.7) and a
+template with only a legacy project file (`.pro`) give an error.

@@ -170,6 +170,24 @@ def _stock_dir(version_dir: str) -> Path | None:
     return get_kicad_share_dir()
 
 
+def kicad_stock_dir(version: str) -> Path | None:
+    """Return the "share/kicad" folder of the installation of a KiCad version (see
+    _stock_dir), or None."""
+    major, minor = _parse_version(version)
+    return _stock_dir(f"{major}.{minor}")
+
+
+def kicad_documents_dir(version: str) -> Path:
+    """Return the documents folder of a KiCad version (PATHS::getUserDocumentPath):
+    KICAD_DOCUMENTS_HOME, else the documents folder of the user, then "KiCad"
+    (Windows, macOS) or "kicad" (Linux), then "<major>.<minor>"."""
+    major, minor = _parse_version(version)
+    folder = "KiCad" if sys.platform in ("win32", "darwin") else "kicad"
+    documents_home = os.environ.get("KICAD_DOCUMENTS_HOME")
+    base = Path(documents_home) if documents_home else _documents_base()
+    return base / folder / f"{major}.{minor}"
+
+
 def kicad_environment(version: str) -> KicadEnvironment:
     """Return the directories and path variables of a KiCad version.
 
@@ -184,11 +202,7 @@ def kicad_environment(version: str) -> KicadEnvironment:
     version_dir = f"{major}.{minor}"
     config_dir = kicad_settings_dir(version)
 
-    folder = "KiCad" if sys.platform in ("win32", "darwin") else "kicad"
-    documents_home = os.environ.get("KICAD_DOCUMENTS_HOME")
-    documents = (
-        (Path(documents_home) if documents_home else _documents_base()) / folder / version_dir
-    )
+    documents = kicad_documents_dir(version)
 
     defaults: dict[str, str] = {
         f"KICAD{major}_3RD_PARTY": str(documents / "3rdparty"),

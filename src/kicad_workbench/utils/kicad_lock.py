@@ -120,11 +120,29 @@ def check_board_not_open(file_path: str | Path) -> str | None:
         None if KiCad does not have the board open. Else, an error message
         for the LLM that tells the user to close the PCB editor.
     """
+    return _check_file_not_open(file_path, "board", "PCB editor")
+
+
+def _check_file_not_open(file_path: str | Path, document: str, editor: str) -> str | None:
     path = Path(os.path.abspath(file_path))
     lock = _existing_lock(path)
-    if lock:
-        return _open_error(path, lock, "board", "PCB editor")
-    return None
+    return _open_error(path, lock, document, editor) if lock else None
+
+
+def check_project_not_open(file_path: str | Path) -> str | None:
+    """Do a check if KiCad has a project open, before a tool replaces its files.
+
+    The project manager of KiCad locks the project file that it opens
+    (SETTINGS_MANAGER::LoadProject), and saves the project settings again.
+
+    Args:
+        file_path: Path to the .kicad_pro file of the project.
+
+    Returns:
+        None if KiCad does not have the project open. Else, an error message for
+        the LLM that tells the user to close the project.
+    """
+    return _check_file_not_open(file_path, "project", "KiCad project manager")
 
 
 FileStamp = tuple[int, int] | None

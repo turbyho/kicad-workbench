@@ -13,7 +13,7 @@
   file as text: they give approximate track lengths and no design rules.
 
 Other tools also use `pcbnew`: `get_library_footprint`, `check_pin_pad_mapping`,
-`check_schematic_pin_pad_mapping`, `check_library_links`, `create_kicad_project` and
+`check_schematic_pin_pad_mapping`, `check_library_links` and
 `setup_pcb_layout`. They run it in a different process, with the Python of KiCad that
 the server finds. The environment variable `KICAD_PYTHON` gives a different Python.
 
@@ -209,7 +209,7 @@ Install KiCad in its standard folder, add the folder of kicad-cli to `PATH`, or 
 The board tools import `pcbnew` in the server process: install the server into a
 Python with `pcbnew` (see above). For the tools that run `pcbnew` in a different
 process (the library footprints, the pin and pad checks, the library links, new
-projects and boards), set `KICAD_PYTHON` to the Python of KiCad.
+boards), set `KICAD_PYTHON` to the Python of KiCad.
 
 ### An edit tool refuses the write
 

@@ -2,9 +2,7 @@
 
 import asyncio
 import hashlib
-import json
 import tempfile
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +22,7 @@ from ..parsers.check_report_parser import (
     ErcUnits,
     parse_drc_report,
     read_erc_report,
+    read_report_file,
 )
 from ..parsers.sch_geometry import IU_PER_MM
 from ..server import mcp
@@ -160,7 +159,7 @@ def _count_text(errors: list[ERCError] | list[DRCError]) -> str:
 
 
 def _parse_erc_report(report_path: Path, schematic_files: list[Path] | None = None) -> ErcReport:
-    """Parse ERC report file (JSON or XML format).
+    """Read the ERC JSON report of kicad-cli.
 
     Args:
         report_path: Path to ERC report file
@@ -169,50 +168,13 @@ def _parse_erc_report(report_path: Path, schematic_files: list[Path] | None = No
 
     Returns:
         The ERC errors/warnings, and the notes about the limits of the values.
+
+    Raises:
+        OSError: The file cannot be read.
+        InputError: The file is not a JSON report of KiCad.
     """
-    errors = []
-    content = report_path.read_text(encoding="utf-8", errors="replace")
-
-    try:
-        data = json.loads(content)
-        # KiCad 8-10 ERC JSON: sheets[].violations (see check_report_parser).
-        return read_erc_report(data, schematic_files or [])
-    except (json.JSONDecodeError, KeyError):
-        pass
-
-    # Fallback: XML format
-    try:
-        root = ET.fromstring(content)
-        for violation in root.findall(".//violation"):
-            severity = violation.get("severity", "error")
-            error_type = violation.get("type", "unknown")
-            description = violation.get("description", "")
-
-            components = []
-            for comp in violation.findall(".//component"):
-                ref = comp.get("ref", "")
-                if ref:
-                    components.append(ref)
-
-            errors.append(
-                ERCError(
-                    severity=severity,
-                    type=error_type,
-                    description=description,
-                    components=components,
-                )
-            )
-    except ET.ParseError as e:
-        errors.append(
-            ERCError(
-                severity="error",
-                type="parse_error",
-                description=f"Failed to parse ERC report: {str(e)}",
-                components=[],
-            )
-        )
-
-    return ErcReport(errors)
+    data = read_report_file(report_path, "ERC")
+    return read_erc_report(data, schematic_files or [], f"the ERC report {report_path}")
 
 
 @dataclass
@@ -314,56 +276,20 @@ def _notes_text(notes: list[str]) -> str:
 
 
 def _parse_drc_report(report_path: Path) -> list[DRCError]:
-    """Parse DRC report file (JSON or XML format).
+    """Read the DRC JSON report of kicad-cli.
 
     Args:
         report_path: Path to DRC report file
 
     Returns:
         List of DRC errors/warnings
+
+    Raises:
+        OSError: The file cannot be read.
+        InputError: The file is not a JSON report of KiCad.
     """
-    errors = []
-    content = report_path.read_text(encoding="utf-8", errors="replace")
-
-    try:
-        data = json.loads(content)
-        # KiCad 9+ DRC JSON: top-level lists "violations", "unconnected_items"
-        # and "schematic_parity" (no "sheets" key).
-        return parse_drc_report(data)
-    except (json.JSONDecodeError, KeyError):
-        pass
-
-    # Fallback: XML format
-    try:
-        root = ET.fromstring(content)
-        for violation in root.findall(".//violation"):
-            severity = violation.get("severity", "error")
-            error_type = violation.get("type", "unknown")
-            description = violation.get("description", "")
-
-            location_elem = violation.find(".//location")
-            x = float(location_elem.get("x", "0")) if location_elem is not None else 0.0
-            y = float(location_elem.get("y", "0")) if location_elem is not None else 0.0
-
-            errors.append(
-                DRCError(
-                    severity=severity,
-                    type=error_type,
-                    description=description,
-                    location=(x, y),
-                )
-            )
-    except ET.ParseError as e:
-        errors.append(
-            DRCError(
-                severity="error",
-                type="parse_error",
-                description=f"Failed to parse DRC report: {str(e)}",
-                location=(0.0, 0.0),
-            )
-        )
-
-    return errors
+    data = read_report_file(report_path, "DRC")
+    return parse_drc_report(data, f"the DRC report {report_path}")
 
 
 def _filter_erc_errors(errors: list[ERCError], severity: str = "") -> list[ERCError]:

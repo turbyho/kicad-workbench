@@ -7,6 +7,7 @@ other language (for example a report of the user): language-neutral fallback
 rules get the reference and the position, and the pin fields stay empty.
 """
 
+import json
 import math
 import re
 from collections.abc import Iterable
@@ -243,36 +244,42 @@ def schematic_lines(schematic_files: Iterable[Path]) -> dict[str, tuple[Point, P
     return lines
 
 
-def _coordinate(value: Any) -> float:
+_NOT_KICAD = "The report is not a report of KiCad"
+_KIND_NAMES = {list: "a list", dict: "a JSON object", str: "a text", bool: "a boolean"}
+
+
+def _coordinate(value: Any, where: str = "a coordinate") -> float:
     """Return a coordinate of a report. KiCad writes it as a JSON number
-    (RC_ITEM::GetJsonViolation).
+    (RC_ITEM::GetJsonViolation: a double).
 
     Raises:
         InputError: The value is not a finite number.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise InputError(f"The report has the coordinate {value!r}, not a number.")
+        raise InputError(f"{_NOT_KICAD}: {where} is {value!r}, not a number.")
     return float(value)
 
 
 def parse_erc_item(item: dict[str, Any], pcb_scale: bool = False) -> ERCItem:
-    """Parse one item of an ERC violation.
+    """Parse one item of an ERC violation (RC_JSON::AFFECTED_ITEM: uuid, description
+    and pos, as _violations checks them).
 
     Args:
         pcb_scale: The positions have pcbIUScale (ErcUnits).
-    """
-    desc = item.get("description", "")
-    out = ERCItem(description=desc, uuid=item.get("uuid", ""))
 
-    pos = item.get("pos") or {}
-    if "x" in pos and "y" in pos:
-        if pcb_scale:
-            # The value is IU / 1e6 with schematic IU: the IU are exact integers.
-            out.x_mm = round(_coordinate(pos["x"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
-            out.y_mm = round(_coordinate(pos["y"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
-        else:
-            out.x_mm = _coordinate(pos["x"])
-            out.y_mm = _coordinate(pos["y"])
+    Raises:
+        KeyError: The item is not an item of KiCad (the reports check it first).
+        InputError: A coordinate is not a number.
+    """
+    desc = item["description"]
+    out = ERCItem(description=desc, uuid=item["uuid"])
+    x, y = _coordinate(item["pos"]["x"]), _coordinate(item["pos"]["y"])
+    if pcb_scale:
+        # The value is IU / 1e6 with schematic IU: the IU are exact integers.
+        out.x_mm = round(x * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
+        out.y_mm = round(y * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
+    else:
+        out.x_mm, out.y_mm = x, y
 
     # The English item text of a symbol and of its pin has the text of the Reference
     # field as it is (SCH_SYMBOL::GetItemDescription, SCH_PIN::GetItemDescription):
@@ -311,16 +318,51 @@ def parse_erc_item(item: dict[str, Any], pcb_scale: bool = False) -> ERCItem:
     return out
 
 
-def _erc_sheets(report: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the sheets of an ERC report.
+def _require(data: Any, key: str, kind: type, where: str) -> Any:
+    """Return data[key] of a report, of the type of RC_JSON (include/rc_json_schema.h
+    of KiCad 8, 9 and 10).
 
-    KiCad 8 to 10 write ``sheets[].violations``. A report with a top-level
-    ``violations`` list is also accepted.
+    Raises:
+        InputError: The value is not there, or it has an other type.
     """
-    sheets = report.get("sheets")
-    if isinstance(sheets, list):
-        return sheets
-    return [{"path": "", "violations": report.get("violations", [])}]
+    if not isinstance(data, dict):
+        raise InputError(f"{_NOT_KICAD}: {where} is not a JSON object.")
+    if key not in data:
+        raise InputError(f"{_NOT_KICAD}: {where} has no {key!r}.")
+    if not isinstance(data[key], kind):
+        raise InputError(f"{_NOT_KICAD}: {key!r} of {where} is not {_KIND_NAMES[kind]}.")
+    return data[key]
+
+
+def _violations(container: dict[str, Any], key: str, where: str) -> list[dict[str, Any]]:
+    """Return the violations of a list of a report, after the check of their keys.
+
+    KiCad writes type, description, severity and items for each violation, and
+    excluded and comment only for an excluded violation (RC_JSON::to_json of
+    VIOLATION). Each item has uuid, description and pos (AFFECTED_ITEM).
+
+    Raises:
+        InputError: The list is not the list of KiCad.
+    """
+    violations = _require(container, key, list, where)
+    for number, violation in enumerate(violations, 1):
+        # The places count from 1: "violation 1" is the first violation of the list.
+        at = f"violation {number} of {key!r} of {where}"
+        for name in ("type", "description", "severity"):
+            _require(violation, name, str, at)
+        for name, kind in (("excluded", bool), ("comment", str)):
+            if name in violation:
+                _require(violation, name, kind, at)
+        for index, item in enumerate(_require(violation, "items", list, at), 1):
+            item_at = f"item {index} of {at}"
+            _require(item, "uuid", str, item_at)
+            _require(item, "description", str, item_at)
+            pos = _require(item, "pos", dict, item_at)
+            for axis in ("x", "y"):
+                if axis not in pos:
+                    raise InputError(f"{_NOT_KICAD}: 'pos' of {item_at} has no {axis!r}.")
+                _coordinate(pos[axis], f"{axis!r} of 'pos' of {item_at}")
+    return violations
 
 
 @dataclass
@@ -332,22 +374,35 @@ class ErcReport:
     units: ErcUnits = field(default_factory=ErcUnits)
 
 
-def read_erc_report(report: dict[str, Any], schematic_files: Iterable[Path] = ()) -> ErcReport:
-    """Read the data of an ERC JSON report of kicad-cli.
+def read_erc_report(
+    report: dict[str, Any], schematic_files: Iterable[Path] = (), source: str = "the ERC report"
+) -> ErcReport:
+    """Read the data of an ERC JSON report of kicad-cli, by the RC_JSON structs of
+    KiCad (_violations).
 
     The positions get the units of the KiCad version (erc_report_units). With
     the board scale, an item text that ends with " mm" has a length: only
     SCH_LINE::GetItemDescription gives a value in an ERC item text. The text of
     a wire, a bus or a graphic line of the schematic files gets its correct
     length (corrected_length_text); a note counts the other texts.
+
+    Args:
+        source: The report for the messages, for example "the ERC report <path>".
+
+    Raises:
+        InputError: The data is not an ERC report of KiCad (the message gives the
+            place).
     """
+    sheets = _require(report, "sheets", list, source)
     units = erc_report_units(report)
     errors = []
     lengths = []  # The items whose text has a length in the board scale.
-    for sheet in _erc_sheets(report):
-        for v in sheet.get("violations", []):
+    for number, sheet in enumerate(sheets, 1):
+        where = f"sheet {number} of {source}"
+        path = _require(sheet, "path", str, where)
+        for v in _violations(sheet, "violations", where):
             items = []
-            for raw in v.get("items", []):
+            for raw in v["items"]:
                 item = parse_erc_item(raw, units.pcb_scale)
                 if not units.positions:
                     item.x_mm = item.y_mm = None
@@ -356,14 +411,14 @@ def read_erc_report(report: dict[str, Any], schematic_files: Iterable[Path] = ()
                 items.append(item)
             errors.append(
                 ERCError(
-                    severity=v.get("severity", "error"),
-                    type=v.get("type", "unknown"),
-                    description=v.get("description", ""),
+                    severity=v["severity"],
+                    type=v["type"],
+                    description=v["description"],
                     components=[i.reference for i in items if i.reference],
                     items=items,
-                    excluded=bool(v.get("excluded", False)),
+                    excluded=v.get("excluded", False),
                     comment=v.get("comment", ""),
-                    sheet=sheet.get("path", ""),
+                    sheet=path,
                 )
             )
     not_corrected = 0
@@ -387,6 +442,24 @@ def read_erc_report(report: dict[str, Any], schematic_files: Iterable[Path] = ()
     return ErcReport(errors, notes, units)
 
 
+def read_report_file(path: Path, kind: str) -> dict[str, Any]:
+    """Return the data of a JSON report file of kicad-cli (ERC or DRC). kicad-cli
+    writes it as UTF-8 JSON (ERC_REPORT::WriteJsonReport, DRC_REPORT).
+
+    Raises:
+        OSError: The file cannot be read.
+        InputError: The file is not UTF-8 JSON, or not a JSON object.
+    """
+    try:
+        data = json.loads(path.read_bytes().decode("utf-8"))
+    # RecursionError: JSON that is nested too deep for the parser.
+    except (ValueError, RecursionError) as e:
+        raise InputError(f"The {kind} report {path} is not UTF-8 JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise InputError(f"The {kind} report {path} is not a JSON object.")
+    return data
+
+
 def parse_erc_report(report: dict[str, Any]) -> list[ERCError]:
     """Parse the data of an ERC JSON report into ERC errors (read_erc_report with no
     schematic files: the item texts of lines keep the length of the report)."""
@@ -394,13 +467,17 @@ def parse_erc_report(report: dict[str, Any]) -> list[ERCError]:
 
 
 def parse_drc_item(item: dict[str, Any]) -> DRCItem:
-    """Parse one item of a DRC violation."""
-    desc = item.get("description", "")
-    out = DRCItem(description=desc, uuid=item.get("uuid", ""))
-    pos = item.get("pos") or {}
-    if "x" in pos and "y" in pos:
-        out.x_mm = _coordinate(pos["x"])
-        out.y_mm = _coordinate(pos["y"])
+    """Parse one item of a DRC violation (RC_JSON::AFFECTED_ITEM, as _violations
+    checks it).
+
+    Raises:
+        KeyError: The item is not an item of KiCad (the reports check it first).
+        InputError: A coordinate is not a number.
+    """
+    desc = item["description"]
+    out = DRCItem(description=desc, uuid=item["uuid"])
+    out.x_mm = _coordinate(item["pos"]["x"])
+    out.y_mm = _coordinate(item["pos"]["y"])
 
     # Remove the net names in brackets first: a net name can contain " of ".
     plain = _DRC_BRACKETS.sub("", desc)
@@ -417,29 +494,38 @@ _DRC_CATEGORIES = (
 )
 
 
-def parse_drc_report(report: dict[str, Any]) -> list[DRCError]:
+def parse_drc_report(report: dict[str, Any], source: str = "the DRC report") -> list[DRCError]:
     """Parse the data of a DRC JSON report into DRC errors.
 
     The DRC report has the top-level lists ``violations``,
     ``unconnected_items`` and ``schematic_parity``. Each list is parsed.
+
+    Args:
+        source: The report for the messages, for example "the DRC report <path>".
+
+    Raises:
+        InputError: The data is not a DRC report of KiCad (the message gives the
+            place).
     """
+    if not isinstance(report, dict):
+        raise InputError(f"{_NOT_KICAD}: {source} is not a JSON object.")
     errors = []
     for key, category in _DRC_CATEGORIES:
-        for v in report.get(key, []):
-            items = [parse_drc_item(i) for i in v.get("items", [])]
+        for v in _violations(report, key, source):
+            items = [parse_drc_item(i) for i in v["items"]]
             first = items[0] if items else None
             location = (first.x_mm or 0.0, first.y_mm or 0.0) if first is not None else (0.0, 0.0)
             refs = list(dict.fromkeys(i.reference for i in items if i.reference))
             errors.append(
                 DRCError(
-                    severity=v.get("severity", "error"),
-                    type=v.get("type", "unknown"),
-                    description=v.get("description", ""),
+                    severity=v["severity"],
+                    type=v["type"],
+                    description=v["description"],
                     location=location,
                     category=category,
                     components=refs,
                     items=items,
-                    excluded=bool(v.get("excluded", False)),
+                    excluded=v.get("excluded", False),
                     comment=v.get("comment", ""),
                 )
             )

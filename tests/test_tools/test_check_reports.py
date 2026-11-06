@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_workbench.errors import InputError
 from kicad_workbench.parsers.check_report_parser import (
     ErcUnits,
     corrected_length_text,
@@ -29,13 +30,19 @@ REPORTS = FIXTURES / "reports"
 LABEL_SCH = REPORTS / "dangling_label.kicad_sch"
 
 
+def _item(description: str, x: float = 0.0, y: float = 0.0) -> dict:
+    """An item of a violation, as KiCad writes it (RC_JSON::AFFECTED_ITEM)."""
+    return {"uuid": "00000000-0000-0000-0000-000000000001", "description": description,
+            "pos": {"x": x, "y": y}}  # fmt: skip
+
+
 def _load(name: str) -> dict:
     return json.loads((REPORTS / name).read_text(encoding="utf-8"))
 
 
 class TestErcItem:
     def test_pin_with_name(self):
-        item = parse_erc_item({"description": "Symbol U1 Pin 3 [SDA, Bidirectional, Line]"})
+        item = parse_erc_item(_item("Symbol U1 Pin 3 [SDA, Bidirectional, Line]"))
         assert (item.reference, item.pin_number, item.pin_name, item.pin_type) == (
             "U1",
             "3",
@@ -44,7 +51,7 @@ class TestErcItem:
         )
 
     def test_pin_without_name(self):
-        item = parse_erc_item({"description": "Symbol #PWR01 Pin 1 [Power input, Line]"})
+        item = parse_erc_item(_item("Symbol #PWR01 Pin 1 [Power input, Line]"))
         assert (item.reference, item.pin_number, item.pin_name, item.pin_type) == (
             "#PWR01",
             "1",
@@ -53,53 +60,47 @@ class TestErcItem:
         )
 
     def test_pin_name_with_comma(self):
-        item = parse_erc_item({"description": "Symbol U2 Pin A1 [IN, OUT, Bidirectional, Line]"})
+        item = parse_erc_item(_item("Symbol U2 Pin A1 [IN, OUT, Bidirectional, Line]"))
         assert item.pin_name == "IN, OUT"
         assert item.pin_type == "Bidirectional"
 
     def test_pin_of_missing_library_symbol(self):
-        item = parse_erc_item({"description": "Pin 1 [???, ?]"})
+        item = parse_erc_item(_item("Pin 1 [???, ?]"))
         assert (item.reference, item.pin_number) == ("", "1")
 
     @pytest.mark.parametrize("reference", ["C?", "#PWR?", "C"])
     def test_symbol_that_is_not_annotated(self, reference):
         # The English text has the Reference field as it is (SCH_SYMBOL::GetItemDescription):
         # also "C?" (UTIL::GetRefDesUnannotated) or "C" (no number: SCH_REFERENCE::Split).
-        item = parse_erc_item({"description": f"Symbol {reference} [CP]"})
+        item = parse_erc_item(_item(f"Symbol {reference} [CP]"))
         assert (item.reference, item.value) == (reference, "CP")
-        item = parse_erc_item({"description": f"Symbol {reference} Pin 1 [Passive, Line]"})
+        item = parse_erc_item(_item(f"Symbol {reference} Pin 1 [Passive, Line]"))
         assert (item.reference, item.pin_number) == (reference, "1")
 
     def test_localized_symbol_that_is_not_annotated(self):
-        item = parse_erc_item({"description": "Symbol R? Vývod 1 [~, Pasivní, Čára]"})
+        item = parse_erc_item(_item("Symbol R? Vývod 1 [~, Pasivní, Čára]"))
         assert (item.reference, item.pin_number) == ("R?", "1")
 
     def test_symbol(self):
-        item = parse_erc_item({"description": "Symbol U3 [ABC-123]"})
+        item = parse_erc_item(_item("Symbol U3 [ABC-123]"))
         assert (item.reference, item.value, item.pin_number) == ("U3", "ABC-123", "")
 
     def test_label(self):
-        item = parse_erc_item({"description": "Global Label 'NET_A'"})
+        item = parse_erc_item(_item("Global Label 'NET_A'"))
         assert (item.label, item.reference) == ("NET_A", "")
 
     def test_localized_pin_keeps_structure(self):
-        item = parse_erc_item({"description": "Symbol U1 Vývod 3 [SDA, Obousměrný, Čára]"})
+        item = parse_erc_item(_item("Symbol U1 Vývod 3 [SDA, Obousměrný, Čára]"))
         assert (item.reference, item.pin_number, item.pin_name) == ("U1", "3", "SDA")
         # The localized pin type is not given as an English type.
         assert item.pin_type == ""
 
     def test_position_with_the_board_scale(self):
         # KiCad 8, 9 and 10.0.0 to 10.0.6 write IU / 1e6 with schematic IU (100 nm).
-        item = parse_erc_item(
-            {"description": "Global Label 'X'", "pos": {"x": 0.508, "y": -0.635}}, True
-        )
+        item = parse_erc_item(_item("Global Label 'X'", 0.508, -0.635), True)
         assert (item.x_mm, item.y_mm) == (50.8, -63.5)
-        item = parse_erc_item({"description": "X", "pos": {"x": 50.8, "y": -63.5}})
+        item = parse_erc_item(_item("X", 50.8, -63.5))
         assert (item.x_mm, item.y_mm) == (50.8, -63.5)
-
-    def test_no_position(self):
-        item = parse_erc_item({"description": "Global Label 'X'"})
-        assert item.x_mm is None and item.y_mm is None
 
 
 class TestErcReport:
@@ -108,10 +109,30 @@ class TestErcReport:
         assert len(errors) == 8
         assert {e.sheet for e in errors} == {"/", "/Power/"}
 
-    def test_top_level_violations_are_accepted(self):
+    def test_a_report_that_is_not_the_report_of_kicad(self):
+        # KiCad 8, 9 and 10 write sheets[].violations (RC_JSON::ERC_REPORT). The reader
+        # accepted a top-level list of violations, a form that KiCad does not write.
         data = _load("erc_kicad10_en.json")
         flat = {"violations": data["sheets"][0]["violations"]}
-        assert len(parse_erc_report(flat)) == 7
+        with pytest.raises(InputError, match="the ERC report has no 'sheets'"):
+            parse_erc_report(flat)
+        del data["sheets"][0]["violations"][0]["severity"]
+        with pytest.raises(
+            InputError,
+            match="violation 1 of 'violations' of sheet 1 of the ERC report has no 'severity'",
+        ):
+            parse_erc_report(data)
+        drc = _load("drc_kicad10_en.json")
+        drc["violations"][0]["items"][0]["pos"] = {"x": 1.0}
+        with pytest.raises(
+            InputError,
+            match="'pos' of item 1 of violation 1 of 'violations' of the DRC report has no 'y'",
+        ):
+            parse_drc_report(drc)
+        drc = _load("drc_kicad10_en.json")
+        del drc["unconnected_items"]
+        with pytest.raises(InputError, match="the DRC report has no 'unconnected_items'"):
+            parse_drc_report(drc)
 
     def test_exclusion(self):
         errors = parse_erc_report(_load("erc_kicad10_en.json"))
@@ -175,7 +196,17 @@ class TestErcUnits:
             "kicad_version": "10.0.6",
             "coordinate_units": "in",
             "sheets": [
-                {"violations": [{"items": [{"description": "X", "pos": {"x": 1, "y": 2}}]}]}
+                {
+                    "path": "/",
+                    "violations": [
+                        {
+                            "type": "x",
+                            "description": "X",
+                            "severity": "error",
+                            "items": [{"uuid": "u", "description": "X", "pos": {"x": 1, "y": 2}}],
+                        }
+                    ],
+                }
             ],
         }
         (error,) = parse_erc_report(report)
@@ -249,6 +280,7 @@ class TestReadErcReport:
                     "violations": [
                         {
                             "type": "wire_dangling",
+                            "description": "Wire not connected",
                             "severity": "error",
                             "items": [
                                 item("w1", "Horizontal Wire, length 0.1000 mm", 0.1, 0.1),
@@ -497,3 +529,24 @@ class TestKicadCliIntegration:
         assert "'NET_A'" in out
         if sys.platform.startswith("linux"):
             assert "Global Label 'NET_A'" in out
+
+
+@pytest.mark.parametrize(
+    "data, text",
+    [
+        (b'{"sheets": [\xff]}', "is not UTF-8 JSON"),
+        (b"<report/>", "is not UTF-8 JSON"),  # no XML form: kicad-cli writes JSON only
+        (b"[]", "is not a JSON object"),
+    ],
+)
+def test_a_report_file_that_is_not_json(tmp_path, data, text):
+    # The reader replaced the bytes that are not UTF-8, tried XML, and gave a reader
+    # error as a violation "parse_error" of the design.
+    path = tmp_path / "erc.json"
+    path.write_bytes(data)
+    for read, kind in (
+        (validation._parse_erc_report, "ERC"),
+        (validation._parse_drc_report, "DRC"),
+    ):
+        with pytest.raises(InputError, match=f"The {kind} report .* {text}"):
+            read(path)

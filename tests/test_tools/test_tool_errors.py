@@ -301,8 +301,18 @@ def test_numbers_of_more_than_4300_digits():
 
 @pytest.mark.parametrize("pos", [{"x": "abc", "y": 0}, {"x": 1.0, "y": None}, {"x": True, "y": 0}])
 def test_a_report_coordinate_that_is_not_a_number(pos):
-    from kicad_workbench.parsers.check_report_parser import parse_drc_item, parse_erc_item
+    from kicad_workbench.parsers.check_report_parser import (
+        parse_drc_item,
+        parse_drc_report,
+        parse_erc_item,
+    )
 
+    item = {"uuid": "u", "description": "x", "pos": pos}
     for parse in (parse_erc_item, parse_drc_item):
         with pytest.raises(InputError, match="not a number"):
-            parse({"description": "x", "pos": pos})
+            parse(item)
+    # The check of a report gives the place.
+    report = {"violations": [{"type": "t", "description": "d", "severity": "error",
+                              "items": [item]}], "unconnected_items": [], "schematic_parity": []}  # fmt: skip
+    with pytest.raises(InputError, match="of 'pos' of item 1 of violation 1 of 'violations'"):
+        parse_drc_report(report)

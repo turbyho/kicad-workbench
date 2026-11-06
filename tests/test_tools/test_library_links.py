@@ -98,9 +98,16 @@ class TestSeverity:
         assert found == {"lib_symbol_issues": expected}
 
 
+def _item(description: str) -> dict:
+    """An item of a violation, as KiCad writes it (RC_JSON::AFFECTED_ITEM)."""
+    return {"uuid": "00000000-0000-0000-0000-000000000001", "description": description,
+            "pos": {"x": 0.0, "y": 0.0}}  # fmt: skip
+
+
 ERC = {
     "sheets": [
         {
+            "uuid_path": "/",
             "path": "/",
             "violations": [
                 {
@@ -108,21 +115,21 @@ ERC = {
                     "severity": "warning",
                     "description": "The current configuration does not include the symbol "
                     "library 'Gone'",
-                    "items": [{"description": "Symbol R1 [1k]"}],
+                    "items": [_item("Symbol R1 [1k]")],
                 },
                 {
                     "type": "lib_symbol_issues",
                     "severity": "warning",
                     "description": "The current configuration does not include the symbol "
                     "library 'Gone'",
-                    "items": [{"description": "Symbol U1 [X]"}],
+                    "items": [_item("Symbol U1 [X]")],
                 },
                 {
                     "type": "lib_symbol_mismatch",
                     "severity": "warning",
                     "excluded": True,
                     "description": "Symbol 'X' doesn't match copy in library 'Lib'",
-                    "items": [{"description": "Symbol J1 [C]"}],
+                    "items": [_item("Symbol J1 [C]")],
                 },
                 {
                     "type": "pin_not_connected",
@@ -140,7 +147,7 @@ DRC = {
             "type": "lib_footprint_mismatch",
             "severity": "warning",
             "description": "Footprint 'Two' does not match copy in library 'Lib'",
-            "items": [{"description": "Footprint R1", "pos": {"x": 0, "y": 0}}],
+            "items": [_item("Footprint R1")],
         }
     ],
     "unconnected_items": [],
@@ -259,7 +266,10 @@ class TestCheckLibraryLinks:
             ' "board": {"design_settings": {"rule_severities": {"lib_footprint_issues": 1}}}}',
             encoding="utf-8",
         )
-        project["state"].update(erc={"sheets": []}, drc={"violations": []})
+        project["state"].update(
+            erc={"sheets": []},
+            drc={"violations": [], "unconnected_items": [], "schematic_parity": []},
+        )
         out = await library_links.check_library_links(str(project["directory"]))
         assert "_The project ignores the check lib_symbol_issues: KiCad does not run it._" in out
         # KiCad cannot read the value 1: the check keeps its default severity.
@@ -316,6 +326,19 @@ class TestCheckLibraryLinks:
         (project["directory"] / "main.kicad_sch").write_text("", encoding="utf-8")
         out = await library_links.check_library_links(str(project["directory"]))
         assert "❌ The top-level sheet of the project" in section(out, "Schematic")
+        assert "## Board footprints (DRC of KiCad)" in out
+
+    async def test_a_report_that_is_not_of_kicad_stops_only_its_part(self, project):
+        # A violation with no severity: the ERC part gives the error, the board part
+        # stays.
+        bad = json.loads(json.dumps(ERC))
+        del bad["sheets"][0]["violations"][0]["severity"]
+        project["state"].update(erc=bad)
+        out = await library_links.check_library_links(str(project["directory"]))
+        assert (
+            "❌ ERC failed: The report is not a report of KiCad: violation 1 of 'violations' "
+            "of sheet 1 of the ERC report has no 'severity'."
+        ) in out, out
         assert "## Board footprints (DRC of KiCad)" in out
 
     async def test_given_board(self, project):

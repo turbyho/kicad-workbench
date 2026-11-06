@@ -16,7 +16,6 @@ also the embedded files of the board.
 """
 
 import asyncio
-import json
 import shutil
 import subprocess
 import tempfile
@@ -24,8 +23,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
+from ..models.types import DRCError, ERCError
 from ..parsers.board_models import board_models
-from ..parsers.check_report_parser import parse_drc_report, parse_erc_report
+from ..parsers.check_report_parser import (
+    parse_drc_report,
+    parse_erc_report,
+    read_report_file,
+)
 from ..parsers.kicad_versions import version_numbers
 from ..parsers.sexpr import SExprError
 from ..server import mcp
@@ -95,13 +99,15 @@ def _count_text(name: str, count: int) -> str:
     return f"{count} {_SINGULAR.get(name, name) if count == 1 else name}"
 
 
-def _run_check(args: list[str], source: Path) -> dict:
-    """Run "kicad-cli sch erc" or "kicad-cli pcb drc" and return the JSON report.
+def _run_check(args: list[str], source: Path) -> list[ERCError] | list[DRCError]:
+    """Run "kicad-cli sch erc" or "kicad-cli pcb drc" and return the violations of
+    its JSON report.
 
     The thread that runs this function owns the temporary directory.
 
     Raises:
         KicadCliError: kicad-cli did not write the report.
+        InputError: The report is not a JSON report of KiCad.
     """
     directory = Path(tempfile.mkdtemp(prefix="kicad-workbench-check-"))
     try:
@@ -118,10 +124,9 @@ def _run_check(args: list[str], source: Path) -> dict:
             raise KicadCliError(
                 f"kicad-cli stopped with the exit code {result.returncode}: {output}"
             )
-        try:
-            return json.loads(report.read_text(encoding="utf-8"))
-        except ValueError as e:
-            raise KicadCliError(f"the report of kicad-cli is not JSON: {e}") from e
+        if args[0] == "sch":
+            return parse_erc_report(read_report_file(report, "ERC"))
+        return parse_drc_report(read_report_file(report, "DRC"))
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -383,14 +388,14 @@ async def _schematic_part(schematic: Path, kicad: str) -> _Part:
             found = f"❌ {e}"
     finally:
         (report,) = await asyncio.gather(erc, return_exceptions=True)
-    if isinstance(report, KicadCliError):
+    if isinstance(report, (KicadCliError, InputError)):
         part.body += ["", "## Schematic symbols (ERC of KiCad)", "", f"❌ ERC failed: {report}"]
         part.counts["schematic symbols not checked"] = 1
     elif isinstance(report, BaseException):
         raise report
     else:
         lines, part.counts["symbols with a library problem"] = _check_lines(
-            "Schematic symbols (ERC of KiCad)", parse_erc_report(report), _ERC_TYPES, project,
+            "Schematic symbols (ERC of KiCad)", report, _ERC_TYPES, project,
             _ERC_KEYS, "erc", kicad,
         )  # fmt: skip
         part.body += lines
@@ -446,14 +451,14 @@ async def _board_part(board: Path, kicad: str) -> _Part:
             models = f"❌ The server cannot read the board or its library tables: {e}"
     finally:
         (report,) = await asyncio.gather(drc, return_exceptions=True)
-    if isinstance(report, KicadCliError):
+    if isinstance(report, (KicadCliError, InputError)):
         part.body += ["", "## Board footprints (DRC of KiCad)", "", f"❌ DRC failed: {report}"]
         part.counts["board footprints not checked"] = 1
     elif isinstance(report, BaseException):
         raise report
     else:
         lines, part.counts["board footprints with a library problem"] = _check_lines(
-            "Board footprints (DRC of KiCad)", parse_drc_report(report), _DRC_TYPES, project,
+            "Board footprints (DRC of KiCad)", report, _DRC_TYPES, project,
             _DRC_KEYS, "drc", kicad,
         )  # fmt: skip
         part.body += lines

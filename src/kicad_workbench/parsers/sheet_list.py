@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from functools import cmp_to_key
 from pathlib import Path
 
+from ..errors import InputError
 from ..utils.kicad_lock import FileStamp, file_stamp
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.sch_hierarchy import TopLevelSheet, expand_text_variables
@@ -133,7 +134,14 @@ def to_long(text: str) -> int | None:
     match = re.fullmatch(r"[ \t\n\v\f\r]*([+-]?[0-9]+)", text)
     if match is None:
         return None
-    value = int(match.group(1))
+    number = match.group(1)
+    sign = "-" if number.startswith("-") else ""
+    digits = number.lstrip("+-").lstrip("0") or "0"
+    # More than 19 digits is out of the range. int() refuses a text of more than
+    # 4300 digits, also with zeros at the start.
+    if len(digits) > 19:
+        return None
+    value = int(sign + digits)
     return value if _LONG_MIN <= value <= _LONG_MAX else None
 
 
@@ -565,7 +573,7 @@ def build_sheet_list(
         try:
             screen, root_page = _read_screen(file, kicad)
         except (OSError, KiCadEncodingError, SExprError) as e:
-            raise ValueError(f"KiCad cannot load the top-level sheet {file}: {e}") from e
+            raise InputError(f"KiCad cannot load the top-level sheet {file}: {e}") from e
         screens[file] = screen
         top_screens.append(screen)
         if root_page is not None:

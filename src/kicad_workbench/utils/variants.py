@@ -5,6 +5,7 @@ export_bom and set_symbol_fields use them.
 
 from pathlib import Path
 
+from ..errors import InputError
 from ..parsers.sexpr import Node, parse
 from .kicad_text import read_as_kicad, read_kicad_json
 from .sch_hierarchy import project_files
@@ -29,7 +30,7 @@ def project_variants(project: Path) -> set[str]:
         return set()
     try:
         settings = read_kicad_json(project)
-    except ValueError:
+    except InputError:
         # KiCad uses the default settings for a project file that is not JSON
         # (JSON_SETTINGS::LoadFromFile): they have no variants.
         return set()

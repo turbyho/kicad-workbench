@@ -25,6 +25,7 @@ values (JSON_SETTINGS::LoadFromFile).
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..errors import InputError
 from ..parsers.rule_severity_keys import SeverityKeys, all_pre_keys, severity_keys
 from ..parsers.sch_geometry import IU_PER_MIL, kiround
 from .kicad_text import read_kicad_json
@@ -78,7 +79,7 @@ def schematic_settings(project_file: Path) -> SchematicSettings:
         return SchematicSettings(default_grid, erc_severities=defaults)
     try:
         data = read_kicad_json(project_file)
-    except (OSError, ValueError) as e:
+    except (OSError, InputError) as e:
         return SchematicSettings(
             default_grid,
             f"The project file {project_file} cannot be read ({e}), thus KiCad uses "
@@ -202,7 +203,7 @@ def subpart_settings(project_file: Path) -> SubpartSettings:
     problem = None
     try:
         data = read_kicad_json(project_file) if project_file.is_file() else None
-    except (OSError, ValueError) as e:
+    except (OSError, InputError) as e:
         data = None
         problem = (
             f"The project file {project_file} cannot be read ({e}), thus KiCad uses "
@@ -222,7 +223,7 @@ def _project_data(project_file: Path) -> object:
         return None
     try:
         return read_kicad_json(project_file)
-    except (OSError, ValueError):
+    except (OSError, InputError):
         return None
 
 

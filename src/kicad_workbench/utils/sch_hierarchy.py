@@ -25,6 +25,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..errors import WorkbenchError
 from ..parsers.kicad_fields import FieldRules, rules_for_file, sheet_fields
 from ..parsers.kicad_versions import KicadFileError, file_version
 from ..parsers.sexpr import Node, SExprError, parse
@@ -43,7 +44,7 @@ _SHEETS_CACHE: dict[bytes, tuple[str | None, list["_Sheet"]]] = {}
 _SHEETS_CACHE_SIZE = 1024
 
 
-class AmbiguousRootError(Exception):
+class AmbiguousRootError(WorkbenchError):
     """A sub-sheet is part of more than one root schematic."""
 
     def __init__(self, sheet: Path, roots: list[Path]):

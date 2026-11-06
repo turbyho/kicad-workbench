@@ -36,7 +36,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..parsers.kicad_versions import KicadFileError
+from ..errors import InputError, WorkbenchError
 from ..parsers.sexpr import SExprError
 from ..parsers.unit_fields import unit_conflicts
 from ..server import mcp
@@ -48,7 +48,7 @@ from ..utils.kicad_bom import (
     unit_check_lines,
     variant_label,
 )
-from ..utils.kicad_cli import CliExport, get_kicad_version
+from ..utils.kicad_cli import CliExport, KicadCliError, get_kicad_version
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.tool_errors import error_answer
@@ -118,7 +118,7 @@ def bom_fields(fields: list[str], group_by: list[str], major: int) -> BomFields:
     groups the symbols.
 
     Raises:
-        ValueError: An item of group_by does not group the symbols.
+        InputError: An item of group_by does not group the symbols.
     """
     seen: set[str] = set()
     before: list[BomField] = []
@@ -136,7 +136,7 @@ def bom_fields(fields: list[str], group_by: list[str], major: int) -> BomFields:
         if star and field.group and not field.shown:
             # "*" compares the item as the caller gave it, thus it adds the field
             # first, with no group, when a symbol has the field.
-            raise ValueError(
+            raise InputError(
                 f"The hidden field {raw!r} after '*' cannot group the symbols. Put it before '*'."
             )
         (after if star else before).append(field)
@@ -148,7 +148,7 @@ def bom_fields(fields: list[str], group_by: list[str], major: int) -> BomFields:
     }
     for name in group_by:
         if name not in used:
-            raise ValueError(
+            raise InputError(
                 f"KiCad groups the symbols only by an item of fields: {name!r} is not one. "
                 "A field that '*' adds does not group the symbols. Add the field to fields."
             )
@@ -207,11 +207,11 @@ def _resolve_output(output_path: str, project: Path) -> Path:
     variables of its output path, JOB::ResolveOutputPath).
 
     Raises:
-        ValueError: The path has a variable, or it is a KiCad file or a directory
+        InputError: The path has a variable, or it is a KiCad file or a directory
             (also through a symbolic link).
     """
     if "${" in output_path or "$(" in output_path:
-        raise ValueError(
+        raise InputError(
             f"The output path {output_path!r} has a variable. The tool does not expand "
             "variables: give the path."
         )
@@ -220,9 +220,9 @@ def _resolve_output(output_path: str, project: Path) -> Path:
         path = Path(os.path.abspath(project)).parent / path
     target = path.resolve()
     if _is_kicad_file(path) or _is_kicad_file(target):
-        raise ValueError(f"The output path {path} is a KiCad file. Give a .csv file.")
+        raise InputError(f"The output path {path} is a KiCad file. Give a .csv file.")
     if target.is_dir():
-        raise ValueError(f"The output path {path} is a directory. Give a .csv file.")
+        raise InputError(f"The output path {path} is a directory. Give a .csv file.")
     return path
 
 
@@ -272,7 +272,7 @@ def _unit_check(project: Path, kicad: str, variants: list[str]) -> list[str]:
     parsers/unit_fields): an error of the design, first in the output."""
     try:
         conflicts, problems = unit_conflicts(project, kicad, variants)
-    except (OSError, KiCadEncodingError, SExprError, KicadFileError, ValueError) as e:
+    except (OSError, WorkbenchError) as e:
         # The BOM of kicad-cli is correct: only this check did not run.
         return [f"⚠️ The tool could not compare the fields of the units of the symbols: {e}"]
     return unit_check_lines(conflicts, problems)
@@ -329,7 +329,7 @@ def variant_outputs(output: Path, variants: list[str]) -> list[tuple[str, Path]]
     a variant name to make a file name.
 
     Raises:
-        ValueError: A variant name has a character that a file name cannot have,
+        InputError: A variant name has a character that a file name cannot have,
             or two files have the same path with no regard to case and to the
             Unicode normalization (Windows and macOS).
     """
@@ -337,7 +337,7 @@ def variant_outputs(output: Path, variants: list[str]) -> list[tuple[str, Path]]
     for variant in variants:
         bad = _NOT_IN_FILE_NAME.search(variant)
         if bad:
-            raise ValueError(
+            raise InputError(
                 f"The variant name {variant!r} has the character {bad.group()!r}, which a file "
                 "name cannot have. Rename the variant in KiCad, or export each variant with "
                 "variant and an output_path."
@@ -347,7 +347,7 @@ def variant_outputs(output: Path, variants: list[str]) -> list[tuple[str, Path]]
     for variant, path in targets:
         key = unicodedata.normalize("NFC", str(path)).casefold()
         if key in seen:
-            raise ValueError(
+            raise InputError(
                 f"The BOM files of the variants {seen[key] or '(default)'!r} and "
                 f"{variant or '(default)'!r} have the same path {path} with no regard to case. "
                 "Rename a variant in KiCad, or give an other output_path."
@@ -414,19 +414,20 @@ async def _export_all_variants(
         args = bom_args(names, group_by, exclude_dnp, variant)
         try:
             export, rows = await asyncio.to_thread(export_bom_file, root, args)
-        except RuntimeError as e:
+        except KicadCliError as e:
             return (
                 f"❌ kicad-cli did not write the BOM of {variant_label(variant)} of {root}: "
                 f"{str(e).rstrip('.')}. The tool changed no file."
             )
         results.append((variant, target, export, rows))
+    # Before the write: an error of the tool in the check then changes no file.
+    units = await asyncio.to_thread(_unit_check, project, kicad, variants)
     try:
         replaced = await asyncio.to_thread(
             _write_set, [(target, export.data) for _variant, target, export, _rows in results]
         )
     except OSError as e:
         return f"❌ The BOM files cannot be written: {e}. The tool changed no file."
-    units = await asyncio.to_thread(_unit_check, project, kicad, variants)
     count = len(variants)
     lines_out = [
         f"# BOM of {root.name}, all variants",
@@ -517,8 +518,10 @@ async def _export_bom(
     output = _resolve_output(output_path, project) if output_path else None
     try:
         export, rows = await asyncio.to_thread(export_bom_file, root, args)
-    except RuntimeError as e:
+    except KicadCliError as e:
         return f"❌ kicad-cli did not write the BOM of {root}: {e}"
+    # Before the write: an error of the tool in the check then changes no file.
+    units = await asyncio.to_thread(_unit_check, project, kicad, [variant] if variant else [])
     replaced = False
     if output is not None:
         replaced = output.exists()
@@ -528,7 +531,6 @@ async def _export_bom(
             output.write_bytes(export.data)
 
         await asyncio.to_thread(write)
-    units = await asyncio.to_thread(_unit_check, project, kicad, [variant] if variant else [])
     return _bom_text(
         root, kicad, export, rows, columns, output, replaced, variant, bool(group_by), units
     )

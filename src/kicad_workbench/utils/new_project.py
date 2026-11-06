@@ -27,6 +27,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..errors import InputError
 from ..parsers.kicad_versions import Release, kicad_release, version_triple
 from .library_tables import KicadEnvironment, expand, kicad_documents_dir
 
@@ -41,7 +42,7 @@ _HIDDEN = 0x2
 _READONLY = 0x1
 
 
-class NewProjectError(ValueError):
+class NewProjectError(InputError):
     """KiCad of this version makes no project here, or the server has no rules for it."""
 
 

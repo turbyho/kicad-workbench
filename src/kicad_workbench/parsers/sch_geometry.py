@@ -20,6 +20,7 @@ import math
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from ..errors import InputError
 from .lib_symbols import LibraryPin, library_pins
 from .sexpr import Node
 
@@ -36,10 +37,10 @@ def kiround(value: float) -> int:
     """Return the value rounded to an integer, half away from zero (KiROUND).
 
     Raises:
-        ValueError: The value is not a finite number.
+        InputError: The value is not a finite number.
     """
     if not math.isfinite(value):
-        raise ValueError(f"{value} is not a finite number")
+        raise InputError(f"{value} is not a finite number")
     return int(math.copysign(math.floor(abs(value) + 0.5), value))
 
 
@@ -106,17 +107,17 @@ def placement(symbol: Node) -> Placement:
     180 and 270, and the mirror x or y (parseSchematicSymbol).
 
     Raises:
-        ValueError: The (at ...) is not a number, or KiCad cannot read the
+        InputError: The (at ...) is not a number, or KiCad cannot read the
             angle or the mirror.
     """
     at = symbol.first("at")
     angle = int(at.number(2, 0.0)) if at else 0
     if angle not in (0, 90, 180, 270):
-        raise ValueError(f"the symbol angle {angle} is not 0, 90, 180 or 270")
+        raise InputError(f"the symbol angle {angle} is not 0, 90, 180 or 270")
     mirror = symbol.first("mirror")
     axis = mirror.value(0, "") if mirror else ""
     if mirror is not None and axis not in ("x", "y"):
-        raise ValueError(f"the symbol mirror {axis!r} is not x or y")
+        raise InputError(f"the symbol mirror {axis!r} is not x or y")
     return Placement(
         iu(at.number(0, 0.0)) if at else 0,
         iu(at.number(1, 0.0)) if at else 0,
@@ -129,7 +130,7 @@ def symbol_unit(symbol: Node) -> int:
     """Return the (unit N) of a placed symbol (default 1).
 
     Raises:
-        ValueError: The unit is not a number.
+        InputError: The unit is not a number.
     """
     unit = symbol.first("unit")
     return int(unit.number(0, 1)) if unit else 1
@@ -142,7 +143,7 @@ def placed_units(symbol: Node) -> set[int]:
     unit for each instance.
 
     Raises:
-        ValueError: A unit is not a number.
+        InputError: A unit is not a number.
     """
     units = {symbol_unit(symbol)}
     instances = symbol.first("instances")
@@ -157,7 +158,7 @@ def body_style(symbol: Node) -> int:
     """Return the body style of a placed symbol: (body_style N), or (convert N) of KiCad 8 and 9.
 
     Raises:
-        ValueError: The body style is not a number.
+        InputError: The body style is not a number.
     """
     node = symbol.first("body_style") or symbol.first("convert")
     return int(node.number(0, 1)) if node else 1
@@ -201,7 +202,7 @@ def placed_pins(
         units: The units that show the pins. None: the units of placed_units.
 
     Raises:
-        ValueError: A position, a unit or the body style is not a number.
+        InputError: A position, a unit or the body style is not a number.
     """
     where = placement(symbol)
     if units is None:

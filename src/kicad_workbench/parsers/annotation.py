@@ -65,6 +65,7 @@ from dataclasses import dataclass, field, replace
 from functools import cmp_to_key
 from pathlib import Path
 
+from ..errors import InputError
 from ..models.types import ERCError, ERCItem
 from ..utils.sch_hierarchy import (
     PRO_SUFFIX,
@@ -272,7 +273,7 @@ def _load_symbol(screen: Screen, node: Node, kicad: int) -> _Symbol:
     with no items gives no instance. KiCad 10 adds it after the path.
 
     Raises:
-        ValueError: A unit is not a number.
+        InputError: A unit is not a number.
     """
     symbol_kiid, uuid = item_kiid(screen, node)
     at = node.first("at")
@@ -433,8 +434,13 @@ def split_reference(text: str) -> SplitReference:
             end = 0
             while end < len(digits) and _is_digit(digits[end]):
                 end += 1
-            # atoi: strtol gives LONG_MAX on overflow, then the cast to int.
-            number = to_int(min(int(digits[:end]), 2**63 - 1))
+            # atoi: strtol gives LONG_MAX on overflow, then the cast to int. More than
+            # 19 digits is more than LONG_MAX (int() refuses more than 4300 digits).
+            significant = digits[:end].lstrip(b"0")
+            value = 2**63 - 1
+            if len(significant) <= 19:
+                value = min(int(significant or b"0"), value)
+            number = to_int(value)
         return SplitReference(
             data[: last + 1].decode("utf-8"), number, data[last + 1 :].decode("utf-8"), False
         )
@@ -949,13 +955,13 @@ def kicad_major(version: str) -> int:
     annotation check the server knows: 8, 9 or 10.
 
     Raises:
-        ValueError: The version is a nightly build or a release with no rules.
+        InputError: The version is a nightly build or a release with no rules.
     """
     release = kicad_release(version)
     major = int(release.name.split(".")[0]) if release is not None else None
     # The rules of kicad-cli 10 change in 10.0.7 (_tops): the patch must be known.
     if major is None or major not in KICAD_VERSIONS or version_triple(version) is None:
-        raise ValueError(
+        raise InputError(
             f"The server has no verified rules of KiCad {version} for the load of a "
             "schematic and the annotation (the references of the symbols): only the "
             "releases of KiCad 8, 9 and 10."
@@ -973,13 +979,13 @@ def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> l
     the schematic is one of them.
 
     Raises:
-        ValueError: KiCad cannot load a top-level sheet.
+        InputError: KiCad cannot load a top-level sheet.
     """
     root = project_file.with_suffix(SCH_SUFFIX)
     kicad = kicad_major(version)
     numbers = version_triple(version)
     if numbers is None:
-        raise ValueError(f"The KiCad version {version!r} has no patch number.")
+        raise InputError(f"The KiCad version {version!r} has no patch number.")
     declared = top_level_sheets(project_file.with_suffix(PRO_SUFFIX)) if kicad >= 10 else []
     if view in ("erc", "update", "gui"):
         load_all = kicad >= 10
@@ -1001,7 +1007,7 @@ def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> l
                 f"The top-level sheet {top.file} does not exist: KiCad does not load it."
             )
     if not tops:
-        raise ValueError(f"KiCad cannot load a top-level sheet of {project_file}.")
+        raise InputError(f"KiCad cannot load a top-level sheet of {project_file}.")
     return tops
 
 
@@ -1020,7 +1026,7 @@ def _load(project_file: Path, version: str, view: str) -> _Loaded:
     """Load the project as KiCad of the version and the view does.
 
     Raises:
-        ValueError: KiCad has no verified rules for the version, or KiCad cannot load
+        InputError: KiCad has no verified rules for the version, or KiCad cannot load
             the root schematic. A unit is not a number.
         KicadFileError: A file has a version that the server does not know.
     """
@@ -1089,8 +1095,9 @@ def placed_symbols_after_load(
             of kicad-cli.
 
     Raises:
-        ValueError: An argument is not valid, KiCad has no verified rules for the
-            version, or KiCad cannot load the root schematic. A unit is not a number.
+        ValueError: An argument is not valid (a defect of the caller).
+        InputError: KiCad has no verified rules for the version, or KiCad cannot
+            load the root schematic. A unit is not a number.
         KicadFileError: A file has a version that the server does not know.
     """
     if view not in ("gui", "cli"):
@@ -1143,8 +1150,9 @@ def check_annotation(
             reference that starts with "#").
 
     Raises:
-        ValueError: An argument is not valid, KiCad has no verified rules for the
-            version, or KiCad cannot load the root schematic. A unit is not a number.
+        ValueError: An argument is not valid (a defect of the caller).
+        InputError: KiCad has no verified rules for the version, or KiCad cannot
+            load the root schematic. A unit is not a number.
         KicadFileError: A file has a version that the server does not know.
     """
     if view not in VIEWS:
@@ -1255,7 +1263,7 @@ def erc_violations(project_file: Path, version: str) -> ErcAnnotation:
     errors, and this function does not give them.
 
     Raises:
-        ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError: see
+        InputError, KicadFileError, KiCadEncodingError, SExprError, OSError: see
             check_annotation.
     """
     kicad = kicad_major(version)

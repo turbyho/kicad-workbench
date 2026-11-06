@@ -6,6 +6,7 @@ import pytest
 
 from kicad_workbench.parsers.schematic_parser import SchematicParser
 from kicad_workbench.tools import netlist, schematic
+from kicad_workbench.utils.kicad_cli import KicadCliError
 
 
 @pytest.fixture
@@ -187,7 +188,7 @@ async def test_symbol_details_with_the_pins_of_the_netlist(example_schematic, mo
 @pytest.mark.asyncio
 async def test_symbol_details_with_no_netlist(example_schematic, monkeypatch):
     def no_netlist(*args):
-        raise RuntimeError("no kicad-cli")
+        raise KicadCliError("no kicad-cli")
 
     monkeypatch.setattr(netlist, "export_with_kicad_cli", no_netlist)
     result = await schematic.get_symbol_details(str(example_schematic), "R1")

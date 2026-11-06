@@ -35,6 +35,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..errors import InputError
 from ..parsers.annotation import kicad_major, split_reference
 from ..parsers.kicad_fields import SYMBOL_FIELD_NAMES
 from ..parsers.kicad_versions import (
@@ -155,7 +156,7 @@ def _json_number(path: Path, *keys: str) -> float | None:
         return None
     try:
         data = read_kicad_json(path)
-    except (OSError, ValueError):
+    except (OSError, InputError):
         return None
     for key in keys:
         if not isinstance(data, dict):
@@ -259,41 +260,41 @@ def _check_change(change: FieldChange, known_variants: set[str]) -> None:
     """Refuse a change that KiCad cannot keep as the change gives it.
 
     Raises:
-        ValueError: The reason.
+        InputError: The reason.
     """
     # SCH_REFERENCE::Split: a reference that ends with "?" or with no digit is not
     # annotated ("U?", "U"), as CheckAnnotation finds it.
     if not change.reference or split_reference(change.reference).new:
-        raise ValueError(
+        raise InputError(
             f"The reference {change.reference!r} is not annotated. Annotate the schematic in "
             "KiCad first."
         )
     if not change.fields:
-        raise ValueError(f"The change of {change.reference} has no fields.")
+        raise InputError(f"The change of {change.reference} has no fields.")
     mandatory = {name.lower(): name for name in SYMBOL_FIELD_NAMES}
     for name, value in change.fields.items():
         if not name:
-            raise ValueError(f"A field of {change.reference} has no name.")
+            raise InputError(f"A field of {change.reference} has no name.")
         if name.lower() == "reference":
-            raise ValueError(
+            raise InputError(
                 f"The tool does not write the Reference ({change.reference}). Annotate in KiCad."
             )
         canonical = mandatory.get(name.lower())
         if canonical is not None and name != canonical:
             # KiCad 10 reads a mandatory field with no difference of case, also in an
             # older file (parseSchField): "value" would replace the Value.
-            raise ValueError(f"Give the field name {canonical!r}, not {name!r}.")
+            raise InputError(f"Give the field name {canonical!r}, not {name!r}.")
         if name in _LEGACY_SIM_FIELDS:
-            raise ValueError(
+            raise InputError(
                 f"KiCad removes the field {name!r} when it loads the symbol and sets "
                 '"exclude from simulation" from its text. Set that flag in KiCad.'
             )
         error = _field_error(name, value) or _field_error("field name", name)
         if error:
-            raise ValueError(error.removeprefix("❌ "))
+            raise InputError(error.removeprefix("❌ "))
     if change.variant and change.variant not in known_variants:
         listed = ", ".join(repr(n) for n in sorted(known_variants)) or "none"
-        raise ValueError(
+        raise InputError(
             f"The project has no variant {change.variant!r}. Its variants: {listed}. Make the "
             "variant in KiCad first."
         )
@@ -346,7 +347,7 @@ def _variant_edit(state: _Variants) -> tuple[int, int, str] | None:
     One edit for all variants: two edits next to each other cannot overlap.
 
     Raises:
-        ValueError: The variants are not next to each other in the instance.
+        InputError: The variants are not next to each other in the instance.
     """
     if state.new == state.original:
         return None
@@ -359,7 +360,7 @@ def _variant_edit(state: _Variants) -> tuple[int, int, str] | None:
     if state.nodes:
         first, last = children.index(state.nodes[0]), children.index(state.nodes[-1])
         if last - first + 1 != len(state.nodes):
-            raise ValueError(
+            raise InputError(
                 f"The variants of {state.instance.reference} in {state.instance.file.name} are "
                 "not next to each other. Open and save the schematic in KiCad first."
             )
@@ -383,14 +384,14 @@ def _plan(
     files, and the warnings.
 
     Raises:
-        ValueError: A change cannot be written (the message tells why).
+        InputError: A change cannot be written (the message tells why).
     """
     # The references of the schematic editor of the installed KiCad (user, 2026-11-05).
     instances, files, problems = placed_instances(project, kicad, "gui")
     if problems:
         # A sheet that the tool cannot read can hold an other reference of a symbol
         # (a shared sheet): the check of _check_shared would not be complete.
-        raise ValueError(
+        raise InputError(
             "The tool cannot read the full sheet hierarchy, thus it cannot find each "
             "reference of a symbol: " + " ".join(problems) + " Correct it in KiCad first."
         )
@@ -404,7 +405,7 @@ def _plan(
         _check_change(change, known_variants)
         key = (change.reference.upper(), change.variant)
         if key in by_key:
-            raise ValueError(f"Two changes of {change.reference}{_variant_label(change.variant)}.")
+            raise InputError(f"Two changes of {change.reference}{_variant_label(change.variant)}.")
         by_key[key] = change
     groups: dict[str, list[PlacedInstance]] = {}
     references: dict[tuple[Path, int], set[str]] = {}  # more than one in a shared sheet
@@ -423,10 +424,10 @@ def _plan(
     for (key, variant), change in sorted(by_key.items(), key=lambda item: item[0][1] != ""):
         group = groups.get(key)
         if not group:
-            raise ValueError(f"The project has no symbol with the reference {change.reference}.")
+            raise InputError(f"The project has no symbol with the reference {change.reference}.")
         reference = group[0].reference
         if len({i.unit for i in group}) < len(group) or len({i.unit_count for i in group}) > 1:
-            raise ValueError(
+            raise InputError(
                 f"{reference} is a duplicate reference (the same unit two times, or different unit "
                 "counts). Annotate the schematic in KiCad first."
             )
@@ -506,7 +507,7 @@ def _check_shared(
         if (other := by_key.get((ref.upper(), ""))) is None or other.fields != change.fields
     ]
     if missing:
-        raise ValueError(
+        raise InputError(
             f"The symbol of {change.reference} is in a sheet that the hierarchy uses more than one "
             f"time: KiCad keeps its fields for {', '.join(missing)} too. Give the same fields for "
             f"{', '.join([change.reference, *missing])}, or write different fields through a variant."
@@ -530,7 +531,7 @@ def _plan_symbol(
     for name, value in change.fields.items():
         nodes = _field_nodes(symbol, name, record.kicad)
         if len(nodes) > 1:
-            raise ValueError(
+            raise InputError(
                 f"The symbol {instance.reference}{unit_text} has the field {name!r} more than "
                 "one time. Correct it in KiCad first."
             )
@@ -574,12 +575,12 @@ def _plan_variant(
 ) -> None:
     label = f"{instance.reference}{unit_text}"
     if record.version < SCHEMATIC_VARIANTS:
-        raise ValueError(
+        raise InputError(
             f"The file {instance.file.name} of {label} has a format with no variants (file "
             f"version {record.version}). Open and save it in KiCad 10 first."
         )
     if instance.path is None:
-        raise ValueError(
+        raise InputError(
             f"The symbol {label} has no instance for its sheet path, thus it has no variants. "
             "Open and save the schematic in KiCad first."
         )
@@ -595,7 +596,7 @@ def _plan_variant(
         elif requested in texts:  # a new field of the symbol in this call
             name, symbol_text = requested, texts[requested]
         else:
-            raise ValueError(
+            raise InputError(
                 f"The symbol {label} has no field {requested!r}. A variant can set only a field "
                 "that the symbol has: write the field for the symbol first (no variant)."
             )
@@ -614,7 +615,7 @@ def _check_text(instance: PlacedInstance, record: SchematicFile, value: str) -> 
     """Refuse "~" in a file older than EMPTY_TEXT_MARKER: KiCad reads it as an
     empty field (parseSchField), thus it cannot keep the text "~"."""
     if value == "~" and record.version < EMPTY_TEXT_MARKER:
-        raise ValueError(
+        raise InputError(
             f'The file {instance.file.name} of {instance.reference} has a format that reads "~" '
             "as an empty field (file version before 20250318): give an empty text, or save the "
             "file in KiCad 10 first."
@@ -693,7 +694,7 @@ async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) ->
         )
     try:
         kicad_major(kicad)
-    except ValueError as e:
+    except InputError as e:
         return f"❌ {e}"
     size = await asyncio.to_thread(default_text_size, project, kicad)
     try:

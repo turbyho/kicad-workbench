@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import resvg_py
 
+from ..errors import WorkbenchError
+
 _SVG = "{http://www.w3.org/2000/svg}"
 _MM = re.compile(r"(\d+(?:\.\d*)?|\.\d+)mm")
 _ROOT_TAG = re.compile(r"<svg\b[^>]*>")
@@ -28,7 +30,7 @@ MIN_TEXT_PX = 15.0
 MIN_PX_PER_MM = 300 / 25.4
 
 
-class SvgImageError(Exception):
+class SvgImageError(WorkbenchError):
     """The SVG cannot be read or drawn."""
 
 

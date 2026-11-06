@@ -7,6 +7,7 @@ from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
+from ..errors import InputError
 from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import read_as_kicad
 from ..utils.sch_hierarchy import sheet_files
@@ -557,7 +558,7 @@ class SchematicParser:
 
         Raises:
             FileNotFoundError: If file doesn't exist
-            ValueError: If file is not a .kicad_sch file
+            InputError: If file is not a .kicad_sch file
         """
         self.file_path = validate_kicad_file(file_path, ".kicad_sch")
         self._data: dict[str, Any] | None = None
@@ -844,7 +845,7 @@ class SchematicParser:
             for sheet in sheet_files(self.file_path)[1:]:
                 try:
                     sub_data = SchematicParser(str(sheet), self.kicad)._parse_file()
-                except (FileNotFoundError, ValueError, OSError):
+                except (InputError, OSError):
                     continue
                 components.extend(
                     SchematicComponent.from_dict(c) for c in sub_data["components"]

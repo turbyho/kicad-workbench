@@ -5,9 +5,10 @@ import hashlib
 import tempfile
 from pathlib import Path
 
+from ..errors import WorkbenchError
 from ..parsers.netlist_parser import NetlistParser
 from ..server import mcp
-from ..utils.kicad_cli import export_with_kicad_cli
+from ..utils.kicad_cli import KicadCliError, export_with_kicad_cli
 from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic
 from ..utils.tool_errors import error_answer
 from ..utils.user_files import write_atomic
@@ -16,7 +17,7 @@ from ..utils.user_files import write_atomic
 NETLIST_TIMEOUT = 120.0
 
 
-class NetlistError(ValueError):
+class NetlistError(WorkbenchError):
     """The server cannot make the netlist of a schematic. The message tells why."""
 
 
@@ -60,7 +61,7 @@ def export_netlist(sch_path: Path) -> tuple[bytes, Path | None]:
             "netlist.xml",
             NETLIST_TIMEOUT,
         )
-    except (FileNotFoundError, RuntimeError) as e:  # not there, cannot run, no file
+    except (FileNotFoundError, KicadCliError) as e:  # not there, cannot run, no file
         raise NetlistError(f"The server cannot make the netlist of {source}: {e}") from e
     return export.data, root
 

@@ -43,7 +43,7 @@ def placed_instances(
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
-        ValueError: A unit is not a number, KiCad has no verified rules for the
+        InputError: A unit is not a number, KiCad has no verified rules for the
             version, or KiCad cannot load the root schematic.
     """
     return placed_symbols_after_load(project, version, view)

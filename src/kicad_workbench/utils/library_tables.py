@@ -23,6 +23,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..errors import InputError
 from ..parsers.kicad_versions import version_numbers
 from ..parsers.sexpr import SExprError, parse
 from .kicad_text import KiCadEncodingError, read_as_kicad, read_kicad_json
@@ -63,7 +64,7 @@ _ALIASES = (
 _VARIABLE_CHARS = re.compile(r"[A-Za-z0-9_:]*")
 
 
-class LibraryTableError(ValueError):
+class LibraryTableError(InputError):
     """The KiCad version or a library table cannot be read."""
 
 
@@ -253,8 +254,10 @@ def _json_object(path: Path, *keys: str) -> dict:
     """
     try:
         value = read_kicad_json(path)
-    except (OSError, ValueError) as e:
+    except OSError as e:
         raise LibraryTableError(f"{path} cannot be read: {e}") from e
+    except InputError as e:
+        raise LibraryTableError(str(e)) from e
     for key in ("",) + keys:
         if key:
             value = value.get(key)

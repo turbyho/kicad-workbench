@@ -7,7 +7,6 @@ This module provides device tree source (.dts) generation capabilities including
 - SOC-specific device tree generation
 """
 
-import os
 from pathlib import Path
 
 from jinja2 import Template
@@ -16,6 +15,7 @@ from ..parsers.kicad_fields import with_field_rules_note
 from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
+from ..utils.kicad_text import write_kicad_text
 from ..utils.tool_errors import error_answer
 
 # Device tree compatible strings database
@@ -522,12 +522,10 @@ Please specify a supported SOC family."""
             output = Path(output_path)
             output.parent.mkdir(parents=True, exist_ok=True)
 
-            # UTF-8 on each platform, not the locale encoding (on Windows the
-            # code page of the region). The text is encoded before the file
-            # opens, thus an encode error keeps the old file. The line ends
-            # are those of text mode, as before.
-            data = device_tree.encode("utf-8")
-            output.write_bytes(data.replace(b"\n", os.linesep.encode("ascii")))
+            # UTF-8 on each platform, not the locale encoding (on Windows the code
+            # page of the region). write_kicad_text encodes the text before the file
+            # opens, thus an encode error keeps the old file.
+            write_kicad_text(output, device_tree)
 
             return f"""✅ **Device Tree Generated Successfully**
 

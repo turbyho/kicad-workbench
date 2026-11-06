@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..errors import InputError
 from .kicad_versions import version_triple
 
 
@@ -60,14 +61,14 @@ class NetlistParser:
 
         Raises:
             FileNotFoundError: If file doesn't exist
-            ValueError: If file is not a .xml file
+            InputError: If file is not a .xml file
         """
         self.file_path = Path(file_path)
         if not self.file_path.exists():
             raise FileNotFoundError(f"Netlist file not found: {file_path}")
 
         if self.file_path.suffix != ".xml":
-            raise ValueError(f"Netlist file must be .xml, got: {self.file_path.suffix}")
+            raise InputError(f"Netlist file must be .xml, got: {self.file_path.suffix}")
 
         self._data: dict[str, Any] | None = None
         self._text: bytes | None = None
@@ -97,7 +98,7 @@ class NetlistParser:
                 else ET.parse(self.file_path).getroot()
             )
         except ET.ParseError as e:
-            raise ValueError(f"The netlist {self.file_path} is not valid XML: {e}") from e
+            raise InputError(f"The netlist {self.file_path} is not valid XML: {e}") from e
 
         # <design><tool>Eeschema 10.0.6</tool>: the KiCad that wrote the netlist.
         tool = root.findtext("design/tool") or ""

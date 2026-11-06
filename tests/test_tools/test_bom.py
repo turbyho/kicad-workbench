@@ -11,6 +11,7 @@ import unicodedata
 
 import pytest
 
+from kicad_workbench.errors import InputError
 from kicad_workbench.tools import bom
 from kicad_workbench.utils import kicad_bom
 from kicad_workbench.utils import kicad_cli as kicad_cli_module
@@ -325,9 +326,21 @@ class TestExportBom:
             assert lines[2].startswith("❌ ERROR IN THE DESIGN: the units of one package")
             assert lines[3] == "- U1: MPN: A = 'LM358NG', B = 'LM358P'"
 
+    async def test_a_defect_of_the_unit_check_writes_no_file(self, project, monkeypatch):
+        # The check runs before the write: a defect (a plain ValueError) gives the
+        # traceback, and the tool changed no file.
+        def defect(project, version, variants):
+            raise ValueError("defect")
+
+        monkeypatch.setattr(bom, "unit_conflicts", defect)
+        directory = project["directory"]
+        out = await bom.export_bom(str(directory / "board.kicad_sch"), output_path="bom.csv")
+        assert out.startswith("❌ Error: defect") and "Traceback" in out, out
+        assert not (directory / "bom.csv").exists()
+
     async def test_unit_check_failure_keeps_the_bom(self, project, monkeypatch):
         def failing(project, version, variants):
-            raise ValueError("bad unit")
+            raise InputError("bad unit")
 
         monkeypatch.setattr(bom, "unit_conflicts", failing)
         directory = project["directory"]

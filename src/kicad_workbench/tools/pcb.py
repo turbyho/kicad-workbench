@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import functools
 
+from ..errors import WorkbenchError
 from ..server import mcp
 from ..utils.tool_errors import error_answer
 
 
-class PcbnewImportError(ValueError):
+class PcbnewImportError(WorkbenchError):
     """The server process finds pcbnew, but cannot import it."""
 
 
@@ -63,7 +64,7 @@ def _get_parser(file_path: str):
     reader (the tool then gives TEXT_READER_WARNING, see _board_tool).
 
     Raises:
-        FileNotFoundError, ValueError: The file is not there, or it is not a board.
+        FileNotFoundError, InputError: The file is not there, or it is not a board.
         BoardLoadError: pcbnew cannot read the board. The tool gives the error: the
             text reader does not know the rules of a board that KiCad cannot read.
     """

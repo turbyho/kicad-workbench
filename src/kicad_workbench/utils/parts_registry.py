@@ -20,6 +20,8 @@ import os
 import urllib.parse
 import urllib.request
 
+from ..errors import WorkbenchError
+
 DEFAULT_REGISTRY_URL = os.environ.get(
     "PARTS_REGISTRY_URL", "https://partreel.com/api/v1"
 )
@@ -38,7 +40,7 @@ FORMAT_EXTENSIONS = {
 }
 
 
-class RegistryError(Exception):
+class RegistryError(WorkbenchError):
     """Raised for registry access or validation failures."""
 
 

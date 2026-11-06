@@ -588,7 +588,7 @@ def body_points(symbol: Node, body_style: int, units: set[int]) -> list[tuple[fl
     that box.
 
     Raises:
-        ValueError: A position is not a number.
+        InputError: A position is not a number.
     """
     points = []
     for group in _groups(symbol, body_style, units):
@@ -630,7 +630,7 @@ def library_pins(
         units: Only the pins that these units show. None: the pins of all units.
 
     Raises:
-        ValueError: The (at ...) of a pin is not a number.
+        InputError: The (at ...) of a pin is not a number.
     """
     pins = []
     for group in _groups(symbol, body_style, units):

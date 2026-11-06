@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from ..errors import WorkbenchError
 from ..parsers.kicad_versions import KicadFileError
 from ..parsers.lib_symbols import LibrarySymbol, read_library, symbol_chain
 from ..parsers.sexpr import SExprError
@@ -10,7 +11,7 @@ from .library_index import row_problem
 from .library_tables import TABLE_FILES, LibraryRow, LibraryTableError, find_library
 
 
-class LibraryLookupError(Exception):
+class LibraryLookupError(WorkbenchError):
     """A library, a symbol or a footprint cannot be found or read."""
 
 

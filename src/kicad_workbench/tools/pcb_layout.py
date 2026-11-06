@@ -15,7 +15,7 @@ from ..parsers.kicad_versions import (
 from ..server import mcp
 from ..utils.kicad_cli import decode_output, run_kicad_cli
 from ..utils.kicad_lock import check_board_not_open, file_stamp, write_board
-from ..utils.kicad_python import board_text
+from ..utils.kicad_python import KicadPythonError, board_text
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.tool_errors import error_answer
 
@@ -129,7 +129,7 @@ async def setup_pcb_layout(
 
         try:
             pcb_content, kicad = await board_text(pcb_path.name, sch_path.stem, (w, h))
-        except (FileNotFoundError, RuntimeError) as e:
+        except (FileNotFoundError, KicadPythonError) as e:
             return f"❌ {e}"
         except subprocess.TimeoutExpired as e:
             return f"❌ pcbnew did not stop in {e.timeout:g} s. The tool did not write the board."

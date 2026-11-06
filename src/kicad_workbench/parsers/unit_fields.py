@@ -159,7 +159,7 @@ def _units(project: Path, version: str) -> tuple[dict[str, list[_Unit]], list[st
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
-        ValueError: A unit is not a number, KiCad has no verified rules for the
+        InputError: A unit is not a number, KiCad has no verified rules for the
             installed version, or KiCad cannot load the root schematic.
     """
     instances, files, problems = placed_instances(project, version, "cli")
@@ -225,7 +225,7 @@ def variant_unit_conflicts(
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
-        ValueError: A unit is not a number, KiCad has no verified rules for the
+        InputError: A unit is not a number, KiCad has no verified rules for the
             installed version, or KiCad cannot load the root schematic.
     """
     units, problems = _units(project, version)
@@ -281,7 +281,7 @@ def unit_conflicts(
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
-        ValueError: A unit is not a number, KiCad has no verified rules for the
+        InputError: A unit is not a number, KiCad has no verified rules for the
             installed version, or KiCad cannot load the root schematic.
     """
     check = variant_unit_conflicts(project, version, variants)

@@ -84,9 +84,12 @@ example kiutils). The license of this project is MIT.
 - A tool is an `async` function with `@mcp.tool()` in `tools/`. Its docstring is the
   description for the model, with `Args:` and `Returns:`.
 - A tool returns Markdown. An expected error gives "❌ <message>", an other exception
-  also the traceback: `error_answer` of `utils/tool_errors.py` gives the two. A warning
-  starts with "⚠️". Give "✅" only when the tool checked the full item. When a result
-  can be incomplete, say so.
+  also the traceback: `error_answer` of `utils/tool_errors.py` gives the two. An
+  expected error is an OSError or a `WorkbenchError` of `errors.py`. For a message to
+  the user, raise `InputError` (or a subclass of `WorkbenchError`), not a plain
+  `ValueError`: the tools give a plain `ValueError` as a defect. A warning starts with
+  "⚠️". Give "✅" only when the tool checked the full item. When a result can be
+  incomplete, say so.
 - Run file reads and subprocesses off the event loop (`asyncio.to_thread`). Use
   `run_kicad_cli_sync` and `run_kicad_python`, not `subprocess` directly: they set the
   character set and find the KiCad programs.

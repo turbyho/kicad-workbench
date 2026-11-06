@@ -19,8 +19,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ..errors import WorkbenchError
 from .kicad_cli import fs_encoding
 from .kicad_version import find_kicad_install
+
+
+class KicadPythonError(WorkbenchError):
+    """The Python of KiCad (pcbnew) did not do the work or gave no result. The
+    message tells why."""
+
 
 _cached_python: str | None = None
 
@@ -185,7 +192,7 @@ def _new_board_sync(path: Path, title: str, outline: tuple[float, float] | None)
 
     Raises:
         FileNotFoundError: No Python with pcbnew is found.
-        RuntimeError: pcbnew cannot make the board, or gives no KiCad version.
+        KicadPythonError: pcbnew cannot make the board, or gives no KiCad version.
         subprocess.TimeoutExpired: pcbnew did not stop in time.
     """
     width, height = outline or (0.0, 0.0)
@@ -200,13 +207,13 @@ def _new_board_sync(path: Path, title: str, outline: tuple[float, float] | None)
         ]
     )
     if result.returncode != 0:
-        raise RuntimeError(
+        raise KicadPythonError(
             "pcbnew could not create the board:\n" + decode_python_output(result.stderr).strip()
         )
     line = result_line(result.stdout, _VERSION_PREFIX)
     version = line.strip() if line is not None else ""
     if not _KICAD_VERSION.fullmatch(version):
-        raise RuntimeError(f"pcbnew did not give the KiCad version: {version!r}")
+        raise KicadPythonError(f"pcbnew did not give the KiCad version: {version!r}")
     return version
 
 
@@ -228,7 +235,7 @@ async def board_text(file_name: str, title: str, outline: tuple[float, float]) -
 
     Raises:
         FileNotFoundError: No Python with pcbnew is found.
-        RuntimeError: pcbnew cannot make the board, or gives no KiCad version.
+        KicadPythonError: pcbnew cannot make the board, or gives no KiCad version.
         subprocess.TimeoutExpired: pcbnew did not stop in time.
     """
     return await asyncio.to_thread(_board_text_sync, file_name, title, outline)

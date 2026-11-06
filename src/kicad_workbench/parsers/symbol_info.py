@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass
 from functools import cmp_to_key
 
+from ..errors import InputError
 from .kicad_fields import SYMBOL_FIELD_NAMES
 from .kicad_versions import DECLARED_BODY_STYLES, KicadFileError, file_text
 from .lib_symbols import (
@@ -241,7 +242,7 @@ def _pin_shape(root: LibrarySymbol, text: str | None) -> str:
 def _number(root: LibrarySymbol, node: Node, index: int) -> float:
     try:
         value = node.number(index)
-    except ValueError:
+    except InputError:
         value = None
     if value is None:
         raise _error(root, f"has ({node.head} ...) with an item that is not a number")
@@ -303,6 +304,13 @@ def _pin(root: LibrarySymbol, pin: Node, unit: int, body_style: int) -> SymbolPi
     )
 
 
+def _number_key(digits: str) -> tuple[int, str]:
+    """The order of the numbers of ASCII digits, as their values, with no int():
+    int() refuses a text of more than 4300 digits."""
+    significant = digits.lstrip("0")
+    return len(significant), significant
+
+
 def str_num_cmp(first: str, second: str) -> int:
     """Compare two texts with the numbers in them as numbers (StrNumCmp of KiCad).
 
@@ -317,11 +325,11 @@ def str_num_cmp(first: str, second: str) -> int:
             start = i
             while i < len(first) and first[i].isascii() and first[i].isdigit():
                 i += 1
-            number1 = int(first[start:i])
+            number1 = _number_key(first[start:i])
             start = j
             while j < len(second) and second[j].isascii() and second[j].isdigit():
                 j += 1
-            number2 = int(second[start:j])
+            number2 = _number_key(second[start:j])
             if number1 != number2:
                 return -1 if number1 < number2 else 1
             # KiCad then compares the characters after the numbers, and

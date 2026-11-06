@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_workbench.errors import InputError, WorkbenchError
 from kicad_workbench.parsers.kicad_versions import KicadFileError
 from kicad_workbench.parsers.netlist_parser import NetlistParser
 from kicad_workbench.tools import (
@@ -42,7 +43,7 @@ def _answer(error: Exception) -> str:
         PermissionError("[Errno 13] Permission denied: 'a.kicad_sch'"),
         KicadCliError("kicad-cli did not stop in 60 s."),
         subprocess.TimeoutExpired(["kicad-cli", "pcb", "render"], 180),
-        ValueError("a value"),
+        InputError("an argument"),
         KicadFileError("a file version"),
         AmbiguousRootError(Path("s.kicad_sch"), [Path("a.kicad_sch"), Path("b.kicad_sch")]),
         netlist.NetlistError("no netlist"),
@@ -52,10 +53,19 @@ def test_an_expected_error_gives_the_message(error):
     assert _answer(error) == f"❌ {error}"
 
 
-def test_an_other_exception_gives_the_traceback():
-    answer = _answer(KeyError("x"))
-    assert answer.startswith("❌ Error doing it: 'x'\n\nTraceback (most recent call last):")
-    assert "KeyError: 'x'" in answer
+@pytest.mark.parametrize(
+    "error, text",
+    [
+        (KeyError("x"), "'x'"),
+        # A plain ValueError is a defect, for example int() of a text in the code.
+        (ValueError("invalid literal for int() with base 10: 'A1'"), None),
+    ],
+)
+def test_an_other_exception_gives_the_traceback(error, text):
+    answer = _answer(error)
+    text = text or str(error)
+    assert answer.startswith(f"❌ Error doing it: {text}\n\nTraceback (most recent call last):")
+    assert f"{type(error).__name__}: {text}" in answer
 
 
 class FakeExport:
@@ -87,8 +97,8 @@ class TestWriteNetlist:
     @pytest.mark.parametrize(
         "error",
         [
-            RuntimeError("kicad-cli stopped with the exit code 3: Failed to load schematic"),
-            RuntimeError("kicad-cli did not stop in 120 s."),
+            KicadCliError("kicad-cli stopped with the exit code 3: Failed to load schematic"),
+            KicadCliError("kicad-cli did not stop in 120 s."),
             FileNotFoundError("kicad-cli not found"),
         ],
     )
@@ -126,7 +136,7 @@ class TestNetlistErrorsOfTheTools:
 
     @pytest.fixture(autouse=True)
     def failing_cli(self, monkeypatch):
-        error = RuntimeError("kicad-cli stopped with the exit code 1: cannot load")
+        error = KicadCliError("kicad-cli stopped with the exit code 1: cannot load")
         monkeypatch.setattr(netlist, "export_with_kicad_cli", FakeExport(error=error))
 
     def test_generate_netlist(self, sch):
@@ -190,3 +200,110 @@ def test_editor_with_a_file_that_is_not_there(tmp_path):
     path = tmp_path / "none.kicad_sch"
     result = asyncio.run(schematic_editor.add_wire(str(path), [(0, 0), (10, 0)]))
     assert result == f"❌ The file {path} does not exist."
+
+
+def _error_classes():
+    """The exception classes of the package, less the errors of the version check."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import kicad_workbench
+
+    found = []
+    for info in pkgutil.walk_packages(kicad_workbench.__path__, "kicad_workbench."):
+        if info.name in ("kicad_workbench.__main__", "kicad_workbench.version_check"):
+            continue
+        module = importlib.import_module(info.name)
+        for _name, value in inspect.getmembers(module, inspect.isclass):
+            if issubclass(value, Exception) and value.__module__ == info.name:
+                found.append(value)
+    return found
+
+
+def test_each_error_of_the_modules_is_a_workbench_error():
+    # A new error class of a module must be a WorkbenchError: else the tools
+    # give it as a defect (with the traceback).
+    classes = _error_classes()
+    assert len(classes) >= 15
+    # _RefusedError of tools/project.py holds the full answer of the tool, and the
+    # tool catches it itself.
+    others = [c.__qualname__ for c in classes if not issubclass(c, WorkbenchError)]
+    assert others == ["_RefusedError"]
+
+
+# The raises of a built-in exception that are no message to the user: the checks of
+# the code. A plain ValueError gives the traceback (a defect). A message to the user
+# raises an error of errors.py (InputError) or an other WorkbenchError.
+_CHECKS_OF_THE_CODE = {
+    ("parsers/annotation.py", "placed_symbols_after_load", "ValueError"),
+    ("parsers/annotation.py", "check_annotation", "ValueError"),
+    ("parsers/sexpr.py", "edited", "ValueError"),
+}
+
+
+def _builtin_raises():
+    """The raises of a built-in exception, with the name of the function (or
+    "<module>"): "raise X(...)" and "raise X". The test does not see a ValueError
+    of the standard library, for example of int()."""
+    import ast
+    import builtins
+
+    import kicad_workbench
+
+    root = Path(kicad_workbench.__file__).parent
+    found = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        owner = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                owner[child] = parent
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            name = exc.id if isinstance(exc, ast.Name) else None
+            kind = getattr(builtins, name, None) if name else None
+            if not isinstance(kind, type) or issubclass(kind, OSError):
+                continue
+            scope = owner.get(node)
+            while scope is not None and not isinstance(
+                scope, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                scope = owner.get(scope)
+            function = scope.name if scope is not None else "<module>"
+            found.add((path.relative_to(root).as_posix(), function, name))
+    return found
+
+
+def test_a_message_to_the_user_is_no_built_in_exception():
+    # An OSError (also FileNotFoundError) is an expected error. Each other raise of a
+    # built-in exception must be a check of the code.
+    assert _builtin_raises() == _CHECKS_OF_THE_CODE
+
+
+def test_numbers_of_more_than_4300_digits():
+    # int() refuses a text of more than 4300 digits: the readers give the value of
+    # KiCad (LONG_MAX, out of range, or the order of the numbers) with no int().
+    from kicad_workbench.parsers.annotation import split_reference
+    from kicad_workbench.parsers.bus_names import _to_long
+    from kicad_workbench.parsers.sheet_list import to_long
+    from kicad_workbench.parsers.symbol_info import str_num_cmp
+
+    many = "9" * 5000
+    assert _to_long(many) == 2**63 - 1 and _to_long("0" * 5000 + "7") == 7
+    assert to_long(many) is None and to_long("0" * 5000 + "7") == 7
+    assert split_reference("R" + many).number == split_reference("R" + "9" * 20).number
+    assert split_reference("R" + "0" * 5000 + "7").number == 7
+    assert str_num_cmp("a" + many, "a" + "1" * 5000) == 1
+    assert str_num_cmp("a" + "0" * 5000 + "2", "a10") == -1
+
+
+@pytest.mark.parametrize("pos", [{"x": "abc", "y": 0}, {"x": 1.0, "y": None}, {"x": True, "y": 0}])
+def test_a_report_coordinate_that_is_not_a_number(pos):
+    from kicad_workbench.parsers.check_report_parser import parse_drc_item, parse_erc_item
+
+    for parse in (parse_erc_item, parse_drc_item):
+        with pytest.raises(InputError, match="not a number"):
+            parse({"description": "x", "pos": pos})

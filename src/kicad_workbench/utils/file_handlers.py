@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from ..errors import InputError
+
 
 def validate_kicad_file(file_path: str, expected_extension: str) -> Path:
     """Validate that a file exists and has the correct extension.
@@ -15,7 +17,7 @@ def validate_kicad_file(file_path: str, expected_extension: str) -> Path:
 
     Raises:
         FileNotFoundError: If file doesn't exist
-        ValueError: If file has wrong extension
+        InputError: If file has wrong extension
     """
     path = Path(file_path).resolve()
 
@@ -23,9 +25,7 @@ def validate_kicad_file(file_path: str, expected_extension: str) -> Path:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     if path.suffix.lower() != expected_extension.lower():
-        raise ValueError(
-            f"Expected {expected_extension} file, got {path.suffix}: {file_path}"
-        )
+        raise InputError(f"Expected {expected_extension} file, got {path.suffix}: {file_path}")
 
     return path
 

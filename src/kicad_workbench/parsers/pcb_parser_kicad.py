@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..errors import WorkbenchError
 from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from .kicad_versions import header_version, kicad_release
 
 
-class BoardLoadError(ValueError):
+class BoardLoadError(WorkbenchError):
     """pcbnew cannot read the board."""
 
 
@@ -121,13 +122,8 @@ class PCBParserKiCad:
     def __init__(self, file_path: str) -> None:
         self.file_path = validate_kicad_file(file_path, ".kicad_pcb")
 
-        try:
-            import pcbnew
-        except ImportError as e:
-            raise ImportError(
-                "pcbnew module not found. Please install KiCad or ensure it's in PATH.\n"
-                f"Error: {e}"
-            ) from e
+        # tools/pcb.py uses this reader only when it can import pcbnew.
+        import pcbnew
 
         kicad = pcbnew.GetMajorMinorPatchVersion()
         try:

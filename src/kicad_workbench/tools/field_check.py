@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 
+from ..errors import InputError, WorkbenchError
 from ..parsers.annotation import kicad_major
 from ..parsers.confirmed_mpns import (
     CadSymbol,
@@ -24,8 +25,6 @@ from ..parsers.confirmed_mpns import (
     bom_symbols,
     check_symbols,
 )
-from ..parsers.kicad_versions import KicadFileError
-from ..parsers.sexpr import SExprError
 from ..parsers.unit_fields import (
     distinct_conflicts,
     is_confirmed_field,
@@ -41,8 +40,7 @@ from ..utils.kicad_bom import (
     unit_check_lines,
     variant_label,
 )
-from ..utils.kicad_cli import get_kicad_version
-from ..utils.kicad_text import KiCadEncodingError
+from ..utils.kicad_cli import KicadCliError, get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
@@ -201,7 +199,7 @@ async def _check(schematic_path: str) -> str:
     major = bom_rules(kicad)
     try:
         kicad_major(kicad)  # the references of the symbols after the load
-    except ValueError as e:
+    except InputError as e:
         return f"❌ {e}"
     try:
         project = await asyncio.to_thread(schematic_project_file, path)
@@ -213,7 +211,7 @@ async def _check(schematic_path: str) -> str:
         if major >= 10:
             variants = other_variants(await asyncio.to_thread(variant_names, project))
         units = await asyncio.to_thread(variant_unit_conflicts, project, kicad, variants)
-    except (OSError, KiCadEncodingError, SExprError, KicadFileError, ValueError) as e:
+    except (OSError, WorkbenchError) as e:
         # The tool cannot check the units of one package: a proposal for such a BOM
         # line would write its joined values.
         return f"❌ The schematic files of the project {project} cannot be read: {e}"
@@ -235,7 +233,7 @@ async def _check(schematic_path: str) -> str:
         args = bom_args(_FIELDS, [], True, variant)
         try:
             export, rows = await asyncio.to_thread(export_bom_file, root, args)
-        except RuntimeError as e:
+        except KicadCliError as e:
             return f"❌ kicad-cli did not write the BOM of {variant_label(variant)} of {root}: {e}"
         cli_messages += [m for m in export.messages if m not in cli_messages]
         lines = bom_symbols(rows, variant)

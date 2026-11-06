@@ -23,12 +23,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..errors import WorkbenchError
 from ..parsers.board_models import embedded_files
 from ..parsers.sexpr import Node, SExprError, parse
 from .kicad_python import decode_python_output, result_line, run_kicad_python
 
 
-class FootprintReadError(Exception):
+class FootprintReadError(WorkbenchError):
     """pcbnew cannot be started, or the script did not give a result."""
 
 

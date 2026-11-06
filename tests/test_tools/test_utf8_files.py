@@ -135,7 +135,8 @@ def test_lone_surrogate_does_not_empty_the_file(sch):
     # before the encode error.
     before = sch.read_bytes()
     result = asyncio.run(add_label(str(sch), "A\ud800", 50, 50))
-    assert "✅" not in result and "surrogates not allowed" in result, result
+    assert result.startswith("❌ The text for ") and "surrogates not allowed" in result, result
+    assert "Traceback" not in result
     assert sch.read_bytes() == before
 
 

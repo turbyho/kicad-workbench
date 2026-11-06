@@ -20,7 +20,7 @@ from kicad_workbench.parsers.check_report_parser import (
 )
 from kicad_workbench.parsers.sch_geometry import iu
 from kicad_workbench.tools import validation
-from kicad_workbench.utils.kicad_cli import find_kicad_cli
+from kicad_workbench.utils.kicad_cli import KicadCliError, find_kicad_cli
 
 from .locale_env import can_name, non_utf8_env, run_python
 
@@ -427,7 +427,7 @@ class TestKicadCliIntegration:
         """An expected error of an English kicad-cli gives "❌ <message>", no traceback."""
 
         async def failing(*args, **kwargs):
-            raise RuntimeError("The settings of KiCad cannot be copied for kicad-cli: x")
+            raise KicadCliError("The settings of KiCad cannot be copied for kicad-cli: x")
 
         monkeypatch.setattr(validation, "run_kicad_cli", failing)
         if check == "erc":

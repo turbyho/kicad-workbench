@@ -15,6 +15,8 @@ import os
 import re
 from pathlib import Path
 
+from ..errors import InputError
+
 # One S-expression token, as DSNLEXER reads it: a parenthesis, a quoted string
 # with backslash escapes, or a bare token. A string starts only at the start of
 # a token. A bare token ends only at a space or a parenthesis
@@ -24,7 +26,7 @@ TOKEN = re.compile(r'[()]|"(?:[^"\\]|\\.)*"|[^\s()"][^\s()]*')
 _INVALID_BYTE = re.compile("[\udc80-\udcff]")
 
 
-class KiCadEncodingError(ValueError):
+class KiCadEncodingError(InputError):
     """A KiCad file is not valid UTF-8."""
 
 
@@ -107,10 +109,15 @@ def write_kicad_text(path: Path, content: str) -> None:
     (a lone surrogate) gives an error, and the file stays as it was.
 
     Raises:
-        UnicodeEncodeError: The text holds a lone surrogate.
+        InputError: The text holds a lone surrogate (from an argument of a tool).
         OSError: The file cannot be written.
     """
-    data = content.encode("utf-8")
+    try:
+        data = content.encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise InputError(
+            f"The text for {path.name} is not valid text ({e}). The tool did not change the file."
+        ) from e
     if os.linesep != "\n":
         data = data.replace(b"\n", os.linesep.encode("ascii"))
     path.write_bytes(data)
@@ -121,7 +128,7 @@ _JSON_PART = re.compile(r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/', re.S)
 
 
 def _not_json(name: str) -> None:
-    raise ValueError(f"{name} is not a JSON value")
+    raise InputError(f"{name} is not a JSON value")
 
 
 def read_kicad_json(path: Path) -> object:
@@ -133,8 +140,12 @@ def read_kicad_json(path: Path) -> object:
 
     Raises:
         OSError: The file cannot be read.
-        ValueError: The file is not valid UTF-8, or it is not JSON.
+        InputError: The file is not valid UTF-8, or it is not JSON.
     """
-    text = path.read_bytes().decode("utf-8").removeprefix("\ufeff")
-    text = _JSON_PART.sub(lambda m: m.group() if m.group().startswith('"') else " ", text)
-    return json.loads(text, parse_constant=_not_json)
+    data = path.read_bytes()
+    try:
+        text = data.decode("utf-8").removeprefix("\ufeff")
+        text = _JSON_PART.sub(lambda m: m.group() if m.group().startswith('"') else " ", text)
+        return json.loads(text, parse_constant=_not_json)
+    except ValueError as e:  # UnicodeDecodeError, JSONDecodeError, _not_json
+        raise InputError(f"{path} is not valid JSON: {e}") from e

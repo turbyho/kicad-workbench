@@ -11,6 +11,7 @@ import pytest
 
 from kicad_workbench.utils import kicad_cli
 from kicad_workbench.utils.kicad_cli import (
+    KicadCliError,
     decode_output,
     find_kicad_cli,
     kicad_cli_env,
@@ -193,7 +194,7 @@ class TestCharacterSet:
         # The path bytes would be UTF-8, but kicad-cli would read them as GBK.
         monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
         monkeypatch.setattr(kicad_cli, "child_ctype", lambda: None)
-        with pytest.raises(RuntimeError, match="no UTF-8 locale"):
+        with pytest.raises(KicadCliError, match="no UTF-8 locale"):
             run_kicad_cli_sync(["-c", "pass", "电源板.kicad_sch"], timeout=30)
         # ASCII is the same in the two character sets.
         assert run_kicad_cli_sync(["-c", "pass", "board.kicad_sch"], timeout=30).returncode == 0
@@ -300,7 +301,7 @@ class TestEnglishSettings:
     def test_no_version(self, settings, monkeypatch):
         monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
         monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: None)
-        with pytest.raises(RuntimeError, match="kicad-cli did not give its version"):
+        with pytest.raises(KicadCliError, match="kicad-cli did not give its version"):
             run_kicad_cli_sync(["-c", "pass"], timeout=30, english=True)
 
     def test_no_settings_of_the_version(self, settings, tmp_path):
@@ -327,7 +328,7 @@ class TestEnglishSettings:
         monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
         monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.6")
         (settings / "kicad_common.json").write_text("{not json", encoding="utf-8")
-        with pytest.raises(RuntimeError, match="The settings of KiCad cannot be copied"):
+        with pytest.raises(KicadCliError, match="The settings of KiCad cannot be copied"):
             run_kicad_cli_sync(["-c", "pass"], timeout=30, english=True)
 
     @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli is not installed")

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..errors import InputError
 from ..models.types import DRCError, DRCItem, ERCError, ERCItem
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from .kicad_versions import kicad_release, version_triple
@@ -230,7 +231,7 @@ def schematic_lines(schematic_files: Iterable[Path]) -> dict[str, tuple[Point, P
                 pts = node.first("pts")
                 try:
                     ends = [node_point(xy) for xy in pts.children("xy")] if pts else []
-                except ValueError:
+                except InputError:
                     continue
                 uuid = node.first("uuid")
                 # A polyline with two points is a SCH_LINE (a graphic line).
@@ -240,6 +241,18 @@ def schematic_lines(schematic_files: Iterable[Path]) -> dict[str, tuple[Point, P
                 line = (ends[0], ends[1])
                 lines[key] = line if lines.get(key, line) == line else None
     return lines
+
+
+def _coordinate(value: Any) -> float:
+    """Return a coordinate of a report. KiCad writes it as a JSON number
+    (RC_ITEM::GetJsonViolation).
+
+    Raises:
+        InputError: The value is not a finite number.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise InputError(f"The report has the coordinate {value!r}, not a number.")
+    return float(value)
 
 
 def parse_erc_item(item: dict[str, Any], pcb_scale: bool = False) -> ERCItem:
@@ -255,11 +268,11 @@ def parse_erc_item(item: dict[str, Any], pcb_scale: bool = False) -> ERCItem:
     if "x" in pos and "y" in pos:
         if pcb_scale:
             # The value is IU / 1e6 with schematic IU: the IU are exact integers.
-            out.x_mm = round(float(pos["x"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
-            out.y_mm = round(float(pos["y"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
+            out.x_mm = round(_coordinate(pos["x"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
+            out.y_mm = round(_coordinate(pos["y"]) * _PCB_IU_PER_MM) / _SCH_IU_PER_MM
         else:
-            out.x_mm = float(pos["x"])
-            out.y_mm = float(pos["y"])
+            out.x_mm = _coordinate(pos["x"])
+            out.y_mm = _coordinate(pos["y"])
 
     # The English item text of a symbol and of its pin has the text of the Reference
     # field as it is (SCH_SYMBOL::GetItemDescription, SCH_PIN::GetItemDescription):
@@ -386,8 +399,8 @@ def parse_drc_item(item: dict[str, Any]) -> DRCItem:
     out = DRCItem(description=desc, uuid=item.get("uuid", ""))
     pos = item.get("pos") or {}
     if "x" in pos and "y" in pos:
-        out.x_mm = float(pos["x"])
-        out.y_mm = float(pos["y"])
+        out.x_mm = _coordinate(pos["x"])
+        out.y_mm = _coordinate(pos["y"])
 
     # Remove the net names in brackets first: a net name can contain " of ".
     plain = _DRC_BRACKETS.sub("", desc)

@@ -20,6 +20,8 @@ from bisect import bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from ..errors import InputError
+
 # KiCad escapes these characters in a quoted string. The lexer reads the file
 # line by line, thus a literal line break in a string stops the load with
 # "Unterminated delimited string".
@@ -135,7 +137,7 @@ def file_header(text: str) -> tuple[str, str | None] | None:
     return match.group("head"), unquote(value) if value and value.startswith('"') else value
 
 
-class SExprError(ValueError):
+class SExprError(InputError):
     """The text is not a valid KiCad S-expression."""
 
     def __init__(self, message: str, offset: int):
@@ -283,7 +285,7 @@ class Node:
     def number(self, index: int = 0, default: float | None = None) -> float | None:
         """Return a token after the head as a number, or the default.
 
-        Raises ValueError when the token is not a number that all KiCad versions
+        Raises InputError when the token is not a number that all KiCad versions
         read as the same number (_NUMBER).
         """
         text = self.value(index)
@@ -296,7 +298,7 @@ class Node:
         if not math.isfinite(value) or (
             abs(value) < sys.float_info.min and match.group("mantissa").strip("-0.")
         ):
-            raise ValueError(f"{text!r} is not a number that KiCad reads")
+            raise InputError(f"{text!r} is not a number that KiCad reads")
         return value
 
     def walk(self, head: str | None = None) -> Iterator["Node"]:

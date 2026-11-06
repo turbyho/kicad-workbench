@@ -85,7 +85,10 @@ def _escaped(text: str, pos: int) -> bool:
 
 def _to_long(digits: str) -> int:
     """wxString::ToLong of ASCII digits: 0 for no digit, LONG_MAX on overflow."""
-    return min(int(digits), _LONG_MAX) if digits else 0
+    significant = digits.lstrip("0")
+    # More than 19 digits is more than LONG_MAX. int() also refuses a text of more
+    # than 4300 digits.
+    return _LONG_MAX if len(significant) > 19 else min(int(significant or "0"), _LONG_MAX)
 
 
 def parse_bus_vector(text: str) -> bool:

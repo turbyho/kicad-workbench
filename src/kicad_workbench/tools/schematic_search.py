@@ -45,7 +45,7 @@ async def search_components_by_type(
         try:
             netlist_path = await _ensure_netlist(Path(file_path))
             netlist_components = NetlistParser(str(netlist_path)).get_components()
-        except EXPECTED_ERRORS as e:  # also a netlist that is not XML (ValueError)
+        except EXPECTED_ERRORS as e:  # also a netlist that is not XML (InputError)
             netlist_components = {}
             net_note = f"\n\n⚠️ The search did not use the nets of the components: {e}"
         for ref, comp in netlist_components.items():

@@ -32,6 +32,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from ..errors import InputError
 from ..parsers.symbol_info import SymbolPin
 
 # wxString::ToLong gives LONG_MAX for a number that is too large. A long has
@@ -43,7 +44,7 @@ _SPACES = " \t\n\r\v\f"
 MAX_STACKED = 100_000
 
 
-class StackedPinError(ValueError):
+class StackedPinError(InputError):
     """A stacked pin number gives more numbers than the server expands."""
 
 

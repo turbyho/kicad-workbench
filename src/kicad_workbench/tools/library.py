@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fastmcp.utilities.types import Image
 
+from ..errors import InputError, WorkbenchError
 from ..parsers.annotation import (
     UNANNOTATED_NOTE,
     UNANNOTATED_ROWS,
@@ -36,6 +37,7 @@ from ..parsers.sexpr import SExprError, parse
 from ..parsers.symbol_info import SymbolInfo, SymbolPin, symbol_info
 from ..server import mcp
 from ..utils.kicad_cli import (
+    KicadCliError,
     decode_output,
     export_with_kicad_cli,
     get_kicad_version,
@@ -101,7 +103,7 @@ def project_file(project_path: str) -> Path | None:
     directory.
 
     Raises:
-        ValueError: The path gives no project or more than one.
+        InputError: The path gives no project or more than one.
     """
     if not project_path:
         return None
@@ -114,17 +116,17 @@ def project_file(project_path: str) -> Path | None:
         try:
             return schematic_project_file(path)
         except AmbiguousRootError as e:
-            raise ValueError(str(e)) from e
+            raise InputError(str(e)) from e
     elif path.suffix == ".kicad_pcb" and path.is_file():
         same_name = path.with_suffix(".kicad_pro")
         if same_name.is_file():
             return same_name
         directory = path.parent
     else:
-        raise ValueError(f"No KiCad project at {path}.")
+        raise InputError(f"No KiCad project at {path}.")
     projects = sorted(directory.glob("*.kicad_pro"))
     if len(projects) != 1:
-        raise ValueError(
+        raise InputError(
             f"The directory {directory} has {len(projects)} .kicad_pro files. "
             "Give the .kicad_pro file of the project."
         )
@@ -134,10 +136,10 @@ def project_file(project_path: str) -> Path | None:
 async def _rows(kind: str, project_path: str) -> tuple[list[LibraryRow], list[str]]:
     """Return the library rows of the installed KiCad and of the project."""
     if kind not in _KINDS:
-        raise ValueError(f"The kind {kind!r} is not 'symbol' or 'footprint'.")
+        raise InputError(f"The kind {kind!r} is not 'symbol' or 'footprint'.")
     version = await get_kicad_version()
     if version is None:
-        raise ValueError(NO_KICAD_CLI)
+        raise InputError(NO_KICAD_CLI)
     return await asyncio.to_thread(lambda: library_rows(kind, version, project_file(project_path)))
 
 
@@ -375,7 +377,7 @@ def _field_rules(kicad: str) -> int:
     """Return the field rules of the installed KiCad: 9 (KiCad 8 and 9) or 10.
 
     Raises:
-        ValueError: The server has no rules for the version.
+        InputError: The server has no rules for the version.
     """
     release = kicad_release(kicad)
     if release in (KICAD8, KICAD9):
@@ -384,7 +386,7 @@ def _field_rules(kicad: str) -> int:
     # (kicad_fields; the server knows the rules of master of 2026-11-02).
     if release is KICAD10 or version_numbers(kicad) == (10, 99):
         return 10
-    raise ValueError(
+    raise InputError(
         f"The installed KiCad is {kicad}. This server knows the rules of KiCad 8.0, 9.0 "
         "and 10.0, and of the nightly builds 10.99."
     )
@@ -522,7 +524,7 @@ def _read_symbol(
     Raises:
         LibraryLookupError: The symbol is not there, or the server or KiCad
             cannot read it.
-        ValueError: The server has no rules for the installed KiCad.
+        InputError: The server has no rules for the installed KiCad.
     """
     rules = _field_rules(kicad)
     chain, row, problems = find_library_symbol(
@@ -845,7 +847,7 @@ def _find_footprint(
 
     Raises:
         LibraryLookupError: The library or the footprint is not there.
-        ValueError: The project path gives no project or more than one.
+        InputError: The project path gives no project or more than one.
     """
     project = project_file(project_path)
     return project, *_footprint_file(library_name, footprint_name, kicad, project)
@@ -911,7 +913,7 @@ async def _read_footprint(
 
     Raises:
         LibraryLookupError: The footprint is not there, or KiCad cannot read it.
-        ValueError: The project path gives no project or more than one.
+        InputError: The project path gives no project or more than one.
     """
     project, row, problems, file = await asyncio.to_thread(
         _find_footprint, library_name, footprint_name, kicad, project_path
@@ -1015,13 +1017,13 @@ def netlist_root(project: Path, kicad: str, output: str = "netlist") -> tuple[Pa
         (the schematic, the number of top-level sheets of the project).
 
     Raises:
-        ValueError: kicad-cli cannot write the output of the full project.
+        InputError: kicad-cli cannot write the output of the full project.
     """
     tops = top_level_sheets(project)
     named = Path(os.path.abspath(project.with_suffix(".kicad_sch")))
     if len(tops) == 1:
         if project.is_file() and tops[0].file.resolve() != named.resolve():
-            raise ValueError(
+            raise InputError(
                 f"The top-level sheet of the project {project} is {tops[0].file.name}. "
                 "kicad-cli uses the project file of the name of the schematic, thus it does "
                 "not use the settings of this project (for example its text variables)."
@@ -1029,13 +1031,13 @@ def netlist_root(project: Path, kicad: str, output: str = "netlist") -> tuple[Pa
         return tops[0].file, 1
     numbers = version_triple(kicad)
     if numbers is None or numbers < (10, 0, 7):
-        raise ValueError(
+        raise InputError(
             f"The project {project} has {len(tops)} top-level sheets. kicad-cli of KiCad "
             f"{kicad} writes the {output} of one top-level sheet only. KiCad 10.0.7 and later "
             f"write the {output} of all top-level sheets."
         )
     if not named.is_file() or all(top.file.resolve() != named.resolve() for top in tops):
-        raise ValueError(
+        raise InputError(
             f"The project {project} has {len(tops)} top-level sheets, but {named.name} is "
             f"not one of them. kicad-cli writes the {output} of all top-level sheets only for "
             "the schematic with the name of the project."
@@ -1051,7 +1053,7 @@ def _stacked_rules(kicad: str, unsure: list[str]) -> bool:
             in a different way.
 
     Raises:
-        ValueError: The installed KiCad is a nightly build, and unsure is not
+        InputError: The installed KiCad is a nightly build, and unsure is not
             empty.
     """
     release = kicad_release(kicad)
@@ -1064,7 +1066,7 @@ def _stacked_rules(kicad: str, unsure: list[str]) -> bool:
     # (UnescapeStackedPinItem), and a nightly build can have an older or a
     # newer rule. A pin number with no bracket is one number in each version.
     if unsure:
-        raise ValueError(
+        raise InputError(
             f"The installed KiCad is the nightly build {kicad}. Its rules for stacked pin "
             "numbers are not the rules of KiCad 10.0, thus the server cannot check the pin "
             "numbers " + ", ".join(f'"{number}"' for number in dict.fromkeys(unsure)) + "."
@@ -1333,7 +1335,7 @@ async def _netlist_annotation(
         check = await asyncio.to_thread(
             check_annotation, root.with_suffix(".kicad_pro"), kicad, "cli", "all"
         )
-    except (ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError) as e:
+    except (WorkbenchError, OSError) as e:
         return None, [f"The server cannot list the annotation errors: {e}"], None, []
     return check.errors, check.problems, annotation_references(check), check.unannotated
 
@@ -1343,7 +1345,7 @@ async def _update_annotation(project: Path, kicad: str) -> tuple[bool | None, li
     check_annotation), or None when the check cannot run, and the notes."""
     try:
         check = await asyncio.to_thread(check_annotation, project, kicad, "update", "all")
-    except (ValueError, KicadFileError, KiCadEncodingError, SExprError, OSError) as e:
+    except (WorkbenchError, OSError) as e:
         return None, [f'The server cannot check the annotation of "Update PCB from Schematic": {e}']
     return bool(check.errors), check.problems
 
@@ -1434,7 +1436,7 @@ def _board_netlist(root: Path) -> tuple[str, str]:
         (the netlist, the messages of kicad-cli).
 
     Raises:
-        RuntimeError: kicad-cli did not write the netlist.
+        KicadCliError: kicad-cli did not write the netlist.
         KiCadEncodingError: The netlist is not UTF-8.
     """
     export = export_with_kicad_cli(
@@ -1721,7 +1723,7 @@ async def schematic_footprints(
         The netlist and the footprints, or the text of an error.
 
     Raises:
-        ValueError: The server has no rules for the KiCad version, or
+        InputError: The server has no rules for the KiCad version, or
             kicad-cli cannot write the netlist of the full project.
     """
     # The server has rules (stacked pins, top-level sheets) only for KiCad 8,
@@ -1750,7 +1752,7 @@ async def schematic_footprints(
             raise netlist
         text, output = netlist
         components = read_board_netlist(text)
-    except (RuntimeError, KiCadEncodingError, SExprError) as e:
+    except (KicadCliError, InputError) as e:
         return f"❌ kicad-cli did not give the netlist of {root}: {e}"
     absent: list[str] = []
     if references:
@@ -2108,7 +2110,7 @@ async def _render(
             return row, problems, None
         try:
             chain, row, problems, info = _read_symbol(library_name, item_name, kicad, project_path)
-        except (LibraryLookupError, ValueError) as e:
+        except (LibraryLookupError, InputError) as e:
             # kicad-cli reads the symbol library: it gives an error for a
             # symbol that is not there, or for a file that it cannot read.
             # A symbol that only the server cannot read gets a warning.
@@ -2205,7 +2207,7 @@ async def _render(
                 result = run_kicad_cli_sync(args, timeout=_RENDER_TIMEOUT, english=True)
             except subprocess.TimeoutExpired:
                 return f"❌ kicad-cli of KiCad {kicad} did not stop in {_RENDER_TIMEOUT} s."
-            except RuntimeError as e:
+            except KicadCliError as e:
                 return f"❌ {e}"
             return draw(directory, result)
         finally:

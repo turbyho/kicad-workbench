@@ -29,6 +29,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_versions import version_numbers
 from .kicad_text import read_kicad_json
 from .kicad_version import find_kicad_install
@@ -37,9 +38,9 @@ from .library_tables import kicad_settings_dir
 _cached_exe: str | None = None
 
 
-class KicadCliError(RuntimeError):
+class KicadCliError(WorkbenchError):
     """kicad-cli cannot run, did not stop in time, or did not write its output. The
-    message tells why. A RuntimeError: the callers that catch RuntimeError get it."""
+    message tells why."""
 
 
 def find_kicad_cli() -> str | None:
@@ -236,7 +237,7 @@ def english_settings(directory: Path, version: str) -> None:
 
     Raises:
         OSError: The settings cannot be copied.
-        ValueError: kicad_common.json is not JSON, or its system is not a JSON
+        InputError: kicad_common.json is not JSON, or its system is not a JSON
             object.
         LibraryTableError: The version has no major and minor number.
     """
@@ -249,10 +250,10 @@ def english_settings(directory: Path, version: str) -> None:
     common = target / "kicad_common.json"
     try:
         data = read_kicad_json(common) if common.is_file() else {}
-    except ValueError as e:
-        raise ValueError(f"{source / common.name} is not valid JSON: {e}") from e
+    except InputError as e:  # its message names the copy
+        raise InputError(f"{source / common.name} is not valid JSON: {e.__cause__}") from e
     if not isinstance(data, dict) or not isinstance(data.setdefault("system", {}), dict):
-        raise ValueError(f"{source / common.name}: system is not a JSON object.")
+        raise InputError(f"{source / common.name}: system is not a JSON object.")
     data["system"]["language"] = _english_language()
     common.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -304,7 +305,7 @@ def run_kicad_cli_sync(
             raise KicadCliError(f"kicad-cli did not give its version: {version!r}")
         try:
             english_settings(Path(settings), version)
-        except (OSError, ValueError) as e:  # LibraryTableError is a ValueError
+        except (OSError, WorkbenchError) as e:
             raise KicadCliError(f"The settings of KiCad cannot be copied for kicad-cli: {e}") from e
         env = dict(os.environ if env is None else env)
         env["KICAD_CONFIG_HOME"] = settings

@@ -35,6 +35,7 @@ import uuid as uuidlib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+from ..errors import InputError
 from .lib_symbols import LibraryPin, body_points, library_pins
 from .sch_geometry import (
     IU_PER_MIL,
@@ -58,7 +59,7 @@ from .sexpr import Node
 _UNIQUE_ANGLE = 10000
 
 
-class UnknownJunctionError(ValueError):
+class UnknownJunctionError(InputError):
     """The decision depends on data that is not in the file."""
 
 
@@ -352,7 +353,7 @@ def read_sheet(root: Node, wire_widths: tuple[int, int] | None = None) -> Sheet:
     """Return the items of a sheet (the root of a .kicad_sch file).
 
     Raises:
-        ValueError: A position is not a number, or KiCad cannot read a symbol.
+        InputError: A position is not a number, or KiCad cannot read a symbol.
     """
     lines = []
     for head in ("wire", "bus"):
@@ -445,7 +446,7 @@ def junction_symbol(symbol: Node, definition: Node) -> SymbolPins:
     hidden pin outside it is uncertain.
 
     Raises:
-        ValueError: A position is not a number, or KiCad cannot read the symbol.
+        InputError: A position is not a number, or KiCad cannot read the symbol.
     """
     where = placement(symbol)
     style = body_style(symbol)

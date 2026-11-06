@@ -13,10 +13,11 @@ source). All file formats use the same time line.
 import re
 from dataclasses import dataclass
 
+from ..errors import WorkbenchError
 from .sexpr import Atom, Node, file_header, property_field
 
 
-class KicadFileError(Exception):
+class KicadFileError(WorkbenchError):
     """KiCad cannot read the file, or this server has no rules for its version."""
 
 

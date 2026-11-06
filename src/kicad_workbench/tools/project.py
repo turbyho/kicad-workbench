@@ -11,7 +11,8 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 
-from ..parsers.sexpr import SExprError, parse, quote
+from ..errors import InputError, WorkbenchError
+from ..parsers.sexpr import parse, quote
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.kicad_lock import (
@@ -19,7 +20,7 @@ from ..utils.kicad_lock import (
     check_project_not_open,
     check_schematic_not_open,
 )
-from ..utils.kicad_text import KiCadEncodingError, read_for_write, write_kicad_text
+from ..utils.kicad_text import read_for_write, write_kicad_text
 from ..utils.library_tables import LibraryTableError, kicad_environment, kicad_stock_dir
 from ..utils.new_project import (
     EMPTY_PROJECT_FILE,
@@ -57,7 +58,7 @@ def _set_title_block(content: str, title: str, company: str, date: str) -> str:
 
     Raises:
         SExprError: The text is not a valid S-expression.
-        ValueError: The schematic has no title block and no paper.
+        InputError: The schematic has no title block and no paper.
     """
     root = parse(content)
     block = root.first("title_block")
@@ -80,7 +81,7 @@ def _set_title_block(content: str, title: str, company: str, date: str) -> str:
         return content[: block.start] + new_block + content[block.end :]
     paper = root.first("paper")
     if paper is None:
-        raise ValueError("The schematic has no (paper ...): KiCad writes it in each schematic.")
+        raise InputError("The schematic has no (paper ...): KiCad writes it in each schematic.")
     return content[: paper.end] + "\n\t" + new_block + content[paper.end :]
 
 
@@ -227,7 +228,7 @@ def _make_project(
         try:
             content = _set_title_block(read_for_write(schematic), title, company, date)
             write_kicad_text(schematic, content)
-        except (SExprError, ValueError, KiCadEncodingError, OSError) as e:
+        except (WorkbenchError, OSError) as e:
             notes.append(f"⚠️ The tool did not write the title block of {schematic.name}: {e}")
     names = [str(p.relative_to(path)) + ("/" if p.is_dir() else "") for p in written]
     return names, notes, description

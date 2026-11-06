@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..errors import WorkbenchError
 from ..models.types import DRCError, ERCError, ERCItem
 from ..parsers.annotation import (
     ANNOTATION_TYPES,
@@ -24,12 +25,9 @@ from ..parsers.check_report_parser import (
     parse_drc_report,
     read_erc_report,
 )
-from ..parsers.kicad_versions import KicadFileError
 from ..parsers.sch_geometry import IU_PER_MM
-from ..parsers.sexpr import SExprError
 from ..server import mcp
-from ..utils.kicad_cli import decode_output, get_kicad_version, run_kicad_cli
-from ..utils.kicad_text import KiCadEncodingError
+from ..utils.kicad_cli import KicadCliError, decode_output, get_kicad_version, run_kicad_cli
 from ..utils.sch_hierarchy import (
     PRO_SUFFIX,
     AmbiguousRootError,
@@ -254,14 +252,7 @@ async def _annotation_errors(root: Path) -> tuple[ErcAnnotation | None, list[str
     try:
         project = await asyncio.to_thread(schematic_project_file, root)
         check = await asyncio.to_thread(erc_violations, project, version)
-    except (
-        ValueError,
-        KicadFileError,
-        KiCadEncodingError,
-        SExprError,
-        OSError,
-        AmbiguousRootError,
-    ) as e:
+    except (WorkbenchError, OSError) as e:
         return None, [f"⚠️ The result has no annotation check of the ERC dialog: {e}"]
     lines = [
         f"_The annotation check is the check of the ERC dialog of KiCad {version} (kicad-cli "
@@ -478,7 +469,7 @@ async def _run_erc(schematic_path: str, results: list[_ErcResult]) -> str:
                 timeout=60,
                 english=True,
             )
-        except RuntimeError as e:  # the settings for an English kicad-cli
+        except KicadCliError as e:  # the settings for an English kicad-cli
             return f"❌ {e}"
 
         stderr_text = decode_output(result.stderr)
@@ -650,7 +641,7 @@ async def run_drc(
                 timeout=60,
                 english=True,
             )
-        except RuntimeError as e:  # the settings for an English kicad-cli
+        except KicadCliError as e:  # the settings for an English kicad-cli
             return f"❌ {e}"
 
         stderr_text = decode_output(result.stderr)

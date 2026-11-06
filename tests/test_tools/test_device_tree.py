@@ -72,7 +72,8 @@ def test_text_that_is_not_valid_does_not_empty_the_output(tmp_path, no_kicad):
     output = tmp_path / "board.dts"
     output.write_text("/* old */\n", encoding="utf-8")
     result = _generate(sch, output)
-    assert "surrogates not allowed" in result, result
+    assert result.startswith("❌ The text for board"), result
+    assert "surrogates not allowed" in result and "Traceback" not in result
     assert output.read_text(encoding="utf-8") == "/* old */\n"
 
 

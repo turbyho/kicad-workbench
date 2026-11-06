@@ -125,7 +125,7 @@ class PCBParser:
 
         Raises:
             FileNotFoundError: If file doesn't exist
-            ValueError: If file is not a .kicad_pcb file
+            InputError: If file is not a .kicad_pcb file
         """
         self.file_path = validate_kicad_file(file_path, ".kicad_pcb")
         self._data: dict[str, Any] | None = None

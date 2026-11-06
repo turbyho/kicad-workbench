@@ -7,6 +7,7 @@ import math
 import uuid
 from pathlib import Path
 
+from ..errors import InputError
 from ..parsers.bus_names import is_bus_label
 from ..parsers.kicad_fields import rules_for_version
 from ..parsers.kicad_versions import (
@@ -732,7 +733,7 @@ def _placed_property(field: PlacedField, x: float, y: float, text: str | None) -
         text: The new text. None keeps the text of the definition.
 
     Raises:
-        ValueError: The (at ...) of the field is not a number.
+        InputError: The (at ...) of the field is not a number.
     """
     if text is None:
         text = field.text
@@ -837,7 +838,7 @@ async def _label_position(
     grid = settings.connection_grid
     try:
         existing = read_sheet(parse(content), settings.wire_widths).connection_points(label=True)
-    except ValueError as e:
+    except InputError as e:
         return f"❌ Cannot add the label: the sheet has an item that KiCad cannot read: {e}."
     point = _snapped_label(requested, grid, existing)
     text = f"at {_shown(point)}"
@@ -1130,7 +1131,7 @@ async def add_component_from_library(
         grid = settings.connection_grid
         try:
             items = read_sheet(parse(content), settings.wire_widths)
-        except ValueError as e:
+        except InputError as e:
             return (
                 f"❌ Cannot add component {lib_id}: the sheet has an item that KiCad cannot "
                 f"read: {e}."
@@ -1173,11 +1174,11 @@ async def add_component_from_library(
                 pins,
                 (project.stem, sheet.path),
             )
-        except (KicadFileError, ValueError) as e:
+        except (KicadFileError, InputError) as e:
             return f"❌ Cannot add component {lib_id}: {e}"
         try:
             new_pins = junction_symbol(parse(component_entry), definition_node)
-        except ValueError as e:
+        except InputError as e:
             return f"❌ Cannot add component {lib_id}: the library symbol: {e}."
         try:
             place_symbol(items, new_pins, _junction_rules(version), is_bus_label)
@@ -1313,7 +1314,7 @@ async def add_wire(
         try:
             root = parse(content)
             sheet = read_sheet(root, settings.wire_widths)
-        except ValueError as e:
+        except InputError as e:
             return f"❌ Cannot add the wire: the sheet has an item that KiCad cannot read: {e}."
         final = requested
         if snap_to_grid:

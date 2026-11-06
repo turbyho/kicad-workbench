@@ -32,7 +32,6 @@ import json
 import os
 import re
 import tempfile
-import traceback
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +51,7 @@ from ..utils.kicad_bom import (
 from ..utils.kicad_cli import CliExport, get_kicad_version
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
 from .library import NO_KICAD_CLI, cell, netlist_root
 
@@ -596,7 +596,5 @@ async def export_bom(
         return await _export_bom(
             schematic_path, output_path, fields, group_by, exclude_dnp, variant, all_variants
         )
-    except ValueError as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")

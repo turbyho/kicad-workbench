@@ -120,7 +120,7 @@ class TestRefusal:
         pcb = sch.with_suffix(".kicad_pcb")
         pcb.write_text(ROUTED_BOARD, encoding="utf-8")
         result = setup(sch, width=50, height=40)
-        assert result.startswith("Error: The board file"), result
+        assert result.startswith("❌ The board file"), result
         assert "overwrite=True" in result
         assert pcb.read_text(encoding="utf-8") == ROUTED_BOARD
         assert fake_pcbnew["calls"] == []

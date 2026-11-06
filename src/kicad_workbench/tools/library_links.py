@@ -20,7 +20,6 @@ import json
 import shutil
 import subprocess
 import tempfile
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +40,7 @@ from ..utils.library_tables import (
 from ..utils.model_paths import ModelFile, resolve_model
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.schematic_settings import rule_severities, unknown_severity_reason
+from ..utils.tool_errors import error_answer
 from .library import (
     NO_KICAD_CLI,
     SchematicFootprints,
@@ -526,7 +526,5 @@ async def check_library_links(project_path: str) -> str:
     """
     try:
         return await _check_links(project_path)
-    except (ValueError, LibraryTableError) as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")

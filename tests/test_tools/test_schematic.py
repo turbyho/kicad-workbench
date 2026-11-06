@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.parsers.schematic_parser import SchematicParser
-from kicad_workbench.tools import schematic
+from kicad_workbench.tools import netlist, schematic
 
 
 @pytest.fixture
@@ -179,7 +179,7 @@ async def test_symbol_details_with_the_pins_of_the_netlist(example_schematic, mo
     from kicad_workbench.utils.kicad_cli import CliExport
 
     data = NETLIST.format(version="10.0.6", f1="SPI1_MOSI_1", f2="B_2").encode()
-    monkeypatch.setattr(schematic, "export_with_kicad_cli", lambda *args: CliExport(data, []))
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(data, []))
     result = await schematic.get_symbol_details(str(example_schematic), "R1")
     assert "| 1 | SPI1_MOSI | output |\n| 2 | B | passive |" in result, result
 
@@ -189,9 +189,20 @@ async def test_symbol_details_with_no_netlist(example_schematic, monkeypatch):
     def no_netlist(*args):
         raise RuntimeError("no kicad-cli")
 
-    monkeypatch.setattr(schematic, "export_with_kicad_cli", no_netlist)
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", no_netlist)
     result = await schematic.get_symbol_details(str(example_schematic), "R1")
     assert "⚠️ The pins are the pins of the schematic file: kicad-cli gives no netlist" in result
+
+
+@pytest.mark.asyncio
+async def test_symbol_details_with_a_netlist_that_is_not_xml(example_schematic, monkeypatch):
+    from kicad_workbench.utils.kicad_cli import CliExport
+
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(b"<export", []))
+    result = await schematic.get_symbol_details(str(example_schematic), "R1")
+    assert (
+        "⚠️ The pins are the pins of the schematic file: the netlist of kicad-cli is not valid XML"
+    ) in result, result
 
 
 def test_component_with_only_netlist_nodes():

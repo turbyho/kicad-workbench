@@ -38,6 +38,7 @@ from ..utils.sch_hierarchy import (
     schematic_project_file,
     sheet_files,
 )
+from ..utils.tool_errors import EXPECTED_ERRORS, error_answer
 
 
 def _temp_dir() -> Path:
@@ -481,6 +482,7 @@ async def _run_erc(schematic_path: str, results: list[_ErcResult]) -> str:
             return f"❌ {e}"
 
         stderr_text = decode_output(result.stderr)
+        output_text = (decode_output(result.stdout) + "\n" + stderr_text).strip()
 
         if result.returncode != 0:
             return f"""❌ **ERC Check Failed**
@@ -493,7 +495,6 @@ async def _run_erc(schematic_path: str, results: list[_ErcResult]) -> str:
 ```
 
 **Possible causes:**
-- KiCad command line tools not available
 - Invalid schematic file
 - Missing project file (.kicad_pro)
 
@@ -506,13 +507,17 @@ async def _run_erc(schematic_path: str, results: list[_ErcResult]) -> str:
         if not erc_report_path.exists():
             # kicad-cli returned success but produced no report — do NOT claim
             # "all pins connected" (that was never verified).
-            return f"""⚠️ **ERC Report Not Generated**
+            return f"""❌ **ERC Report Not Generated**
 
 **Schematic:** {schematic_path}
 
-kicad-cli exited cleanly but wrote no report file, so no checks could be
-verified. Ensure KiCad 9+ is installed and the schematic has a matching
-.kicad_pro project file.{subsheet_note}"""
+kicad-cli stopped with the exit code 0, but it wrote no report file
+({erc_report_path}). Thus the tool has no result of the check.
+
+**Output of kicad-cli:**
+```
+{output_text or "(none)"}
+```{subsheet_note}"""
 
         # Parse and format results
         try:
@@ -569,8 +574,8 @@ No electrical violations detected!{excluded_note}{notes_text}{subsheet_note}{una
 - Fix violations in KiCad Eeschema
 - Re-run `run_erc()` to verify fixes"""
 
-        except Exception as e:
-            return f"""⚠️ **ERC Report Parse Error**
+        except EXPECTED_ERRORS as e:  # an other exception is a defect: the traceback
+            return f"""❌ **ERC Report Parse Error**
 
 **Schematic:** {schematic_path}
 
@@ -591,7 +596,7 @@ You can manually inspect the report file or re-run ERC in KiCad GUI.{subsheet_no
 **Schematic:** {schematic_path}
 
 KiCad's command-line tool (kicad-cli) could not be located on PATH or in the
-detected KiCad install directory. Install KiCad 7+ (https://www.kicad.org/),
+detected KiCad install directory. Install KiCad 8 or later (https://www.kicad.org/),
 or point the KICAD_CLI environment variable at the kicad-cli executable."""
         return f"""❌ **File Not Found**
 
@@ -600,18 +605,7 @@ or point the KICAD_CLI environment variable at the kicad-cli executable."""
 {e}
 Please check the file path and try again."""
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Unexpected Error**
-
-**Schematic:** {schematic_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"ERC of {schematic_path} failed")
 
 
 @mcp.tool()
@@ -660,6 +654,7 @@ async def run_drc(
             return f"❌ {e}"
 
         stderr_text = decode_output(result.stderr)
+        output_text = (decode_output(result.stdout) + "\n" + stderr_text).strip()
 
         if result.returncode != 0:
             return f"""❌ **DRC Check Failed**
@@ -672,7 +667,6 @@ async def run_drc(
 ```
 
 **Possible causes:**
-- KiCad command line tools not available
 - Invalid PCB file
 - Missing design rules
 
@@ -685,12 +679,17 @@ async def run_drc(
         if not drc_report_path.exists():
             # kicad-cli returned success but wrote no report. Do NOT claim
             # "passed": no check was verified.
-            return f"""⚠️ **DRC Report Not Generated**
+            return f"""❌ **DRC Report Not Generated**
 
 **PCB:** {pcb_path}
 
-kicad-cli exited cleanly but wrote no report file, so no checks could be
-verified. Ensure KiCad 9+ is installed and the board file loads in Pcbnew."""
+kicad-cli stopped with the exit code 0, but it wrote no report file
+({drc_report_path}). Thus the tool has no result of the check.
+
+**Output of kicad-cli:**
+```
+{output_text or "(none)"}
+```"""
 
         # Parse and format results
         try:
@@ -756,8 +755,8 @@ No design rule violations detected!{excluded_note}"""
 - Fix violations in KiCad Pcbnew
 - Re-run `run_drc()` to verify fixes"""
 
-        except Exception as e:
-            return f"""⚠️ **DRC Report Parse Error**
+        except EXPECTED_ERRORS as e:  # an other exception is a defect: the traceback
+            return f"""❌ **DRC Report Parse Error**
 
 **PCB:** {pcb_path}
 
@@ -776,18 +775,7 @@ You can manually inspect the report file or re-run DRC in KiCad GUI."""
 
 Please check the file path and try again."""
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Unexpected Error**
-
-**PCB:** {pcb_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"DRC of {pcb_path} failed")
 
 
 @mcp.tool()
@@ -876,18 +864,7 @@ No violations match the specified filter.{notes_text}{unannotated_text}"""
         return result + unannotated_text
 
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Error**
-
-**Schematic:** {schematic_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"ERC of {schematic_path} failed")
 
 
 @mcp.tool()
@@ -957,18 +934,7 @@ No violations match the specified filter."""
         return result
 
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Error**
-
-**PCB:** {pcb_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"DRC of {pcb_path} failed")
 
 
 @mcp.tool()
@@ -1053,19 +1019,7 @@ async def export_erc_report(
 The ERC report has been successfully exported to the specified location.{_notes_text(notes)}"""
 
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Export Failed**
-
-**Schematic:** {schematic_path}
-**Output:** {output_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"Export of the ERC report of {schematic_path} failed")
 
 
 @mcp.tool()
@@ -1117,16 +1071,4 @@ async def export_drc_report(
 The DRC report has been successfully exported to the specified location."""
 
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Export Failed**
-
-**PCB:** {pcb_path}
-**Output:** {output_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"Export of the DRC report of {pcb_path} failed")

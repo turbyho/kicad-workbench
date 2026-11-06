@@ -9,8 +9,10 @@ from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser, unknown_alternate_note
 from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
-from ..utils.kicad_cli import export_with_kicad_cli, get_kicad_version
+from ..utils.kicad_cli import get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic
+from ..utils.tool_errors import error_answer
+from .netlist import NetlistError, export_netlist
 
 
 @mcp.tool()
@@ -80,14 +82,8 @@ async def list_schematic_components(
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing schematic: {e}"
-
-
-# The time of the netlist of get_symbol_details (a large project needs some seconds).
-_NETLIST_TIMEOUT = 120.0
+        return error_answer(e, "Error parsing schematic")
 
 
 def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]] | None, str]:
@@ -99,14 +95,14 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
     alternate of a pin), sorted by StrNumCmp as KiCad sorts the pins.
     """
     try:
-        root = find_root_schematic(file_path) or file_path
-        export = export_with_kicad_cli(
-            ["sch", "export", "netlist", "--format", "kicadxml"], root, "pins.xml", _NETLIST_TIMEOUT
-        )
-    except (AmbiguousRootError, RuntimeError, FileNotFoundError) as e:
+        data, _root = export_netlist(file_path)
+    except (AmbiguousRootError, NetlistError) as e:
         return None, f"kicad-cli gives no netlist ({e})"
-    netlist = NetlistParser.from_bytes(export.data)
-    component = netlist.get_components().get(reference)
+    netlist = NetlistParser.from_bytes(data)
+    try:
+        component = netlist.get_components().get(reference)
+    except ValueError as e:  # not XML
+        return None, f"the netlist of kicad-cli is not valid XML ({e.__cause__})"
     if component is None:
         return None, f"the netlist of kicad-cli has no pin of {reference}"
     pins = [
@@ -145,7 +141,7 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         component = await asyncio.to_thread(find)
 
         if not component:
-            return f"Component '{reference}' not found in schematic."
+            return f"❌ Component '{reference}' not found in schematic."
 
         # Format output
         lines = [
@@ -193,10 +189,8 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing schematic: {e}"
+        return error_answer(e, "Error parsing schematic")
 
 
 @mcp.tool()
@@ -241,10 +235,8 @@ async def search_symbols(
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing schematic: {e}"
+        return error_answer(e, "Error parsing schematic")
 
 
 @mcp.tool()
@@ -313,10 +305,8 @@ async def list_schematic_nets(
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing schematic: {e}"
+        return error_answer(e, "Error parsing schematic")
 
 
 @mcp.tool()
@@ -382,7 +372,5 @@ async def get_schematic_info(file_path: str) -> str:
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"Error: {e}"
     except Exception as e:
-        return f"Error parsing schematic: {e}"
+        return error_answer(e, "Error parsing schematic")

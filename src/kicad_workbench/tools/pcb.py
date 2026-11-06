@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import functools
-import traceback
 
-from ..parsers.kicad_versions import KicadFileError
 from ..server import mcp
+from ..utils.tool_errors import error_answer
 
 
 class PcbnewImportError(ValueError):
@@ -75,14 +74,6 @@ def _get_parser(file_path: str):
     from ..parsers.pcb_parser_kicad import PCBParserKiCad
 
     return PCBParserKiCad(file_path)
-
-
-def _failure(e: Exception) -> str:
-    """The answer for an error: "❌ <message>" for an expected error, else also the
-    traceback."""
-    if isinstance(e, (FileNotFoundError, ValueError, KicadFileError)):
-        return f"❌ {e}"
-    return f"❌ Error parsing PCB: {e}\n\n{traceback.format_exc()}"
 
 
 def _is_pcbnew(parser) -> bool:
@@ -154,7 +145,7 @@ async def list_pcb_footprints(
             return "\n".join(lines)
 
     except Exception as e:
-        return _failure(e)
+        return error_answer(e, "Error parsing PCB")
 
 
 @mcp.tool()
@@ -220,7 +211,7 @@ async def get_pcb_statistics(file_path: str) -> str:
             return "\n".join(lines)
 
     except Exception as e:
-        return _failure(e)
+        return error_answer(e, "Error parsing PCB")
 
 
 @mcp.tool()
@@ -420,7 +411,7 @@ async def analyze_pcb_nets(file_path: str) -> str:
         return "\n".join(lines)
 
     except Exception as e:
-        return _failure(e)
+        return error_answer(e, "Error parsing PCB")
 
 
 @mcp.tool()
@@ -601,7 +592,7 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
         return "\n".join(lines)
 
     except Exception as e:
-        return _failure(e)
+        return error_answer(e, "Error parsing PCB")
 
 
 @mcp.tool()
@@ -793,7 +784,7 @@ async def analyze_pcb_signal_integrity(
         return "\n".join(lines)
 
     except Exception as e:
-        return _failure(e)
+        return error_answer(e, "Error parsing PCB")
 
 
 @mcp.tool()
@@ -966,7 +957,7 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
         return "\n".join(lines)
 
     except Exception as e:
-        return _failure(e)
+        return error_answer(e, "Error parsing PCB")
 
 
 # ── Helpers ──────────────────────────────────────────────────

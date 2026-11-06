@@ -90,11 +90,14 @@ class NetlistParser:
         if self._data is not None:
             return self._data
 
-        root = (
-            ET.fromstring(self._text)
-            if self._text is not None
-            else ET.parse(self.file_path).getroot()
-        )
+        try:
+            root = (
+                ET.fromstring(self._text)
+                if self._text is not None
+                else ET.parse(self.file_path).getroot()
+            )
+        except ET.ParseError as e:
+            raise ValueError(f"The netlist {self.file_path} is not valid XML: {e}") from e
 
         # <design><tool>Eeschema 10.0.6</tool>: the KiCad that wrote the netlist.
         tool = root.findtext("design/tool") or ""

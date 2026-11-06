@@ -7,6 +7,7 @@ This module provides advanced pin analysis capabilities including:
 - MCU-specific pin mapping support
 """
 
+import asyncio
 import re
 import tempfile
 from pathlib import Path
@@ -16,52 +17,45 @@ from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
 from ..utils.sch_hierarchy import find_root_schematic
+from ..utils.tool_errors import error_answer
 
 
-async def _ensure_netlist(sch_path: Path) -> Path | None:
+async def _ensure_netlist(sch_path: Path) -> Path:
     """Find or generate a netlist for the given schematic.
 
     Checks the schematic directory and the temp directory (legacy flat names
     plus the per-schematic hashed cache name). If none exists, generates one
     via kicad-cli (auto-redirects to root schematic for sub-sheets).
 
-    Returns the netlist Path, or None on failure.
+    Returns:
+        The netlist file.
 
     Raises:
         AmbiguousRootError: More than one root schematic holds the sheet. A
             netlist of the sheet alone does not have all nets.
+        NetlistError: kicad-cli did not write the netlist (the message tells why).
     """
-    from .netlist import netlist_cache_path
+    from .netlist import netlist_cache_path, write_netlist
 
     # Candidate schematics: the given sheet and, for sub-sheets, the root
-    # schematic that generate_netlist redirects to.
+    # schematic that write_netlist uses.
     candidates: list[Path] = [sch_path]
-    root_sch = find_root_schematic(sch_path)
+    root_sch = await asyncio.to_thread(find_root_schematic, sch_path)
     if root_sch:
         candidates.append(root_sch)
 
-    def _probe() -> Path | None:
-        for cand in candidates:
-            for path in [
-                cand.parent / (cand.stem + ".xml"),  # GUI-exported next to sheet
-                Path(tempfile.gettempdir()) / (cand.stem + ".xml"),  # legacy flat name
-                netlist_cache_path(cand),  # current hashed name
-            ]:
-                if path.exists():
-                    return path
-        return None
+    for cand in candidates:
+        for path in [
+            cand.parent / (cand.stem + ".xml"),  # GUI-exported next to sheet
+            Path(tempfile.gettempdir()) / (cand.stem + ".xml"),  # legacy flat name
+            netlist_cache_path(cand),  # current hashed name
+        ]:
+            if path.exists():
+                return path
 
-    found = _probe()
-    if found:
-        return found
+    netlist_path, _root = await write_netlist(sch_path)
+    return netlist_path
 
-    from .netlist import generate_netlist
-
-    result = await generate_netlist(str(sch_path))
-    if "❌" in result:
-        return None
-
-    return _probe()
 
 # MCU family component patterns
 MCU_PATTERNS = {
@@ -260,8 +254,6 @@ async def analyze_pin_functions(
 
         # Generate netlist for accurate connection analysis
         netlist_path = await _ensure_netlist(sch_path)
-        if netlist_path is None:
-            return "❌ **Failed to generate netlist for pin analysis**"
 
         # Parse netlist, then the schematic with the KiCad of the netlist (the pins of
         # the components: SchematicParser._component_pins).
@@ -390,19 +382,7 @@ Unable to extract pin information. This could be due to:
         return result
 
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Pin Analysis Failed**
-
-**Schematic:** {schematic_path}
-{'**Component:** ' + reference if reference else ''}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"Pin analysis of {schematic_path} failed")
 
 
 def _extract_pin_info_from_symbol_details(details_text: str) -> list[dict]:
@@ -463,101 +443,123 @@ async def detect_pin_conflicts(
         sch_path = Path(schematic_path)
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
+        return _conflict_report(schematic_path, await _pin_conflicts(sch_path))
+    except Exception as e:
+        return error_answer(e, f"Conflict detection of {schematic_path} failed")
 
-        # Generate netlist for accurate connection analysis
-        netlist_path = await _ensure_netlist(sch_path)
-        if netlist_path is None:
-            return "❌ **Failed to generate netlist for conflict detection**"
 
-        # The netlist has the electrical type of each node as KiCad gives it (with the
-        # alternate of the pin).
-        netlist_parser = NetlistParser(str(netlist_path))
+async def _pin_conflicts(sch_path: Path) -> list[dict]:
+    """Return the pin conflicts of the netlist of a schematic.
 
-        output_types = {"output", "power_out", "open_collector", "open_emitter", "tri_state"}
+    Each item has the type, the severity ("error": more than one driver on a
+    net, "warning": a net with one pin, "info": an unconnected pin), the net
+    and the description.
 
-        # (ref, pin_number) -> electrical_type
-        pin_type_of: dict[tuple[str, str], str] = {
-            (ref, number): kind.lower()
-            for ref, comp in netlist_parser.get_components().items()
-            for number, kind in comp.pin_types.items()
-        }
+    Raises:
+        AmbiguousRootError: More than one root schematic holds the sheet.
+        NetlistError: kicad-cli did not write the netlist.
+    """
+    netlist_path = await _ensure_netlist(sch_path)
 
-        # Detect conflicts
-        conflicts = []
+    # The netlist has the electrical type of each node as KiCad gives it (with the
+    # alternate of the pin).
+    netlist_parser = NetlistParser(str(netlist_path))
 
-        # Check for multiple output/driver pins on the same net.
-        # (Multiple power_in pins on a rail like +3V3 are normal and are NOT
-        # reported — only multiple drivers are a conflict.)
-        all_nets = netlist_parser.get_nets()
+    output_types = {"output", "power_out", "open_collector", "open_emitter", "tri_state"}
 
-        for net_name, net in all_nets.items():
-            connections = net.pins  # list of (ref, pin_number)
+    # (ref, pin_number) -> electrical_type
+    pin_type_of: dict[tuple[str, str], str] = {
+        (ref, number): kind.lower()
+        for ref, comp in netlist_parser.get_components().items()
+        for number, kind in comp.pin_types.items()
+    }
 
-            output_pins = []
-            for ref, pin_num in connections:
-                pin_type = pin_type_of.get((ref, str(pin_num)), "")
-                if pin_type in output_types:
-                    output_pins.append(f"{ref}:{pin_num}")
+    # Detect conflicts
+    conflicts = []
 
-            if len(output_pins) > 1:
-                conflicts.append({
+    # Check for multiple output/driver pins on the same net.
+    # (Multiple power_in pins on a rail like +3V3 are normal and are NOT
+    # reported — only multiple drivers are a conflict.)
+    all_nets = netlist_parser.get_nets()
+
+    for net_name, net in all_nets.items():
+        connections = net.pins  # list of (ref, pin_number)
+
+        output_pins = []
+        for ref, pin_num in connections:
+            pin_type = pin_type_of.get((ref, str(pin_num)), "")
+            if pin_type in output_types:
+                output_pins.append(f"{ref}:{pin_num}")
+
+        if len(output_pins) > 1:
+            conflicts.append(
+                {
                     "type": "multiple_outputs",
                     "severity": "error",
                     "net": net_name,
                     "description": f"Multiple output/driver pins on same net: {', '.join(output_pins)}",
-                })
+                }
+            )
 
-        # Check for single-pin nets (potential unconnected)
-        for net_name, net in all_nets.items():
-            if len(net.pins) == 1 and not net_name.startswith("unconnected-"):
-                ref, pin_num = net.pins[0]
-                conflicts.append({
+    # Check for single-pin nets (potential unconnected)
+    for net_name, net in all_nets.items():
+        if len(net.pins) == 1 and not net_name.startswith("unconnected-"):
+            ref, pin_num = net.pins[0]
+            conflicts.append(
+                {
                     "type": "single_pin_net",
                     "severity": "warning",
                     "net": net_name,
                     "description": f"Net '{net_name}' has only one pin: {ref}:{pin_num}",
-                })
+                }
+            )
 
-        # Check for unconnected input pins
-        all_components = netlist_parser.get_components()
+    # Check for unconnected input pins
+    all_components = netlist_parser.get_components()
 
-        for ref, comp in all_components.items():
-            for pin_num, net_name in comp.pins.items():
-                if net_name.startswith("unconnected-"):
-                    conflicts.append({
+    for ref, comp in all_components.items():
+        for pin_num, net_name in comp.pins.items():
+            if net_name.startswith("unconnected-"):
+                conflicts.append(
+                    {
                         "type": "unconnected_pin",
                         "severity": "info",
                         "net": net_name,
                         "description": f"{ref} pin {pin_num} is unconnected ({net_name})",
-                    })
-
-        # The title gives the worst severity: an error is a conflict, a warning can be
-        # one, an unconnected pin is only information.
-        errors = [c for c in conflicts if c["severity"] == "error"]
-        warnings = [c for c in conflicts if c["severity"] == "warning"]
-        infos = [c for c in conflicts if c["severity"] == "info"]
-        icons = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}
-
-        def table(items: list[dict]) -> str:
-            text = "| Severity | Type | Location | Description |\n"
-            text += "|----------|------|----------|-------------|\n"
-            for conflict in items[:50]:  # Limit to first 50
-                location = conflict.get("net", conflict.get("component", "Unknown"))
-                text += (
-                    f"| {icons[conflict['severity']]} {conflict['severity']} "
-                    f"| {conflict['type']} | {location} | {conflict['description']} |\n"
+                    }
                 )
-            if len(items) > 50:
-                text += f"\n*... and {len(items) - 50} more*\n"
-            return text
+    return conflicts
 
-        if not errors and not warnings:
-            unconnected = (
-                f"ℹ️ {len(infos)} unconnected pin(s), listed below"
-                if infos
-                else "✅ No unconnected pins"
+
+def _conflict_report(schematic_path: str, conflicts: list[dict]) -> str:
+    """Return the report of detect_pin_conflicts for the conflicts of _pin_conflicts."""
+    # The title gives the worst severity: an error is a conflict, a warning can be
+    # one, an unconnected pin is only information.
+    errors = [c for c in conflicts if c["severity"] == "error"]
+    warnings = [c for c in conflicts if c["severity"] == "warning"]
+    infos = [c for c in conflicts if c["severity"] == "info"]
+    icons = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}
+
+    def table(items: list[dict]) -> str:
+        text = "| Severity | Type | Location | Description |\n"
+        text += "|----------|------|----------|-------------|\n"
+        for conflict in items[:50]:  # Limit to first 50
+            location = conflict.get("net", conflict.get("component", "Unknown"))
+            text += (
+                f"| {icons[conflict['severity']]} {conflict['severity']} "
+                f"| {conflict['type']} | {location} | {conflict['description']} |\n"
             )
-            result = f"""✅ **No Pin Conflicts Detected**
+        if len(items) > 50:
+            text += f"\n*... and {len(items) - 50} more*\n"
+        return text
+
+    if not errors and not warnings:
+        unconnected = (
+            f"ℹ️ {len(infos)} unconnected pin(s), listed below"
+            if infos
+            else "✅ No unconnected pins"
+        )
+        result = f"""✅ **No Pin Conflicts Detected**
 
 **Schematic:** {schematic_path}
 
@@ -568,13 +570,13 @@ The schematic has been analyzed and no pin conflicts were found.
 - ✅ No single-pin (potentially unconnected) nets
 - {unconnected}
 """
-            if infos:
-                result += f"\n## Unconnected Pins\n\n{table(infos)}"
-            return result
+        if infos:
+            result += f"\n## Unconnected Pins\n\n{table(infos)}"
+        return result
 
-        # Format conflicts
-        title = "❌ **Pin Conflicts Detected**" if errors else "⚠️ **Possible Pin Conflicts**"
-        result = f"""{title}
+    # Format conflicts
+    title = "❌ **Pin Conflicts Detected**" if errors else "⚠️ **Possible Pin Conflicts**"
+    result = f"""{title}
 
 **Schematic:** {schematic_path}
 - Errors: {len(errors)}
@@ -585,27 +587,13 @@ The schematic has been analyzed and no pin conflicts were found.
 
 {table(errors + warnings + infos)}"""
 
-        result += "\n## Recommendations\n\n"
-        result += "1. **Fix all errors** before proceeding to PCB layout\n"
-        result += "2. Review warnings - some may be acceptable design choices\n"
-        result += "3. Verify pin connections in KiCad Eeschema\n"
-        result += "4. Re-run analysis after fixes\n"
+    result += "\n## Recommendations\n\n"
+    result += "1. **Fix all errors** before proceeding to PCB layout\n"
+    result += "2. Review warnings - some may be acceptable design choices\n"
+    result += "3. Verify pin connections in KiCad Eeschema\n"
+    result += "4. Re-run analysis after fixes\n"
 
-        return result
-
-    except Exception as e:
-        import traceback
-
-        return f"""❌ **Conflict Detection Failed**
-
-**Schematic:** {schematic_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+    return result
 
 
 @mcp.tool()
@@ -633,8 +621,6 @@ async def extract_pinmux_config(
 
         # Generate netlist for accurate connection analysis
         netlist_path = await _ensure_netlist(sch_path)
-        if netlist_path is None:
-            return "❌ **Failed to generate netlist for pinmux extraction**"
 
         # Parse netlist, then the schematic with the KiCad of the netlist.
         netlist_parser = NetlistParser(str(netlist_path))
@@ -787,16 +773,4 @@ No MCU components were found in the schematic.
         return result
 
     except Exception as e:
-        import traceback
-
-        return f"""❌ **Pinmux Extraction Failed**
-
-**Schematic:** {schematic_path}
-{'**Component Type:** ' + component_type if component_type else ''}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"Pinmux extraction of {schematic_path} failed")

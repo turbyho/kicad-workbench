@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,7 +55,6 @@ from ..utils.library_index import LibraryItem, library_items, row_problem, searc
 from ..utils.library_lookup import LibraryLookupError, find_kicad_library, find_library_symbol
 from ..utils.library_tables import (
     LibraryRow,
-    LibraryTableError,
     active_rows,
     kicad_environment,
     library_rows,
@@ -79,6 +77,7 @@ from ..utils.svg_image import (
     render_tile,
     required_scale,
 )
+from ..utils.tool_errors import error_answer
 
 _KINDS = ("symbol", "footprint")
 NO_KICAD_CLI = (
@@ -223,10 +222,8 @@ async def list_libraries(kind: str = "symbol", project_path: str = "") -> str:
     """
     try:
         return await _list(kind, project_path)
-    except (ValueError, LibraryTableError) as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")
 
 
 def _read_and_search(
@@ -309,10 +306,8 @@ async def _search(
 async def _search_tool(*args) -> str:
     try:
         return await _search(*args)
-    except (ValueError, LibraryTableError) as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")
 
 
 @mcp.tool()
@@ -580,10 +575,8 @@ async def get_library_symbol(lib_id: str, project_path: str = "") -> str:
     """
     try:
         return await _get_symbol(lib_id, project_path)
-    except (ValueError, LibraryTableError) as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")
 
 
 def _nm(value: int) -> str:
@@ -994,10 +987,8 @@ async def get_library_footprint(lib_id: str, project_path: str = "") -> str:
     """
     try:
         return await _get_footprint(lib_id, project_path)
-    except (ValueError, LibraryTableError) as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")
 
 
 def _stacked_text(number: str) -> bool:
@@ -1317,10 +1308,8 @@ async def check_pin_pad_mapping(
     """
     try:
         return await _check_pin_pad_mapping(symbol_lib_id, footprint_lib_id, project_path)
-    except (ValueError, LibraryTableError) as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")
 
 
 _NETLIST_TIMEOUT = 120
@@ -1924,10 +1913,8 @@ async def check_schematic_pin_pad_mapping(
     """
     try:
         return await _check_schematic(schematic_path, references)
-    except (ValueError, LibraryTableError) as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")
 
 
 # kicad-cli draws with the built-in theme "KiCad Default" (user decision,
@@ -2349,8 +2336,5 @@ async def render_library_item(
             include_hidden,
             max_images,
         )
-    except (ValueError, LibraryTableError, OSError) as e:
-        # OSError: kicad-cli is not there, or the output directory cannot be written.
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")

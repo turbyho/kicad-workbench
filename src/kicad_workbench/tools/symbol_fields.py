@@ -30,7 +30,6 @@ plans/roadmap.md, "Phase 4", "Step 1":
 
 import asyncio
 import os
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +72,7 @@ from ..utils.kicad_lock import (
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
 from ..utils.library_tables import kicad_environment
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.tool_errors import error_answer
 from ..utils.variants import file_variants, project_variants
 from .library import cell
 from .schematic_editor import _field_error, _mm
@@ -766,7 +766,5 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
     """
     try:
         return await _set_symbol_fields(schematic_path, changes)
-    except ValueError as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")

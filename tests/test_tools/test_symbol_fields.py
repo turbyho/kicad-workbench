@@ -304,7 +304,7 @@ class TestReviewCases:
         def failing(file, text, stamp):
             calls.append(file.name)
             if len(calls) == 2:
-                return "Error: KiCad has the schematic open."
+                return "❌ KiCad has the schematic open."
             return real(file, text, stamp)
 
         monkeypatch.setattr(symbol_fields, "write_schematic", failing)

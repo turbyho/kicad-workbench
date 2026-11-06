@@ -1,13 +1,23 @@
 """Netlist generation and analysis tools for KiCad Workbench."""
 
+import asyncio
 import hashlib
 import tempfile
 from pathlib import Path
 
 from ..parsers.netlist_parser import NetlistParser
 from ..server import mcp
-from ..utils.kicad_cli import run_kicad_cli
+from ..utils.kicad_cli import export_with_kicad_cli
 from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic
+from ..utils.tool_errors import error_answer
+from ..utils.user_files import write_atomic
+
+# The time of kicad-cli for the netlist (a large project needs some seconds).
+NETLIST_TIMEOUT = 120.0
+
+
+class NetlistError(ValueError):
+    """The server cannot make the netlist of a schematic. The message tells why."""
 
 
 def netlist_cache_path(sch_path: Path) -> Path:
@@ -19,6 +29,69 @@ def netlist_cache_path(sch_path: Path) -> Path:
     """
     digest = hashlib.sha256(str(sch_path.resolve()).encode("utf-8")).hexdigest()[:8]
     return Path(tempfile.gettempdir()) / f"{sch_path.stem}_{digest}.xml"
+
+
+def export_netlist(sch_path: Path) -> tuple[bytes, Path | None]:
+    """Return the XML netlist of a schematic as kicad-cli writes it.
+
+    A sub-sheet does not have the hierarchy that gives the names of the nets with
+    no label. Thus, for a sub-sheet, kicad-cli writes the netlist of the root
+    schematic. kicad-cli writes into its own temporary folder
+    (export_with_kicad_cli). The function blocks: run it off the event loop.
+
+    Args:
+        sch_path: The schematic file.
+
+    Returns:
+        The netlist, and the root schematic for a sub-sheet (None for a root
+        schematic).
+
+    Raises:
+        AmbiguousRootError: More than one root schematic holds the sheet.
+        NetlistError: kicad-cli is not there or cannot run, did not stop in
+            time, or did not write the netlist.
+    """
+    root = find_root_schematic(sch_path)
+    source = root or sch_path
+    try:
+        export = export_with_kicad_cli(
+            ["sch", "export", "netlist", "--format", "kicadxml"],
+            source,
+            "netlist.xml",
+            NETLIST_TIMEOUT,
+        )
+    except (FileNotFoundError, RuntimeError) as e:  # not there, cannot run, no file
+        raise NetlistError(f"The server cannot make the netlist of {source}: {e}") from e
+    return export.data, root
+
+
+def _write_netlist_sync(sch_path: Path) -> tuple[Path, Path | None]:
+    data, root = export_netlist(sch_path)
+    netlist_path = netlist_cache_path(root or sch_path)
+    # In one step: an other tool call can read the file at the same time.
+    write_atomic(netlist_path, data)
+    return netlist_path, root
+
+
+async def write_netlist(sch_path: Path) -> tuple[Path, Path | None]:
+    """Write the netlist of a schematic (export_netlist) into netlist_cache_path().
+
+    The function replaces the file of the cache in one step.
+
+    Args:
+        sch_path: The schematic file.
+
+    Returns:
+        The netlist file, and the root schematic for a sub-sheet (None for a
+        root schematic).
+
+    Raises:
+        AmbiguousRootError: More than one root schematic holds the sheet.
+        NetlistError: kicad-cli is not there or cannot run, did not stop in
+            time, or did not write the netlist.
+        OSError: The file of the cache cannot be written.
+    """
+    return await asyncio.to_thread(_write_netlist_sync, sch_path)
 
 
 @mcp.tool()
@@ -37,47 +110,18 @@ async def generate_netlist(
         sch_path = Path(schematic_path)
         if not sch_path.exists():
             return f"❌ Schematic file not found: {schematic_path}"
-
-        # Detect sub-sheet and redirect to root schematic.
-        # Sub-sheets lack hierarchy context to resolve unnamed wire-only nets.
-        subsheet_note = ""
         try:
-            root_sch = find_root_schematic(sch_path)
+            netlist_path, root_sch = await write_netlist(sch_path)
         except AmbiguousRootError as e:
             return f"❌ {e}. Generate the netlist of the root schematic that you want."
+        subsheet_note = ""
         if root_sch:
             subsheet_note = (
                 f"\n\n⚠️ **Note:** `{sch_path.name}` is a hierarchical sub-sheet. "
                 f"Switched to root schematic `{root_sch.name}` for complete netlist "
                 f"(unnamed wire-only nets require full hierarchy context to resolve)."
             )
-            sch_path = root_sch
-
-        # KiCad 7+ uses kicad-cli for headless netlist export
-        # Output to temp directory to avoid read-only volume issues
-        netlist_path = netlist_cache_path(sch_path)
-
-        # Try to use KiCad's netlist export
-        # Note: Requires a KiCad installation — kicad-cli is located via
-        # PATH or the detected install directory (see utils.kicad_cli).
-        try:
-            # Use kicad-cli for headless export (no display required)
-            result = await run_kicad_cli(
-                [
-                    "sch",
-                    "export",
-                    "netlist",
-                    "--format",
-                    "kicadxml",
-                    "--output",
-                    str(netlist_path),
-                    str(sch_path),
-                ],
-                timeout=30,
-            )
-
-            if result.returncode == 0 and netlist_path.exists():
-                return f"""✅ Netlist generated successfully
+        return f"""✅ Netlist generated successfully
 
 **Output:** {netlist_path}
 
@@ -86,37 +130,9 @@ You can now use netlist-based tools:
 - `get_netlist_nets()` - List all nets
 - `get_netlist_components()` - List all components with their nets
 {subsheet_note}"""
-            else:
-                # Fallback: return instructions
-                return f"""⚠️ Automatic netlist generation failed.
-
-KiCad command line tools may not be available.
-
-**Manual export steps:**
-1. Open schematic in KiCad: {sch_path}
-2. Go to: Tools → Generate Netlist
-3. Select: "KiCad XML" format
-4. Save to: {netlist_path}
-
-**Alternative:**
-Use KiCad Schematic Editor GUI to export netlist.
-"""
-
-        except FileNotFoundError:
-            return """⚠️ kicad-cli not found (PATH or KiCad install directory).
-
-Please:
-1. Install KiCad 7+ (https://www.kicad.org/)
-2. Ensure kicad-cli is in system PATH, or set the KICAD_CLI
-   environment variable to its full path
-3. Or use KiCad GUI to export netlist manually
-
-**Manual export:**
-Open schematic → Tools → Generate Netlist → KiCad XML format
-"""
 
     except Exception as e:
-        return f"❌ Error generating netlist: {e}"
+        return error_answer(e, "Error generating netlist")
 
 
 @mcp.tool()
@@ -194,10 +210,8 @@ async def trace_netlist_connection(
 
             return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"❌ File not found: {e}"
     except Exception as e:
-        return f"❌ Error tracing netlist: {e}"
+        return error_answer(e, "Error tracing netlist")
 
 
 @mcp.tool()
@@ -248,10 +262,8 @@ async def get_netlist_nets(
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"❌ File not found: {e}"
     except Exception as e:
-        return f"❌ Error reading netlist: {e}"
+        return error_answer(e, "Error reading netlist")
 
 
 @mcp.tool()
@@ -302,7 +314,5 @@ async def get_netlist_components(
 
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"❌ File not found: {e}"
     except Exception as e:
-        return f"❌ Error reading netlist: {e}"
+        return error_answer(e, "Error reading netlist")

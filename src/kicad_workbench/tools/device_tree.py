@@ -16,6 +16,7 @@ from ..parsers.kicad_fields import with_field_rules_note
 from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
+from ..utils.tool_errors import error_answer
 
 # Device tree compatible strings database
 DEVICE_TREE_BINDINGS = {
@@ -378,11 +379,11 @@ async def generate_device_tree(
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
-            return f"X **Schematic file not found:** {schematic_path}"
+            return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Validate SOC family
         if target_soc not in DEVICE_TREE_TEMPLATES:
-            return f"""X **Unsupported SOC Family**
+            return f"""❌ **Unsupported SOC Family**
 
 **Requested:** {target_soc}
 **Supported:** {', '.join(DEVICE_TREE_TEMPLATES.keys())}
@@ -395,8 +396,6 @@ Please specify a supported SOC family."""
         from .pin_analysis import _ensure_netlist
 
         netlist_path = await _ensure_netlist(sch_path)
-        if netlist_path is None:
-            return "X **Failed to generate netlist for device tree analysis**"
 
         # Parse netlist, then the schematic with the KiCad of the netlist (the pins of
         # the components: SchematicParser._component_pins).
@@ -530,7 +529,7 @@ Please specify a supported SOC family."""
             data = device_tree.encode("utf-8")
             output.write_bytes(data.replace(b"\n", os.linesep.encode("ascii")))
 
-            return f"""OK **Device Tree Generated Successfully**
+            return f"""✅ **Device Tree Generated Successfully**
 
 **Schematic:** {schematic_path}
 **Target SOC:** {target_soc}
@@ -554,7 +553,7 @@ The device tree source file has been generated and saved to the specified locati
 
         else:
             # Return device tree content directly
-            return f"""OK **Device Tree Generated Successfully**
+            return f"""✅ **Device Tree Generated Successfully**
 
 **Schematic:** {schematic_path}
 **Target SOC:** {target_soc}
@@ -580,19 +579,7 @@ The device tree source file has been generated and saved to the specified locati
 4. Test on target hardware"""
 
     except Exception as e:
-        import traceback
-
-        return f"""X **Device Tree Generation Failed**
-
-**Schematic:** {schematic_path}
-**Target SOC:** {target_soc}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"Device tree generation for {schematic_path} failed")
 
 
 @mcp.tool()
@@ -613,14 +600,12 @@ async def extract_gpio_config(
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
-            return f"X **Schematic file not found:** {schematic_path}"
+            return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Obtain netlist
         from .pin_analysis import STM32_PIN, _ensure_netlist
 
         netlist_path = await _ensure_netlist(sch_path)
-        if netlist_path is None:
-            return "X **Failed to generate netlist for GPIO extraction**"
 
         netlist_parser = NetlistParser(str(netlist_path))
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
@@ -666,7 +651,7 @@ async def extract_gpio_config(
                         continue
 
         if not gpio_configs:
-            return f"""WARN **No GPIO Configurations Found**
+            return f"""⚠️ **No GPIO Configurations Found**
 
 **Schematic:** {schematic_path}
 {'**SOC Family Filter:** ' + soc_family if soc_family else ''}
@@ -732,19 +717,7 @@ No GPIO configurations were found in the schematic.
         return result
 
     except Exception as e:
-        import traceback
-
-        return f"""X **GPIO Configuration Extraction Failed**
-
-**Schematic:** {schematic_path}
-{'**SOC Family:** ' + soc_family if soc_family else ''}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"GPIO extraction of {schematic_path} failed")
 
 
 @mcp.tool()
@@ -763,14 +736,12 @@ async def extract_i2c_devices(
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
-            return f"X **Schematic file not found:** {schematic_path}"
+            return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Obtain netlist
         from .pin_analysis import _ensure_netlist
 
         netlist_path = await _ensure_netlist(sch_path)
-        if netlist_path is None:
-            return "X **Failed to generate netlist for I2C extraction**"
 
         netlist_parser = NetlistParser(str(netlist_path))
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
@@ -808,7 +779,7 @@ async def extract_i2c_devices(
                             continue
 
         if not i2c_devices:
-            return f"""WARN **No I2C Devices Found**
+            return f"""⚠️ **No I2C Devices Found**
 
 **Schematic:** {schematic_path}
 
@@ -852,18 +823,7 @@ No I2C devices were found in the schematic.
         return result
 
     except Exception as e:
-        import traceback
-
-        return f"""X **I2C Device Extraction Failed**
-
-**Schematic:** {schematic_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"I2C extraction of {schematic_path} failed")
 
 
 @mcp.tool()
@@ -882,14 +842,12 @@ async def extract_spi_devices(
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
-            return f"X **Schematic file not found:** {schematic_path}"
+            return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Obtain netlist
         from .pin_analysis import _ensure_netlist
 
         netlist_path = await _ensure_netlist(sch_path)
-        if netlist_path is None:
-            return "X **Failed to generate netlist for SPI extraction**"
 
         netlist_parser = NetlistParser(str(netlist_path))
         schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
@@ -926,7 +884,7 @@ async def extract_spi_devices(
                             continue
 
         if not spi_devices:
-            return f"""WARN **No SPI Devices Found**
+            return f"""⚠️ **No SPI Devices Found**
 
 **Schematic:** {schematic_path}
 
@@ -969,18 +927,7 @@ No SPI devices were found in the schematic.
         return result
 
     except Exception as e:
-        import traceback
-
-        return f"""X **SPI Device Extraction Failed**
-
-**Schematic:** {schematic_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"SPI extraction of {schematic_path} failed")
 
 
 @mcp.tool()
@@ -999,7 +946,7 @@ async def extract_power_domains(
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
-            return f"X **Schematic file not found:** {schematic_path}"
+            return f"❌ **Schematic file not found:** {schematic_path}"
 
         # Parse schematic
         schematic_parser = SchematicParser(str(sch_path))
@@ -1024,7 +971,7 @@ async def extract_power_domains(
                 })
 
         if not power_components:
-            return f"""WARN **No Power Components Found**
+            return f"""⚠️ **No Power Components Found**
 
 **Schematic:** {schematic_path}
 
@@ -1082,18 +1029,7 @@ No power management components were found in the schematic.
         return result
 
     except Exception as e:
-        import traceback
-
-        return f"""X **Power Domain Extraction Failed**
-
-**Schematic:** {schematic_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```"""
+        return error_answer(e, f"Power domain extraction of {schematic_path} failed")
 
 
 @mcp.tool()
@@ -1115,20 +1051,20 @@ async def validate_pin_configuration(
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
-            return f"X **Schematic file not found:** {schematic_path}"
+            return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # First, run pin conflict detection
-        from .pin_analysis import detect_pin_conflicts
+        # First, find the pin conflicts. An error (more than one driver pin on a
+        # net) stops the device tree. A warning (a net with one pin) does not.
+        from .pin_analysis import _conflict_report, _pin_conflicts
 
-        conflict_result = await detect_pin_conflicts(str(sch_path))
-
-        if "X" in conflict_result:
-            return f"""X **Pin Configuration Validation Failed**
+        conflicts = await _pin_conflicts(sch_path)
+        if any(c["severity"] == "error" for c in conflicts):
+            return f"""❌ **Pin Configuration Validation Failed**
 
 The schematic has pin conflicts that must be resolved before
 device tree generation.
 
-{conflict_result}
+{_conflict_report(schematic_path, conflicts)}
 
 ## Device Tree Generation Blocked
 
@@ -1147,7 +1083,7 @@ resolve all conflicts before attempting device tree generation."""
                 break
 
         if not mcu_found:
-            return f"""WARN **No MCU Component Found**
+            return f"""⚠️ **No MCU Component Found**
 
 **Schematic:** {schematic_path}
 
@@ -1164,7 +1100,11 @@ Device tree generation requires an MCU component in the schematic.
 2. Verify component value matches supported patterns
 3. Re-run validation"""
 
-        return f"""OK **Pin Configuration Validation Passed**
+        warnings = sum(1 for c in conflicts if c["severity"] == "warning")
+        single_pin_note = (
+            f"\n- ⚠️ {warnings} net(s) with one pin: see detect_pin_conflicts" if warnings else ""
+        )
+        return f"""✅ **Pin Configuration Validation Passed**
 
 **Schematic:** {schematic_path}
 
@@ -1172,10 +1112,8 @@ The schematic is ready for device tree generation.
 
 ## Validation Results
 
-- OK No pin conflicts detected
-- OK MCU component found
-- OK Net connections valid
-- OK Pin assignments compatible
+- ✅ No net with more than one driver pin
+- ✅ MCU component found{single_pin_note}
 
 ## Ready for Device Tree Generation
 
@@ -1193,16 +1131,4 @@ generate_device_tree(
 **Supported SOC families:** {', '.join(DEVICE_TREE_TEMPLATES.keys())}"""
 
     except Exception as e:
-        import traceback
-
-        return f"""X **Validation Failed**
-
-**Schematic:** {schematic_path}
-
-**Error:** {str(e)}
-
-**Traceback:**
-```
-{traceback.format_exc()}
-```
-"""
+        return error_answer(e, f"Validation of {schematic_path} failed")

@@ -155,3 +155,22 @@ def test_two_drivers_are_an_error(tmp_path, monkeypatch):
     assert result.startswith("❌ **Pin Conflicts Detected**"), result
     assert "- Errors: 1\n- Warnings: 0\n- Unconnected pins (info): 1" in result
     assert "| ❌ error | multiple_outputs |" in result
+
+
+def _validate(tmp_path, monkeypatch, nets: str) -> str:
+    _conflicts(tmp_path, monkeypatch, nets)  # the netlist and the schematic
+    return asyncio.run(device_tree.validate_pin_configuration(str(tmp_path / "c.kicad_sch")))
+
+
+def test_a_warning_does_not_stop_the_device_tree(tmp_path, monkeypatch):
+    # The tool looked for the letter "X" in the conflict report (the sign of the
+    # fork for an error): the name of the net XTAL stopped the device tree.
+    xtal = '<net code="3" name="XTAL"><node ref="U1" pin="3" pintype="input"/></net>'
+    result = _validate(tmp_path, monkeypatch, xtal)
+    assert result.startswith("⚠️ **No MCU Component Found**"), result
+
+
+def test_two_drivers_stop_the_device_tree(tmp_path, monkeypatch):
+    result = _validate(tmp_path, monkeypatch, DRIVERS)
+    assert result.startswith("❌ **Pin Configuration Validation Failed**"), result
+    assert "| ❌ error | multiple_outputs | N |" in result

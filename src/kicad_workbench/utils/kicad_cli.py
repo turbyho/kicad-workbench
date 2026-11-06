@@ -37,6 +37,11 @@ from .library_tables import kicad_settings_dir
 _cached_exe: str | None = None
 
 
+class KicadCliError(RuntimeError):
+    """kicad-cli cannot run, did not stop in time, or did not write its output. The
+    message tells why. A RuntimeError: the callers that catch RuntimeError get it."""
+
+
 def find_kicad_cli() -> str | None:
     """Locate the kicad-cli executable.
 
@@ -264,10 +269,10 @@ def run_kicad_cli_sync(
     of the settings with the language of _english_language()
     (english_settings()) and the environment of kicad_cli_env(english=True).
 
-    Raises RuntimeError when the settings cannot be copied, or when kicad-cli
+    Raises KicadCliError when the settings cannot be copied, or when kicad-cli
     gives no version.
 
-    Raises RuntimeError when an argument is not ASCII and no locale lets
+    Raises KicadCliError when an argument is not ASCII and no locale lets
     kicad-cli decode it as this process encodes it (see child_ctype()).
 
     Raises FileNotFoundError when kicad-cli cannot be located, so callers can
@@ -277,10 +282,10 @@ def run_kicad_cli_sync(
     if exe is None:
         raise FileNotFoundError(
             "kicad-cli not found in PATH or known KiCad install locations. "
-            "Install KiCad 7+ or set the KICAD_CLI environment variable."
+            "Install KiCad 8 or later, or set the KICAD_CLI environment variable."
         )
     if sys.platform != "win32" and child_ctype() is None and not all(a.isascii() for a in args):
-        raise RuntimeError(
+        raise KicadCliError(
             "kicad-cli cannot read a file path that is not ASCII on this system. "
             "This server writes file paths as UTF-8 (the UTF-8 mode of Python), but "
             "the system has no UTF-8 locale for kicad-cli. Install a UTF-8 locale "
@@ -296,11 +301,11 @@ def run_kicad_cli_sync(
     ) as settings:
         version = kicad_cli_version_sync()
         if version is None or version_numbers(version) is None:
-            raise RuntimeError(f"kicad-cli did not give its version: {version!r}")
+            raise KicadCliError(f"kicad-cli did not give its version: {version!r}")
         try:
             english_settings(Path(settings), version)
         except (OSError, ValueError) as e:  # LibraryTableError is a ValueError
-            raise RuntimeError(f"The settings of KiCad cannot be copied for kicad-cli: {e}") from e
+            raise KicadCliError(f"The settings of KiCad cannot be copied for kicad-cli: {e}") from e
         env = dict(os.environ if env is None else env)
         env["KICAD_CONFIG_HOME"] = settings
         return subprocess.run([exe] + args, capture_output=True, timeout=timeout, env=env)
@@ -326,7 +331,7 @@ def export_with_kicad_cli(
     file by the name of the directory, not by its text.
 
     Raises:
-        RuntimeError: kicad-cli did not stop in time, or did not write the file.
+        KicadCliError: kicad-cli did not stop in time, or did not write the file.
         FileNotFoundError: kicad-cli was not found.
     """
     directory = Path(tempfile.mkdtemp(prefix="kicad-workbench-"))
@@ -336,7 +341,7 @@ def export_with_kicad_cli(
         try:
             result = run_kicad_cli_sync(args, timeout=timeout, english=True)
         except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"kicad-cli did not stop in {timeout:g} s.") from e
+            raise KicadCliError(f"kicad-cli did not stop in {timeout:g} s.") from e
         text = decode_output(result.stdout) + "\n" + decode_output(result.stderr)
         messages = [
             line.strip()
@@ -344,7 +349,7 @@ def export_with_kicad_cli(
             if line.strip() and directory.name not in line
         ]
         if result.returncode != 0 or not output.is_file():
-            raise RuntimeError(
+            raise KicadCliError(
                 f"kicad-cli stopped with the exit code {result.returncode}: " + " ".join(messages)
             )
         return CliExport(output.read_bytes(), messages)

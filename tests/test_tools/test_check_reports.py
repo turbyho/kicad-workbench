@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -440,6 +441,28 @@ class TestKicadCliIntegration:
             )
             out = await validation.run_drc(str(pcb))
         assert out == "❌ The settings of KiCad cannot be copied for kicad-cli: x"
+
+    @pytest.mark.parametrize("check", ["erc", "drc"])
+    async def test_kicad_cli_that_writes_no_report(self, tmp_path, monkeypatch, check):
+        """kicad-cli stops with 0 but writes no report: an error, with its output."""
+
+        async def no_report(args, *rest, **kwargs):
+            return subprocess.CompletedProcess(args, 0, b"", b"Loading...")
+
+        monkeypatch.setattr(validation, "run_kicad_cli", no_report)
+        if check == "erc":
+            sch = tmp_path / "dangling_label.kicad_sch"
+            shutil.copy(LABEL_SCH, sch)
+            out = await validation.run_erc(str(sch))
+        else:
+            pcb = tmp_path / "board.kicad_pcb"
+            pcb.write_text(
+                '(kicad_pcb (version 20240108) (generator "pcbnew"))\n', encoding="utf-8"
+            )
+            out = await validation.run_drc(str(pcb))
+        assert out.startswith(f"❌ **{check.upper()} Report Not Generated**"), out
+        assert "kicad-cli stopped with the exit code 0, but it wrote no report file" in out
+        assert "```\nLoading...\n```" in out
 
     async def test_export_erc_report_with_violations(self, tmp_path):
         sch = tmp_path / "dangling_label.kicad_sch"

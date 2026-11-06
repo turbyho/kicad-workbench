@@ -97,7 +97,7 @@ class TestCheckSchematicNotOpen:
         assert check_schematic_not_open(sub) is None
         lock(tmp_path / locked)
         error = check_schematic_not_open(sub)
-        assert error is not None and error.startswith("Error: KiCad has the schematic open")
+        assert error is not None and error.startswith("❌ KiCad has the schematic open")
         assert locked in error
 
     def test_other_top_level_sheet_open_alone(self, tmp_path):
@@ -145,7 +145,7 @@ class TestCheckSchematicNotOpen:
         lock_path = lock(root)
         error = check_schematic_not_open(str(root))
         assert error is not None
-        assert error.startswith("Error: KiCad has the schematic open")
+        assert error.startswith("❌ KiCad has the schematic open")
         assert str(lock_path) in error
         assert "user1@host1" in error
         assert "close the schematic editor" in error
@@ -238,7 +238,7 @@ class TestCheckBoardNotOpen:
         lock_path = lock(pcb)
         error = check_board_not_open(pcb)
         assert error is not None
-        assert error.startswith("Error: KiCad has the board open")
+        assert error.startswith("❌ KiCad has the board open")
         assert str(lock_path) in error
         assert "close the PCB editor" in error
 
@@ -302,7 +302,7 @@ class TestWriteToolsRefuseOpenFiles:
         for target in (root, sub):
             before = target.read_text(encoding="utf-8")
             result = asyncio.run(call(str(target)))
-            assert result.startswith("Error: KiCad has the schematic open"), result
+            assert result.startswith("❌ KiCad has the schematic open"), result
             assert target.read_text(encoding="utf-8") == before
 
     def test_tool_writes_a_closed_schematic(self, board):
@@ -323,5 +323,5 @@ class TestWriteToolsRefuseOpenFiles:
         lock(pcb)
         # overwrite=True: the test is about the lock, not about an existing board
         result = asyncio.run(setup_pcb_layout(str(root), overwrite=True))
-        assert result.startswith("Error: KiCad has the board open"), result
+        assert result.startswith("❌ KiCad has the board open"), result
         assert pcb.read_text(encoding="utf-8") == "(kicad_pcb)"

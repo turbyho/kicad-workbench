@@ -17,21 +17,7 @@ from ..utils.kicad_cli import decode_output, run_kicad_cli
 from ..utils.kicad_lock import check_board_not_open, file_stamp, write_board
 from ..utils.kicad_python import board_text
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
-
-_KICAD_CLI_MISSING_MSG = """⚠️ kicad-cli not found (PATH or KiCad install directory).
-
-Gerber export requires KiCad's command-line tools.
-
-Please:
-1. Install KiCad 7+ (https://www.kicad.org/)
-2. Ensure kicad-cli is in system PATH, or set the KICAD_CLI
-   environment variable to its full path
-   (on Windows typically C:\\Program Files\\KiCad\\<ver>\\bin\\kicad-cli.exe)
-
-**Manual export:**
-Open the board in KiCad's PCB editor → File → Fabrication Outputs → Gerbers.
-"""
-
+from ..utils.tool_errors import error_answer
 
 # The largest coordinate of KiCad: 2**31 - 1 nm.
 _MAX_SIZE_MM = 2147.483647
@@ -107,7 +93,7 @@ async def setup_pcb_layout(
         stamp = file_stamp(pcb_path)
         if stamp is not None and not overwrite:
             return (
-                f"Error: The board file {pcb_path} exists. This tool writes a new, "
+                f"❌ The board file {pcb_path} exists. This tool writes a new, "
                 "empty board, which removes all footprints, tracks and zones of the "
                 "existing board. Thus the tool did not write the file.\n\n"
                 "Ask the user if the existing board can be replaced. Only when the "
@@ -174,8 +160,7 @@ Next steps:
 """
 
     except Exception as e:
-        import traceback
-        return f"❌ Error setting up PCB layout: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error setting up PCB layout")
 
 
 def _summarize_pcb(pcb_path: Path) -> str:
@@ -252,8 +237,8 @@ async def export_gerber(
         # plots every layer defined in the board, so it generalises to N-layer.
         try:
             rc, err = await _run(["pcb", "export", "gerbers", "-o", str(out_path), str(pcb)])
-        except FileNotFoundError:
-            return _KICAD_CLI_MISSING_MSG
+        except FileNotFoundError as e:  # kicad-cli is not there
+            return f"❌ {e}"
         if rc != 0:
             return (
                 f"❌ Gerber export failed (kicad-cli rc={rc}):\n\n"
@@ -279,10 +264,7 @@ async def export_gerber(
             if p.name not in before or p.stat().st_mtime_ns != before[p.name]
         )
         if not new_files:
-            return (
-                f"⚠️ kicad-cli reported success but produced no files in "
-                f"{out_path}.{drill_note}"
-            )
+            return f"❌ kicad-cli reported success but produced no files in {out_path}.{drill_note}"
 
         listing = "\n".join(f"- {n}" for n in new_files)
         return f"""✅ Gerber export complete.
@@ -297,5 +279,4 @@ Send all of these to your fabricator (e.g. JLCPCB, PCBWay, OSH Park).
 """
 
     except Exception as e:
-        import traceback
-        return f"❌ Error exporting Gerber: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error exporting Gerber")

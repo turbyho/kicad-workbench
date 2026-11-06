@@ -17,6 +17,7 @@ from fastmcp.utilities.types import Image
 
 from ..server import mcp
 from ..utils.kicad_cli import decode_output, run_kicad_cli
+from ..utils.tool_errors import error_answer
 
 _RENDER_SIDES = {"top", "bottom", "left", "right", "front", "back"}
 _RENDER_QUALITIES = {"basic", "high", "user", "job_settings"}
@@ -93,15 +94,10 @@ async def render_pcb(
             )
 
         return Image(path=str(out))
-    except FileNotFoundError:
-        return (
-            "❌ kicad-cli not found (PATH or KiCad install directory). "
-            "Rendering requires KiCad 8+."
-        )
+    except FileNotFoundError as e:  # kicad-cli is not there
+        return f"❌ {e}"
     except Exception as e:
-        import traceback
-
-        return f"❌ Error rendering PCB: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error rendering PCB")
 
 
 @mcp.tool()
@@ -151,15 +147,10 @@ async def export_pcb_3d(
 **Size:** {size_mb:.1f} MB
 
 Import into Fusion 360 / SolidWorks / FreeCAD for enclosure design."""
-    except FileNotFoundError:
-        return (
-            "❌ kicad-cli not found (PATH or KiCad install directory). "
-            "STEP export requires KiCad 7+."
-        )
+    except FileNotFoundError as e:  # kicad-cli is not there
+        return f"❌ {e}"
     except Exception as e:
-        import traceback
-
-        return f"❌ Error exporting STEP: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error exporting STEP")
 
 
 @mcp.tool()
@@ -202,9 +193,7 @@ async def export_schematic_svg(
 
         svgs = sorted(out_dir.glob("*.svg"))
         if not svgs:
-            return (
-                f"⚠️ kicad-cli reported success but produced no SVG files in {out_dir}."
-            )
+            return f"❌ kicad-cli reported success but produced no SVG files in {out_dir}."
 
         listing = "\n".join(f"- {s.name}" for s in svgs)
         return f"""✅ Schematic SVG export complete.
@@ -214,12 +203,7 @@ async def export_schematic_svg(
 
 **Files generated ({len(svgs)}):**
 {listing}"""
-    except FileNotFoundError:
-        return (
-            "❌ kicad-cli not found (PATH or KiCad install directory). "
-            "SVG export requires KiCad 7+."
-        )
+    except FileNotFoundError as e:  # kicad-cli is not there
+        return f"❌ {e}"
     except Exception as e:
-        import traceback
-
-        return f"❌ Error exporting schematic SVG: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error exporting schematic SVG")

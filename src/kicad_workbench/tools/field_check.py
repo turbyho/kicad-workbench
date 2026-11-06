@@ -14,7 +14,6 @@ look like an MPN and its alternative.
 import asyncio
 import json
 import os
-import traceback
 from pathlib import Path
 
 from ..parsers.annotation import kicad_major
@@ -45,6 +44,7 @@ from ..utils.kicad_bom import (
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
 from .library import NO_KICAD_CLI, netlist_root
 
@@ -322,7 +322,5 @@ async def check_symbol_fields(schematic_path: str) -> str:
     """
     try:
         return await _check(schematic_path)
-    except ValueError as e:
-        return f"❌ {e}"
     except Exception as e:
-        return f"❌ Error: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error")

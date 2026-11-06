@@ -17,19 +17,23 @@ def cache_home() -> Path:
     return base / "kicad-workbench"
 
 
-def write_atomic(file: Path, text: str) -> None:
-    """Write a UTF-8 text file in one step: a reader gets the old or the new file,
-    never a part. A unique temporary file, because a different server process can
-    write the same file. After an error (for example a full disk at the write or
-    at the flush of the close), the temporary file goes and the old file stays.
-    The errors (OSError) go to the caller."""
+def write_atomic(file: Path, data: str | bytes) -> None:
+    """Write a file in one step: a reader gets the old or the new file, never a
+    part. A text goes into the file as UTF-8, bytes as they are. A unique
+    temporary file, because a different server process can write the same file.
+    After an error (for example a full disk at the write or at the flush of the
+    close), the temporary file goes and the old file stays. The errors (OSError)
+    go to the caller."""
     file.parent.mkdir(parents=True, exist_ok=True)
-    temp = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=file.parent, suffix=".tmp", delete=False
-    )
+    if isinstance(data, bytes):
+        temp = tempfile.NamedTemporaryFile("wb", dir=file.parent, suffix=".tmp", delete=False)
+    else:
+        temp = tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=file.parent, suffix=".tmp", delete=False
+        )
     try:
         with temp:
-            temp.write(text)
+            temp.write(data)
         os.replace(temp.name, file)
     except BaseException:
         os.unlink(temp.name)

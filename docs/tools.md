@@ -1,9 +1,9 @@
 # Tools
 
 The server has 59 tools. Each tool returns Markdown text (the image tools also return
-PNG images). An error starts with "❌" (some older tools give "Error:"), a warning
-with "⚠️". The agent selects the tools: this list tells you what the agent can do,
-and with which limits.
+PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
+does not expect (a defect of the tool) also gives the traceback. The agent selects
+the tools: this list tells you what the agent can do, and with which limits.
 
 An argument with `?` is optional. A path argument is the path of a file of the
 project: `.kicad_sch` (schematic), `.kicad_pcb` (board), `.kicad_pro` (project), or a

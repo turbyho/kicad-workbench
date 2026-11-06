@@ -3,10 +3,10 @@
 from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.kicad_versions import KicadFileError
 from ..parsers.netlist_parser import NetlistParser
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
+from ..utils.tool_errors import error_answer
 
 
 def _find_component_location(file_path: str, reference: str, sheets: list[dict]) -> tuple[object | None, str]:
@@ -23,15 +23,11 @@ def _find_component_location(file_path: str, reference: str, sheets: list[dict])
     for sheet in sheets:
         sheet_path = project_dir / sheet.get("file", "")
         if sheet_path.exists():
-            try:
-                for component in SchematicParser(str(sheet_path)).get_components():
-                    if component.reference == reference:
-                        return component, sheet.get("name", sheet.get("file", ""))
-            except KicadFileError:
-                # The server cannot read the sheet: the search is not complete.
-                raise
-            except Exception:
-                continue
+            # A sheet that the server cannot read gives an error: the search
+            # would not be complete.
+            for component in SchematicParser(str(sheet_path)).get_components():
+                if component.reference == reference:
+                    return component, sheet.get("name", sheet.get("file", ""))
     return None, ""
 
 
@@ -67,7 +63,10 @@ async def trace_hierarchical_connection(
 
         if not target_component:
             refs = [c.reference for c in parser.get_components()][:10]
-            return f"# Component Not Found\n\nComponent '{reference}' not found in schematic hierarchy.\n\nAvailable components: {', '.join(refs)}..."
+            return (
+                f"❌ Component '{reference}' not found in schematic hierarchy.\n\n"
+                f"Available components: {', '.join(refs)}..."
+            )
 
         lines = [
             f"# Connection Trace for {target_component.reference}",
@@ -83,9 +82,6 @@ async def trace_hierarchical_connection(
         # nets carry no pin list (SchematicNet.pins is always empty), so tracing
         # via them always reported "no connections".
         netlist_path = await _ensure_netlist(Path(file_path))
-        if netlist_path is None:
-            lines.append("⚠️ No netlist available — cannot resolve connections. Run `generate_netlist()` first.")
-            return "\n".join(lines)
 
         nl = NetlistParser(str(netlist_path))
         comp = nl.get_components().get(reference)
@@ -112,10 +108,8 @@ async def trace_hierarchical_connection(
 
         return "\n".join(lines)
 
-    except FileNotFoundError:
-        return f"Error: File not found: {file_path}"
     except Exception as e:
-        return f"Error: {e}"
+        return error_answer(e, "Error tracing the connection")
 
 
 @mcp.tool()
@@ -147,16 +141,14 @@ async def analyze_hierarchical_nets(
         sheets = parser.get_sheets()
 
         netlist_path = await _ensure_netlist(Path(file_path))
-        if netlist_path is None:
-            return "# No Netlist Available\n\nCannot analyze nets without a netlist. Run `generate_netlist()` first."
 
         nl = NetlistParser(str(netlist_path))
 
         # docstring promises a regex; honour it (was a plain substring check).
         try:
             flt = re.compile(filter_pattern, re.IGNORECASE) if filter_pattern else None
-        except re.error:
-            flt = None
+        except re.error as e:
+            return f"❌ The filter pattern {filter_pattern!r} is not a regular expression: {e}"
 
         # NetlistNet.pins is a list[(ref, pin)] that is actually populated,
         # unlike SchematicNet.pins which is always empty.
@@ -212,7 +204,5 @@ async def analyze_hierarchical_nets(
 
         return "\n".join(lines)
 
-    except FileNotFoundError:
-        return f"Error: File not found: {file_path}"
     except Exception as e:
-        return f"Error: {e}"
+        return error_answer(e, "Error analyzing the nets")

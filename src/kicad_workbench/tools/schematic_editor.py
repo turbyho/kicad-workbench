@@ -80,6 +80,7 @@ from ..utils.schematic_settings import (
     off_grid_severity,
     schematic_settings,
 )
+from ..utils.tool_errors import error_answer
 
 
 def _get_date_string() -> str:
@@ -922,7 +923,7 @@ async def add_hierarchical_label(
     try:
         path = Path(file_path)
         if not path.exists():
-            return f"Error: File {file_path} does not exist"
+            return f"❌ The file {file_path} does not exist."
         stamp = file_stamp(path)
 
         resolved = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
@@ -942,9 +943,7 @@ async def add_hierarchical_label(
             return open_error
         return f"✅ Hierarchical label '{name}' ({shape}) {where} angle {angle}°{note}"
     except Exception as e:
-        import traceback
-
-        return f"Error adding hierarchical label: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error adding hierarchical label")
 
 
 @mcp.tool()
@@ -987,7 +986,7 @@ async def add_global_label(
     try:
         path = Path(file_path)
         if not path.exists():
-            return f"Error: File {file_path} does not exist"
+            return f"❌ The file {file_path} does not exist."
         stamp = file_stamp(path)
 
         resolved = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
@@ -1010,9 +1009,7 @@ async def add_global_label(
             return open_error
         return f"✅ Global label '{label_name}' ({shape}) {where} angle {angle}°{note}"
     except Exception as e:
-        import traceback
-
-        return f"Error adding global label: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error adding global label")
 
 
 @mcp.tool()
@@ -1078,7 +1075,7 @@ async def add_component_from_library(
     try:
         path = Path(file_path)
         if not path.exists():
-            return f"Error: File {file_path} does not exist"
+            return f"❌ The file {file_path} does not exist."
         stamp = file_stamp(path)
 
         content = read_for_write(path)
@@ -1257,9 +1254,7 @@ async def add_component_from_library(
 """
 
     except Exception as e:
-        import traceback
-
-        return f"Error adding component: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error adding component")
 
 
 @mcp.tool()
@@ -1305,7 +1300,7 @@ async def add_wire(
 
         path = Path(file_path)
         if not path.exists():
-            return f"Error: File {file_path} does not exist"
+            return f"❌ The file {file_path} does not exist."
         stamp = file_stamp(path)
 
         content = read_for_write(path)
@@ -1439,9 +1434,7 @@ async def add_wire(
             )
         return text + off_grid_text + _grid_note(settings)
     except Exception as e:
-        import traceback
-
-        return f"Error adding wire: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error adding wire")
 
 
 @mcp.tool()
@@ -1469,7 +1462,7 @@ async def add_label(
     try:
         path = Path(file_path)
         if not path.exists():
-            return f"Error: File {file_path} does not exist"
+            return f"❌ The file {file_path} does not exist."
         stamp = file_stamp(path)
 
         content = read_for_write(path)
@@ -1490,6 +1483,4 @@ async def add_label(
             return open_error
         return f"✅ Label '{text}' added {where}{note}"
     except Exception as e:
-        import traceback
-
-        return f"Error adding label: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error adding label")

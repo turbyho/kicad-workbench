@@ -92,4 +92,6 @@ The source is a start, not a finished file:
 - An I2C device with no address in its net name has the address `0x00`.
 - The `compatible` strings come from the table of the tool. Make sure that they agree
   with the bindings of your kernel or RTOS (Linux, Zephyr).
-- `validate_pin_configuration` gives the pin conflicts that the generation can see.
+- `validate_pin_configuration` stops the generation for an error of
+  `detect_pin_conflicts` (a net with more than one driver pin). A warning (a net
+  with one pin) does not stop it.

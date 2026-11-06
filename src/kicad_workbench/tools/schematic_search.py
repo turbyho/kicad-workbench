@@ -3,6 +3,7 @@
 from ..parsers.kicad_fields import with_field_rules_note
 from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
+from ..utils.tool_errors import EXPECTED_ERRORS, error_answer
 
 
 @mcp.tool()
@@ -29,7 +30,6 @@ async def search_components_by_type(
         from pathlib import Path
 
         from ..parsers.netlist_parser import NetlistParser
-        from ..utils.sch_hierarchy import AmbiguousRootError
         from .pin_analysis import _ensure_netlist
 
         parser = SchematicParser(file_path)
@@ -40,17 +40,18 @@ async def search_components_by_type(
         comp_nets: dict[str, set[str]] = {}
         comp_pins_map: dict[str, list[tuple[str, str]]] = {}
         # The netlist only adds the nets of each component, thus the search
-        # continues without it.
+        # continues without it, and the answer tells it.
+        net_note = ""
         try:
             netlist_path = await _ensure_netlist(Path(file_path))
-        except AmbiguousRootError:
-            netlist_path = None
-        if netlist_path:
-            nl = NetlistParser(str(netlist_path))
-            for ref, comp in nl.get_components().items():
-                pins = [(pn, nn) for pn, nn in comp.pins.items() if nn]
-                comp_pins_map[ref] = pins
-                comp_nets[ref] = {nn for _, nn in pins}
+            netlist_components = NetlistParser(str(netlist_path)).get_components()
+        except EXPECTED_ERRORS as e:  # also a netlist that is not XML (ValueError)
+            netlist_components = {}
+            net_note = f"\n\n⚠️ The search did not use the nets of the components: {e}"
+        for ref, comp in netlist_components.items():
+            pins = [(pn, nn) for pn, nn in comp.pins.items() if nn]
+            comp_pins_map[ref] = pins
+            comp_nets[ref] = {nn for _, nn in pins}
 
         # Smart component type detection patterns
         type_patterns = {
@@ -90,7 +91,11 @@ async def search_components_by_type(
                 matching_components.append(component)
 
         if not matching_components:
-            return f"# No {component_type} components found\n\nSearched for patterns: {', '.join(patterns)}\n\nFound 0 matching components in {len(components)} total components."
+            return (
+                f"# No {component_type} components found\n\n"
+                f"Searched for patterns: {', '.join(patterns)}\n\n"
+                f"Found 0 matching components in {len(components)} total components.{net_note}"
+            )
 
         # Format results
         lines = [
@@ -153,14 +158,13 @@ async def search_components_by_type(
                                     lines.append(f"  - {component.reference}: {component.value}")
                                 lines.append("")
 
-                        except Exception as e:
+                        except EXPECTED_ERRORS as e:
+                            # The search of this sheet is not complete.
                             lines.append(f"### {sheet['name']}")
-                            lines.append(f"Error: {e}")
+                            lines.append(f"❌ The server cannot read this sheet: {e}")
                             lines.append("")
 
-        return "\n".join(lines)
+        return "\n".join(lines) + net_note
 
-    except FileNotFoundError:
-        return f"Error: File not found: {file_path}"
     except Exception as e:
-        return f"Error: {e}"
+        return error_answer(e, "Error searching components")

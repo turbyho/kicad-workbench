@@ -258,7 +258,7 @@ class TestEmptyProject:
         (default / "default.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
         result = make(out, overwrite=True)
         # The text of utils/kicad_lock.py, as the other edit tools give it.
-        assert result.startswith("Error: KiCad has the schematic open"), result
+        assert result.startswith("❌ KiCad has the schematic open"), result
         assert (out / "blank.kicad_sch").read_text(encoding="utf-8") == "x"
 
     @pytest.mark.parametrize("version", [None, "7.0.11", "10.0.8", "10.99.0"])
@@ -440,7 +440,7 @@ class TestRefusals:
         (out / "shield.kicad_pro").write_text("mine", encoding="utf-8")
         (out / "~shield.kicad_pro.lck").write_text("{}", encoding="utf-8")
         result = make(out, "shield", template="Arduino_Mega", overwrite=True)
-        assert result.startswith("Error: KiCad has the project open"), result
+        assert result.startswith("❌ KiCad has the project open"), result
         assert (out / "shield.kicad_pro").read_text(encoding="utf-8") == "mine"
 
     def test_no_template_checks_no_lock_of_the_files_that_stay(self, tmp_path, kicad):

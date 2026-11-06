@@ -34,6 +34,7 @@ from ..utils.new_project import (
     user_template_dir,
     write_project,
 )
+from ..utils.tool_errors import error_answer
 
 EMPTY_TEMPLATE = "empty"
 
@@ -347,6 +348,4 @@ async def create_kicad_project(
 """
 
     except Exception as e:
-        import traceback
-
-        return f"❌ Error creating project: {e}\n\n{traceback.format_exc()}"
+        return error_answer(e, "Error creating project")

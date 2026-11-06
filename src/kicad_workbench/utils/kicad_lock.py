@@ -62,7 +62,7 @@ def _lock_owner(lock_path: Path) -> str:
 
 def _open_error(opened: Path, lock_path: Path, document: str, editor: str) -> str:
     return (
-        f"Error: KiCad has the {document} open: {opened} "
+        f"❌ KiCad has the {document} open: {opened} "
         f"(lock file {lock_path}, owner {_lock_owner(lock_path)}). "
         "This tool writes the file directly. KiCad does not read such a change, "
         "and the next save in KiCad removes it. Thus the tool did not write the file.\n\n"
@@ -170,7 +170,7 @@ def _guarded_write(
         return open_error
     if file_stamp(path) != stamp:
         return (
-            f"Error: The file {path} changed after this tool read it. "
+            f"❌ The file {path} changed after this tool read it. "
             "Thus the tool did not write the file, to keep that change. "
             "Do this operation again."
         )

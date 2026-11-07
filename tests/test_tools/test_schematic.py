@@ -171,8 +171,10 @@ def test_pins_of_the_netlist_nodes(version, f1, f2):
 
     text = NETLIST.format(version=version, f1=f1, f2=f2).encode()
     component = NetlistParser.from_bytes(text).get_components()["R1"]
-    assert component.pin_names == {"1": "SPI1_MOSI", "2": "B"}
-    assert component.pin_types == {"1": "output", "2": "passive"}
+    assert [(n.number, n.net, n.name, n.type) for n in component.nodes] == [
+        ("2", "A", "B", "passive"),
+        ("1", "B", "SPI1_MOSI", "output"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -217,8 +219,5 @@ def test_component_with_only_netlist_nodes():
         b'pintype="unspecified"/></net></nets></export>'
     )
     component = NetlistParser.from_bytes(text).get_components()["U8"]
-    assert (component.value, component.pin_names, component.pin_types) == (
-        "",
-        {"2": "X"},
-        {"2": "unspecified"},
-    )
+    node = component.nodes[0]
+    assert (component.value, node.number, node.name, node.type) == ("", "2", "X", "unspecified")

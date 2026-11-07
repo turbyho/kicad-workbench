@@ -60,6 +60,14 @@ class TestMergeDuplicateReferences:
         numbers = [p["number"] for p in merged[0].pins]
         assert numbers == ["1", "2"]  # union, no duplicates
 
+    def test_pins_with_one_number_and_other_names_stay(self):
+        # Unit A and unit B have a pin "5" with an other name: a pin number on two
+        # nets (BaseNames needs the two library pins).
+        u1a = self._comp("U1", [{"number": "5", "name": "PA0", "base_name": "PA0"}])
+        u1b = self._comp("U1", [{"number": "5", "name": "PB1", "base_name": "PB1"}])
+        pins = merge_units([u1a, u1b])[0].pins
+        assert [p["name"] for p in pins] == ["PA0", "PB1"]
+
     def test_distinct_references_preserved(self):
         comps = [self._comp("R1", []), self._comp("C9", [])]
         assert len(merge_units(comps)) == 2

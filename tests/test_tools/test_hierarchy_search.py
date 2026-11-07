@@ -257,3 +257,17 @@ def test_the_pins_of_a_symbol_with_no_library_symbol(project):
     result = search(project["dir"] / "root.kicad_sch", "N3")
     assert found(result) == [], result
     assert "⚠️ The netlist has the pins of X1 but no component" in result
+
+
+def test_trace_of_a_pin_on_two_nets_and_of_an_unknown_pin(project):
+    # Pin 1 of U3 is also on /Mid/Leaf/SCL (two library pins "1"): each net, and the
+    # warning. A pin that the netlist does not give U3 is an error.
+    project["xml"] = netlist_xml(
+        nets='<net code="3" name="/Mid/Leaf/SCL"><node ref="U3" pin="1" pintype="input"/></net>'
+    )
+    root = str(project["dir"] / "root.kicad_sch")
+    result = asyncio.run(hierarchical_analysis.trace_hierarchical_connection(root, "U3", "1"))
+    assert "**Net:** /Mid/Leaf/SDA" in result and "**Net:** /Mid/Leaf/SCL" in result, result
+    assert "U3.1 (/Mid/Leaf/SDA, /Mid/Leaf/SCL)" in result
+    result = asyncio.run(hierarchical_analysis.trace_hierarchical_connection(root, "U3", "9"))
+    assert result == "❌ Pin 9 not found in component U3", result

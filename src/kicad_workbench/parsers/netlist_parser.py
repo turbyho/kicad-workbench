@@ -1,12 +1,31 @@
 """KiCad netlist parser for accurate component network tracking."""
 
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
 from ..errors import InputError
 from .kicad_versions import version_triple
+from .sheet_list import str_num_cmp
+
+# The order of the pin numbers of KiCad (StrNumCmp).
+_NUMBER_KEY = cmp_to_key(str_num_cmp)
+
+
+@dataclass(frozen=True)
+class NetlistNode:
+    """A node of a net (<node>): one pin number of a component on the net."""
+
+    reference: str
+    number: str
+    net: str
+    # The pin name and the electrical type that KiCad gives the node
+    # (pin_name_of_node; the "+no_connect" of a pintype is not a type).
+    name: str
+    type: str
 
 
 @dataclass
@@ -17,17 +36,36 @@ class NetlistComponent:
     value: str
     library: str
     footprint: str | None = None
-    pins: dict[str, str] = field(default_factory=dict)  # pin_number -> net_name
-    # pin_number -> the pin name and the electrical type that KiCad gives the node
-    # (pin_name_of_node; the "+no_connect" of a pintype is not a type).
-    pin_names: dict[str, str] = field(default_factory=dict)
-    pin_types: dict[str, str] = field(default_factory=dict)
+    # The nodes of the component in the order of the netlist. A pin number can be
+    # on more than one net: two library pins with the same number, or a stacked pin
+    # number of KiCad 10 ("[1-2]") and a pin "2" (NETLIST_EXPORTER_XML::makeListOfNets
+    # removes only the nodes of one net with the same reference and the same number
+    # text).
+    nodes: list[NetlistNode] = field(default_factory=list)
     # The sheet path of the component (<sheetpath>): "names"
     # (SCH_SHEET_PATH::PathHumanReadable, for example "/Power/") and "tstamps"
     # (SCH_SHEET_PATH::PathAsString). Empty: a symbol with no library symbol (no
     # <comp>, only nodes).
     sheet_names: str = ""
     sheet_tstamps: str = ""
+
+    def sorted_nodes(self) -> list[NetlistNode]:
+        """Return the nodes in the order of the pin numbers of KiCad (StrNumCmp); the
+        nodes of one number keep the netlist order."""
+        return sorted(self.nodes, key=lambda node: _NUMBER_KEY(node.number))
+
+    def numbers(self) -> list[str]:
+        """Return the pin numbers of the nodes, each one time, in the netlist order."""
+        return list(dict.fromkeys(node.number for node in self.nodes))
+
+    def pins_on_more_nets(self) -> dict[str, list[str]]:
+        """Return each pin number on more than one net, with its nets."""
+        nets: dict[str, list[str]] = {}
+        for node in self.nodes:
+            nets.setdefault(node.number, [])
+            if node.net not in nets[node.number]:
+                nets[node.number].append(node.net)
+        return {number: names for number, names in nets.items() if len(names) > 1}
 
 
 @dataclass
@@ -62,7 +100,12 @@ class NetlistNet:
 
     name: str
     code: int
-    pins: list[tuple[str, str]] = field(default_factory=list)  # (reference, pin_number)
+    nodes: list[NetlistNode] = field(default_factory=list)  # the nodes of pins
+
+    @property
+    def pins(self) -> list[tuple[str, str]]:
+        """The (reference, pin number) of each node."""
+        return [(node.reference, node.number) for node in self.nodes]
 
 
 class NetlistParser:
@@ -147,13 +190,12 @@ class NetlistParser:
             library = libsource.get("lib", "") if libsource is not None else ""
 
             sheetpath = comp.find("sheetpath")
-            # Pins will be populated from nets later
+            # The nodes come from the nets below.
             components[ref] = NetlistComponent(
                 reference=ref,
                 value=value,
                 library=library,
                 footprint=footprint,
-                pins={},  # Empty initially, will populate from nets
                 sheet_names=sheetpath.get("names", "") if sheetpath is not None else "",
                 sheet_tstamps=sheetpath.get("tstamps", "") if sheetpath is not None else "",
             )
@@ -164,28 +206,30 @@ class NetlistParser:
             code_attr = net.get("code")
             code = int(code_attr) if code_attr and code_attr.lstrip("-").isdigit() else -1
             name = net.get("name")
+            if name is None:
+                # KiCad gives each net a name (an unnamed net gets "Net-(...)").
+                raise InputError(f"The netlist {self._origin} has a net with no name.")
 
-            pins_list = []
+            nodes = []
             for node in net.findall("node"):
                 ref = node.get("ref")
                 pin_num = node.get("pin")
                 if ref and pin_num:
-                    pins_list.append((ref, pin_num))
-
-                    # Populate component pins. KiCad writes no <comp> for a symbol with
-                    # no library symbol, but its pins are in the nets: the component has
-                    # only these pins.
+                    item = NetlistNode(
+                        reference=ref,
+                        number=pin_num,
+                        net=name,
+                        name=pin_name_of_node(node.get("pinfunction", ""), pin_num, kicad_version),
+                        type=node.get("pintype", "").replace("+no_connect", ""),
+                    )
+                    nodes.append(item)
+                    # KiCad writes no <comp> for a symbol with no library symbol, but its
+                    # pins are in the nets: the component has only these nodes.
                     if ref not in components:
                         components[ref] = NetlistComponent(reference=ref, value="", library="")
-                    components[ref].pins[pin_num] = name
-                    components[ref].pin_names[pin_num] = pin_name_of_node(
-                        node.get("pinfunction", ""), pin_num, kicad_version
-                    )
-                    components[ref].pin_types[pin_num] = node.get("pintype", "").replace(
-                        "+no_connect", ""
-                    )
+                    components[ref].nodes.append(item)
 
-            nets[name] = NetlistNet(name=name, code=code, pins=pins_list)
+            nets[name] = NetlistNet(name=name, code=code, nodes=nodes)
 
         sheets = [
             NetlistSheet(
@@ -246,43 +290,50 @@ class NetlistParser:
         data = self._data
         return data["nets"]
 
-    def get_component_nets(self, reference: str) -> dict[str, list[str]]:
-        """Get all networks for a component.
+    def pins_on_more_nets_note(
+        self, references: Iterable[str] | None = None, number: str | None = None
+    ) -> str:
+        """Return the warning about the pin numbers on more than one net, or "".
+
+        A symbol whose duplicate pin numbers are jumpers (KiCad 10) has one net for
+        the pins with one number text, but a stacked pin number ("[1-2]") and a pin
+        "2" can still be on two nets: the warning is also for such a symbol.
 
         Args:
-            reference: Component reference (e.g., "R16")
-
-        Returns:
-            Dictionary mapping net name to list of connected pins
+            references: The components of the answer; None: all components.
+            number: Only this pin number (the answer of one pin); None: all pins.
         """
         components = self.get_components()
-        if reference not in components:
-            return {}
-
-        comp = components[reference]
-        net_pins = {}
-
-        for pin_num, net_name in comp.pins.items():
-            if net_name not in net_pins:
-                net_pins[net_name] = []
-            net_pins[net_name].append(pin_num)
-
-        return net_pins
-
-    def get_net_components(self, net_name: str) -> list[tuple[str, str]]:
-        """Get all components connected to a net.
-
-        Args:
-            net_name: Net name (e.g., "PMIC_I2C_SCL")
-
-        Returns:
-            List of (reference, pin_number) tuples
-        """
-        nets = self.get_nets()
-        if net_name not in nets:
-            return []
-
-        return nets[net_name].pins
+        selected = components if references is None else dict.fromkeys(references)
+        # A reference of more than one <comp> has the nodes of each of these symbols:
+        # its pins on more nets are an annotation error, not two pins with one number.
+        duplicates = set(self.get_duplicate_references())
+        items = []
+        shared = []
+        for reference in selected:
+            component = components.get(reference)
+            if component is None:
+                continue
+            for pin, nets in component.pins_on_more_nets().items():
+                if number is None or pin == number:
+                    item = f"{reference}.{pin} ({', '.join(nets)})"
+                    (shared if reference in duplicates else items).append(item)
+        notes = []
+        if items:
+            notes.append(
+                "⚠️ The netlist has these pin numbers on more than one net: "
+                f"{', '.join(items)}. The tool gives each net of such a pin. The ERC of "
+                "KiCad 9 and 10 gives the error duplicate_pins for two pins with the "
+                "same number on different nets (ERC_TESTER::TestDuplicatePinNets), "
+                "except for a symbol whose duplicate pin numbers are jumpers."
+            )
+        if shared:
+            notes.append(
+                "⚠️ More than one component of the netlist has the reference of these "
+                f"pins (an annotation error): {', '.join(shared)}. The tool gives the "
+                "nets of all these components. Annotate the schematic."
+            )
+        return "\n\n".join(notes)
 
     def trace_connection(self, reference: str, pin_number: str | None = None) -> dict[str, Any]:
         """Trace connections from a component pin.
@@ -292,48 +343,44 @@ class NetlistParser:
             pin_number: Optional pin number (if None, trace all pins)
 
         Returns:
-            Connection information
+            Connection information. With pin_number: "component", "pin" and "nets",
+            a list with "net" and "connected_to" for each net of the pin (a pin
+            number can be on more than one net). With no pin_number: "component"
+            and "nets", the net name -> a list with "pin" and "connected_to" for each
+            pin of the component on the net. "connected_to" is the (reference, pin)
+            of each node of an other component on the net. Two nodes of one pin
+            number on one net (KiCad 10: "[1-2]" and "2") are one entry. An unknown
+            component or pin gives "error".
         """
         components = self.get_components()
         if reference not in components:
             return {"error": f"Component {reference} not found in netlist"}
 
         comp = components[reference]
+        nets = self.get_nets()
 
+        def connected_to(net_name: str) -> list[tuple[str, str]]:
+            net = nets.get(net_name)
+            nodes = net.nodes if net is not None else []
+            return [(node.reference, node.number) for node in nodes if node.reference != reference]
+
+        # Each (pin number, net) one time, in the netlist order.
+        pairs = list(dict.fromkeys((node.number, node.net) for node in comp.nodes))
         if pin_number:
-            # Trace specific pin
-            if pin_number not in comp.pins:
+            pin_nets = [net for number, net in pairs if number == pin_number]
+            if not pin_nets:
                 return {"error": f"Pin {pin_number} not found in component {reference}"}
-
-            net_name = comp.pins[pin_number]
-            nets = self.get_nets()
-            connected = nets[net_name].pins if net_name in nets else []
-
             return {
                 "component": reference,
                 "pin": pin_number,
-                "net": net_name,
-                "connected_to": [(ref, pin) for ref, pin in connected if ref != reference],
+                "nets": [{"net": net, "connected_to": connected_to(net)} for net in pin_nets],
             }
 
-        else:
-            # Trace all pins. A component can have several pins on the same net
-            # (relay contacts, multiple GND pins), so group as a list per net
-            # instead of overwriting earlier pins.
-            net_connections: dict[str, list[dict[str, Any]]] = {}
-            for pin_num, net_name in comp.pins.items():
-                nets = self.get_nets()
-                connected = nets[net_name].pins if net_name in nets else []
-                net_connections.setdefault(net_name, []).append(
-                    {
-                        "pin": pin_num,
-                        "connected_to": [
-                            (ref, pin) for ref, pin in connected if ref != reference
-                        ],
-                    }
-                )
-
-            return {
-                "component": reference,
-                "nets": net_connections,
-            }
+        # A component can have several pins on the same net (relay contacts, more
+        # GND pins): a list for each net.
+        net_connections: dict[str, list[dict[str, Any]]] = {}
+        for number, net in pairs:
+            net_connections.setdefault(net, []).append(
+                {"pin": number, "connected_to": connected_to(net)}
+            )
+        return {"component": reference, "nets": net_connections}

@@ -38,7 +38,7 @@ async def search_components_by_type(
         path = Path(file_path)
         if not path.is_file():
             return f"❌ File not found: {path}"
-        _netlist, components, warnings = await asyncio.to_thread(
+        netlist, components, warnings = await asyncio.to_thread(
             components_of_file, path, search_in_subsheets
         )
 
@@ -63,7 +63,7 @@ async def search_components_by_type(
 
         def matches(component) -> bool:
             texts = [component.value, component.footprint or ""]
-            texts += [net for net in component.pins.values() if net]
+            texts += [node.net for node in component.nodes if node.net]
             return any(pattern in text.lower() for text in texts for pattern in patterns)
 
         matching_components = [c for c in components if matches(c)]
@@ -96,7 +96,7 @@ async def search_components_by_type(
             if component.footprint:
                 lines.append(f"**Footprint:** {component.footprint}")
 
-            component_nets = [(pin, net) for pin, net in component.pins.items() if net]
+            component_nets = [(node.number, node.net) for node in component.nodes if node.net]
             if component_nets:
                 lines.append(f"**Connections ({len(component_nets)}):**")
                 for pin_num, net_name in component_nets[:10]:  # Show first 10 connections
@@ -106,6 +106,8 @@ async def search_components_by_type(
 
             lines.append("")
 
+        if note := netlist.pins_on_more_nets_note(c.reference for c in matching_components):
+            notes += f"\n\n{note}"
         return "\n".join(lines) + notes
 
     except Exception as e:

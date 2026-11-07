@@ -4,12 +4,12 @@ import asyncio
 import copy
 import re
 from dataclasses import dataclass
-from functools import cmp_to_key
 from pathlib import Path
 
 from ..errors import InputError
 from ..parsers.annotation import ref_des_prefix
 from ..parsers.kicad_fields import with_field_rules_note
+from ..parsers.netlist_parser import NetlistNode
 from ..parsers.sch_instances import placed_instances
 from ..parsers.schematic_parser import (
     SchematicComponent,
@@ -17,7 +17,6 @@ from ..parsers.schematic_parser import (
     merge_units,
     unknown_alternate_note,
 )
-from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
@@ -101,6 +100,32 @@ async def components_of_project(sch_path: Path, kicad: str | None) -> list[Schem
     if kicad is None:
         raise InputError(_NO_VERSION.removeprefix("❌ "))
     return await asyncio.to_thread(project_components, sch_path, kicad)
+
+
+class BaseNames:
+    """The names of the library pins of a component for the nodes of the netlist.
+
+    The netlist gives the shown name (with the alternate), the schematic model gives
+    the name of the library pin ("base_name", SchematicParser._component_pins).
+    """
+
+    def __init__(self, component: SchematicComponent | None) -> None:
+        """component: The component of the project (project_components), or None."""
+        self._pins: dict[str, list[dict]] = {}
+        for pin in component.pins if component is not None else []:
+            self._pins.setdefault(str(pin.get("number", "")), []).append(pin)
+
+    def of(self, node: NetlistNode) -> str:
+        """Return the name of the library pin of a node, or "" when it is not known.
+
+        A pin number of more than one library pin: the pin whose shown name is the
+        name of the node.
+        """
+        pins = self._pins.get(node.number, [])
+        if len(pins) > 1:
+            pins = [pin for pin in pins if pin.get("name", "") == node.name] or pins
+        names = {pin.get("base_name", pin.get("name", "")) for pin in pins}
+        return names.pop() if len(names) == 1 else ""
 
 
 def _problem_lines(problems: list[str]) -> list[str]:
@@ -215,15 +240,13 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
     component = netlist.get_components().get(reference)
     if component is None:
         return None, f"the netlist of kicad-cli has no pin of {reference}"
+    # Each node: a pin number on more than one net has more rows.
     pins = [
-        {
-            "number": number,
-            "name": component.pin_names.get(number, ""),
-            "electrical_type": component.pin_types.get(number, ""),
-        }
-        for number in sorted(component.pins, key=cmp_to_key(str_num_cmp))
+        {"number": node.number, "name": node.name, "electrical_type": node.type}
+        for node in component.sorted_nodes()
     ]
-    return pins, netlist.netlist_note()
+    notes = [netlist.netlist_note(), netlist.pins_on_more_nets_note([reference])]
+    return pins, "\n\n".join(note for note in notes if note)
 
 
 @mcp.tool()

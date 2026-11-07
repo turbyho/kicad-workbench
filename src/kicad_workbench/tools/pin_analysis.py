@@ -7,6 +7,7 @@ This module provides advanced pin analysis capabilities including:
 - MCU-specific pin mapping support
 """
 
+import collections
 import re
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from ..parsers.kicad_fields import with_field_rules_note
 from ..server import mcp
 from ..utils.tool_errors import error_answer
 from .netlist import current_netlist
-from .schematic import components_of_project
+from .schematic import BaseNames, components_of_project
 
 # MCU family component patterns
 MCU_PATTERNS = {
@@ -241,41 +242,41 @@ async def analyze_pin_functions(
             mcu_family = _identify_mcu_family(comp_value)
 
             nl_comp = nl_components.get(comp_ref)
-            pin_map = nl_comp.pins if nl_comp else {}  # pin_number -> net_name
-            if not pin_map:
+            if not nl_comp or not nl_comp.nodes:
                 continue  # not in netlist / nothing connected
 
             # The name (with the alternate) and the type of each pin are the ones that
-            # KiCad gives the nodes of the netlist. The base name (the name of the library
-            # pin, for the MCU pin names) comes from the schematic.
-            base_names: dict[str, str] = {}
-            sch_comp = sch_components.get(comp_ref)
-            if sch_comp:
-                for p in sch_comp.pins:
-                    base_names[str(p.get("number", ""))] = p.get("base_name", p.get("name", ""))
-
-            for pin_num, net_name in pin_map.items():
-                pin_name = nl_comp.pin_names.get(pin_num, "")
-                pin_type = nl_comp.pin_types.get(pin_num, "")
-                base_name = base_names.get(str(pin_num), "")
-
-                func = _infer_pin_function_from_net(net_name)
-                inferred_functions = [func] if func else []
+            # KiCad gives the nodes of the netlist. The nodes of one pin (number, name and
+            # type) are one row with all their nets: a pin number can be on more than one
+            # net. The base name (the name of the library pin, for the MCU pin names)
+            # comes from the schematic.
+            base_names = BaseNames(sch_components.get(comp_ref))
+            pins: dict[tuple[str, str, str], list] = {}
+            for node in nl_comp.nodes:
+                pins.setdefault((node.number, node.name, node.type), []).append(node)
+            for (number, name, kind), nodes in pins.items():
+                nets = [node.net for node in nodes if node.net]
+                inferred_functions = list(
+                    dict.fromkeys(f for f in map(_infer_pin_function_from_net, nets) if f)
+                )
 
                 # The MCU pin names (PA7, GPIO4) are the names of the library pins.
-                mcu_mapping = _get_mcu_pin_mapping(mcu_family, base_name) if mcu_family else None
+                pin_base = base_names.of(nodes[0])
+                mcu_mapping = _get_mcu_pin_mapping(mcu_family, pin_base) if mcu_family else None
 
-                pin_analysis.append({
-                    "component": comp_ref,
-                    "component_value": comp_value,
-                    "mcu_family": mcu_family,
-                    "pin_number": str(pin_num),
-                    "pin_name": pin_name or str(pin_num),
-                    "pin_type": pin_type,
-                    "net_names": [net_name] if net_name else [],
-                    "inferred_functions": inferred_functions,
-                    "mcu_mapping": mcu_mapping,
-                })
+                pin_analysis.append(
+                    {
+                        "component": comp_ref,
+                        "component_value": comp_value,
+                        "mcu_family": mcu_family,
+                        "pin_number": number,
+                        "pin_name": name or number,
+                        "pin_type": kind,
+                        "net_names": nets,
+                        "inferred_functions": inferred_functions,
+                        "mcu_mapping": mcu_mapping,
+                    }
+                )
 
         if not pin_analysis:
             return f"""⚠️ **No Pin Analysis Available**
@@ -334,6 +335,8 @@ Unable to extract pin information. This could be due to:
                 result += f"- Max Current: {mapping['max_current']} mA\n"
                 result += f"- 5V Tolerant: {'Yes' if mapping['is_5v_tolerant'] else 'No'}\n\n"
 
+        if note := netlist_parser.pins_on_more_nets_note(c.reference for c in components):
+            result += f"\n{note}\n"
         if note := netlist_parser.netlist_note():
             result += f"\n{note}\n"
         return result
@@ -424,29 +427,25 @@ async def _pin_conflicts(sch_path: Path) -> list[dict]:
 
     output_types = {"output", "power_out", "open_collector", "open_emitter", "tri_state"}
 
-    # (ref, pin_number) -> electrical_type
-    pin_type_of: dict[tuple[str, str], str] = {
-        (ref, number): kind.lower()
-        for ref, comp in netlist_parser.get_components().items()
-        for number, kind in comp.pin_types.items()
-    }
-
     # Detect conflicts
     conflicts = []
 
     # Check for multiple output/driver pins on the same net.
     # (Multiple power_in pins on a rail like +3V3 are normal and are NOT
-    # reported — only multiple drivers are a conflict.)
+    # reported — only multiple drivers are a conflict.) The type of each node is the
+    # type of its pin on this net (a pin number can be on more than one net).
     all_nets = netlist_parser.get_nets()
 
     for net_name, net in all_nets.items():
-        connections = net.pins  # list of (ref, pin_number)
-
-        output_pins = []
-        for ref, pin_num in connections:
-            pin_type = pin_type_of.get((ref, str(pin_num)), "")
-            if pin_type in output_types:
-                output_pins.append(f"{ref}:{pin_num}")
+        drivers = [node for node in net.nodes if node.type.lower() in output_types]
+        # Two driver nodes of one pin number (two library pins with one number, or
+        # "[1-2]" and "2" in KiCad 10) get the pin names.
+        counts = collections.Counter((node.reference, node.number) for node in drivers)
+        output_pins = [
+            f"{node.reference}:{node.number}"
+            + (f" ({node.name})" if counts[node.reference, node.number] > 1 and node.name else "")
+            for node in drivers
+        ]
 
         if len(output_pins) > 1:
             conflicts.append(
@@ -475,14 +474,14 @@ async def _pin_conflicts(sch_path: Path) -> list[dict]:
     all_components = netlist_parser.get_components()
 
     for ref, comp in all_components.items():
-        for pin_num, net_name in comp.pins.items():
-            if net_name.startswith("unconnected-"):
+        for node in comp.nodes:
+            if node.net.startswith("unconnected-"):
                 conflicts.append(
                     {
                         "type": "unconnected_pin",
                         "severity": "info",
-                        "net": net_name,
-                        "description": f"{ref} pin {pin_num} is unconnected ({net_name})",
+                        "net": node.net,
+                        "description": f"{ref} pin {node.number} is unconnected ({node.net})",
                     }
                 )
     return conflicts
@@ -643,26 +642,19 @@ No MCU components were found in the schematic.
 
             # The base name of each pin (the name of the library pin, for the MCU pin
             # names) comes from the schematic; the name with the alternate comes from the
-            # netlist.
-            base_names: dict[str, str] = {}
-            sch_c = sch_components.get(mcu_ref)
-            if sch_c:
-                for p in sch_c.pins:
-                    base_names[str(p.get("number", ""))] = p.get("base_name", p.get("name", ""))
-
+            # netlist. One row for each node: a pin number can be on more than one net.
+            base_names = BaseNames(sch_components.get(mcu_ref))
             comp = netlist_parser.get_components().get(mcu_ref)
             if comp:
-                for pin_num, net_name in comp.pins.items():
-                    peripheral = _infer_pin_function_from_net(net_name)
-                    pin_name = comp.pin_names.get(pin_num, "")
-                    base_name = base_names.get(str(pin_num), "")
-                    mcu_mapping = _get_mcu_pin_mapping(mcu_family, base_name)
+                for node in comp.nodes:
+                    pin_base = base_names.of(node)
+                    mcu_mapping = _get_mcu_pin_mapping(mcu_family, pin_base)
                     pin_config = {
-                        "pin_number": str(pin_num),
-                        "pin_name": pin_name or str(pin_num),
-                        "base_name": base_name,
-                        "net": net_name,
-                        "peripheral": peripheral,
+                        "pin_number": node.number,
+                        "pin_name": node.name or node.number,
+                        "base_name": pin_base,
+                        "net": node.net,
+                        "peripheral": _infer_pin_function_from_net(node.net),
                         "alternate_functions": (mcu_mapping or {}).get("alternate_functions", []),
                     }
                     config["pins"].append(pin_config)
@@ -722,6 +714,8 @@ No MCU components were found in the schematic.
 
             result += "```\n\n"
 
+        if note := netlist_parser.pins_on_more_nets_note(m["reference"] for m in mcu_components):
+            result += f"\n{note}\n"
         if note := netlist_parser.netlist_note():
             result += f"\n{note}\n"
         return result

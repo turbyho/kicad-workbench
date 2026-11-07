@@ -28,8 +28,10 @@ async def trace_hierarchical_connection(
         pin_number: Optional pin number to trace (if empty, trace all pins)
 
     Returns:
-        The sheet of the component, and the net and the connected pins of each
-        pin.
+        The sheet of the component, and the nets and the connected pins of each
+        pin (a pin number can be on more than one net). A pin number that the
+        netlist does not give the component is an error: the netlist has each pin
+        of a component, also an unconnected pin.
     """
     try:
         if not Path(file_path).is_file():
@@ -72,27 +74,38 @@ async def trace_hierarchical_connection(
             *notes,
             "",
         ]
-        if not comp.pins:
+        if not comp.nodes:
             lines.append("No connections found for this component.")
             return "\n".join(lines)
 
-        pins_to_trace = [pin_number] if pin_number else list(comp.pins.keys())
-        for pn in pins_to_trace:
-            conn = nl.trace_connection(reference, str(pn))
-            net_name = conn.get("net") if isinstance(conn, dict) else None
-            connected = conn.get("connected_to", []) if isinstance(conn, dict) else []
+        # The nets of each pin number (a pin number can be on more than one net): the
+        # trace of the pin, or one trace of all pins.
+        nets_of: dict[str, list[tuple[str, list]]] = {}
+        if pin_number:
+            traced = nl.trace_connection(reference, pin_number)
+            if "error" in traced:
+                return f"❌ {traced['error']}"
+            nets_of[pin_number] = [(n["net"], n["connected_to"]) for n in traced["nets"]]
+        else:
+            for net_name, pins in nl.trace_connection(reference)["nets"].items():
+                for pin in pins:
+                    nets_of.setdefault(pin["pin"], []).append((net_name, pin["connected_to"]))
+        for pn in [pin_number] if pin_number else comp.numbers():
             lines.append(f"## Pin {pn}")
-            lines.append(f"**Net:** {net_name or '(unconnected)'}")
-            if connected:
-                lines.append(f"**Connected to ({len(connected)} pins):**")
-                for ref, p in connected[:15]:
-                    lines.append(f"  - {ref}:{p}")
-                if len(connected) > 15:
-                    lines.append(f"  - ... and {len(connected) - 15} more")
-            else:
-                lines.append("**No external connections**")
+            for net_name, connected in nets_of[pn]:
+                lines.append(f"**Net:** {net_name}")
+                if connected:
+                    lines.append(f"**Connected to ({len(connected)} pins):**")
+                    for ref, p in connected[:15]:
+                        lines.append(f"  - {ref}:{p}")
+                    if len(connected) > 15:
+                        lines.append(f"  - ... and {len(connected) - 15} more")
+                else:
+                    lines.append("**No external connections**")
             lines.append("")
 
+        if note := nl.pins_on_more_nets_note([reference], pin_number or None):
+            lines.append(note)
         return "\n".join(lines)
 
     except Exception as e:

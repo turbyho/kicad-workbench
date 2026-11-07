@@ -329,23 +329,19 @@ async def trace_netlist_connection(
             if "error" in result:
                 return f"❌ {result['error']}"
 
-            lines = [
-                f"## Netlist Connection Trace: {reference}",
-                "",
-                f"**Pin:** {result['pin']}",
-                f"**Net:** {result['net']}",
-                "",
-                "### Connected Components:",
-                "",
-            ]
-
-            if result['connected_to']:
-                lines.append("| Reference | Pin |")
-                lines.append("|-----------|-----|")
-                for ref, pin in result['connected_to']:
-                    lines.append(f"| {ref} | {pin} |")
-            else:
-                lines.append("No other components on this net.")
+            lines = [f"## Netlist Connection Trace: {reference}", "", f"**Pin:** {result['pin']}"]
+            # A pin number can be on more than one net: one section for each net.
+            for net in result["nets"]:
+                lines += ["", f"**Net:** {net['net']}", "", "### Connected Components:", ""]
+                if net["connected_to"]:
+                    lines.append("| Reference | Pin |")
+                    lines.append("|-----------|-----|")
+                    for ref, pin in net["connected_to"]:
+                        lines.append(f"| {ref} | {pin} |")
+                else:
+                    lines.append("No other components on this net.")
+            if note := parser.pins_on_more_nets_note([reference], pin_number):
+                lines += ["", note]
 
             return "\n".join(lines)
 
@@ -381,6 +377,8 @@ async def trace_netlist_connection(
 
                 lines.append("")
 
+            if note := parser.pins_on_more_nets_note([reference]):
+                lines.append(note)
             return "\n".join(lines)
 
     except Exception as e:
@@ -464,9 +462,11 @@ async def get_netlist_components(
             "",
         ]
 
+        shown = []
         for ref, comp in sorted(components.items()):
             if filter_ref and not ref.startswith(filter_ref):
                 continue
+            shown.append(ref)
 
             lines.append(f"### {ref}")
             lines.append(f"**Value:** {comp.value}")
@@ -474,17 +474,20 @@ async def get_netlist_components(
             if comp.footprint:
                 lines.append(f"**Footprint:** {comp.footprint}")
 
-            if comp.pins:
+            if comp.nodes:
                 lines.append("")
                 lines.append("**Pin Connections:**")
                 lines.append("")
                 lines.append("| Pin | Net |")
                 lines.append("|-----|-----|")
-                for pin_num, net_name in sorted(comp.pins.items()):
-                    lines.append(f"| {pin_num} | {net_name} |")
+                # Each node: a pin number on more than one net has more rows.
+                for node in comp.sorted_nodes():
+                    lines.append(f"| {node.number} | {node.net} |")
 
             lines.append("")
 
+        if note := parser.pins_on_more_nets_note(shown):
+            lines.append(note)
         return "\n".join(lines)
 
     except Exception as e:

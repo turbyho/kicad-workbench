@@ -17,7 +17,7 @@ from ..server import mcp
 from ..utils.file_save import AfterSaveError
 from ..utils.kicad_text import write_kicad_text
 from ..utils.tool_errors import error_answer
-from .schematic import components_of_project
+from .schematic import BaseNames, components_of_project
 
 # Device tree compatible strings database
 DEVICE_TREE_BINDINGS = {
@@ -410,6 +410,8 @@ Please specify a supported SOC family."""
         # Analyze components and extract peripheral configuration
         components = await components_of_project(sch_path, netlist_parser.kicad_version)
 
+        # The components whose nodes the device tree uses (for the warning).
+        used: dict[str, None] = {}
         for component in components:
             comp_ref = component.reference
             comp_value = component.value
@@ -417,31 +419,26 @@ Please specify a supported SOC family."""
             for category, _bindings in DEVICE_TREE_BINDINGS.items():
                 binding = _find_component_binding(comp_value, category)
                 if binding:
-                    # Get net connections. trace_connection(ref, pin) returns a
-                    # dict {net, ...} (not a list); iterate the component's real
-                    # pins from the netlist instead of guessing pin numbers 1..8.
-                    connections = []
+                    # The net of each node of the component in the netlist (a pin
+                    # number can be on more than one net).
                     nl_comp = netlist_parser.get_components().get(comp_ref)
-                    pin_numbers = list(nl_comp.pins.keys()) if nl_comp else []
-                    for pin_num in pin_numbers:
-                        try:
-                            pin_conn = netlist_parser.trace_connection(comp_ref, str(pin_num))
-                            net_name = pin_conn.get("net") if pin_conn else None
-                            if net_name:
-                                peripheral_type = _infer_peripheral_type(net_name)
-                                connections.append({
-                                    "net": net_name,
-                                    "peripheral": peripheral_type,
-                                    "pin": pin_num,
-                                })
-                        except Exception:
-                            continue
+                    connections = [
+                        {
+                            "net": node.net,
+                            "peripheral": _infer_peripheral_type(node.net),
+                            "pin": node.number,
+                        }
+                        for node in (nl_comp.nodes if nl_comp else [])
+                        if node.net
+                    ]
 
                     if connections:
                         # Determine peripheral type based on connections
                         i2c_nets = [c for c in connections if c["peripheral"] == "I2C"]
                         spi_nets = [c for c in connections if c["peripheral"] == "SPI"]
                         uart_nets = [c for c in connections if c["peripheral"] == "UART"]
+                        if i2c_nets or spi_nets or uart_nets:
+                            used[comp_ref] = None  # The device tree gets a node of it.
 
                         if i2c_nets:
                             # I2C device
@@ -495,23 +492,26 @@ Please specify a supported SOC family."""
             # Check if this is an MCU
             if any(soc in comp_value.upper() for soc in ["STM32", "ESP32", "NRF"]):
                 # Extract GPIO pins from netlist (iterate the MCU's real pins)
+                # Each pin number one time: a number can be on more than one net.
                 nl_comp = netlist_parser.get_components().get(comp_ref)
-                if nl_comp:
-                    for pin_num in nl_comp.pins:
-                        try:
-                            pin_conn = netlist_parser.trace_connection(comp_ref, str(pin_num))
-                            net_name = pin_conn.get("net") if pin_conn else None
-                            if net_name and ("GPIO" in net_name.upper() or "IO" in net_name.upper()):
-                                dt_data["gpio_pins"].append({
-                                    "number": pin_num,
-                                    "name": f"P{pin_num}",
-                                })
-                        except Exception:
-                            continue
+                numbers = dict.fromkeys(
+                    node.number
+                    for node in (nl_comp.nodes if nl_comp else [])
+                    if "GPIO" in node.net.upper() or "IO" in node.net.upper()
+                )
+                dt_data["gpio_pins"] += [
+                    {"number": number, "name": f"P{number}"} for number in numbers
+                ]
+                if numbers:
+                    used[comp_ref] = None
 
         # Generate device tree from template
         template = Template(DEVICE_TREE_TEMPLATES[target_soc])
         device_tree = template.render(**dt_data)
+        # A pin number on more than one net: the result can be wrong, thus no check mark.
+        note = netlist_parser.pins_on_more_nets_note(used)
+        sign = "⚠️" if note else "✅"
+        note = f"\n\n{note}" if note else ""
 
         # Save to file if output path specified
         if output_path:
@@ -528,7 +528,7 @@ Please specify a supported SOC family."""
             except AfterSaveError as e:  # the file has the device tree
                 saved = f"\n\n⚠️ {e}"
 
-            return f"""✅ **Device Tree Generated Successfully**
+            return f"""{sign} **Device Tree Generated Successfully**
 
 **Schematic:** {schematic_path}
 **Target SOC:** {target_soc}
@@ -548,11 +548,11 @@ The device tree source file has been generated and saved to the specified locati
 1. Review and customize the generated device tree
 2. Compile with device tree compiler: `dtc -I dts -O dtb -o output.dtb {output_path}`
 3. Test on target hardware
-4. Iterate as needed{saved}"""
+4. Iterate as needed{saved}{note}"""
 
         else:
             # Return device tree content directly
-            return f"""✅ **Device Tree Generated Successfully**
+            return f"""{sign} **Device Tree Generated Successfully**
 
 **Schematic:** {schematic_path}
 **Target SOC:** {target_soc}
@@ -575,7 +575,7 @@ The device tree source file has been generated and saved to the specified locati
 1. Review and customize the generated device tree
 2. Save to file: `{sch_path.stem}.dts`
 3. Compile with device tree compiler: `dtc -I dts -O dtb -o output.dtb`
-4. Test on target hardware"""
+4. Test on target hardware{note}"""
 
     except Exception as e:
         return error_answer(e, f"Device tree generation for {schematic_path} failed")
@@ -608,18 +608,17 @@ async def extract_gpio_config(
 
         netlist_parser = await current_netlist(sch_path)
 
-        # pin number -> name from schematic lib_symbols
         # The name of the library pin (base_name): the GPIO port comes from it, not from
         # an alternate function (SchematicParser._component_pins).
-        pin_name_of: dict[tuple[str, str], str] = {}
-        for c in await components_of_project(sch_path, netlist_parser.kicad_version):
-            for p in c.pins:
-                pin_name_of[(c.reference, str(p.get("number", "")))] = p.get(
-                    "base_name", p.get("name", "")
-                )
+        base_names = {
+            c.reference: BaseNames(c)
+            for c in await components_of_project(sch_path, netlist_parser.kicad_version)
+        }
+        no_names = BaseNames(None)  # A component that the schematic model does not have.
 
-        # Extract GPIO configurations
-        gpio_configs = []
+        # Extract GPIO configurations: one for each pin (component, number and name),
+        # with all its GPIO nets (a pin number can be on more than one net).
+        configs_of: dict[tuple[str, str, str], dict] = {}
 
         # NetlistParser.get_components() returns dict[ref, NetlistComponent];
         # there is no get_all_components() (previous call always crashed).
@@ -632,21 +631,24 @@ async def extract_gpio_config(
 
             # Check if this is an MCU
             if any(soc in comp_value.upper() for soc in ["STM32", "ESP32", "NRF", "ATMEGA"]):
-                for pin_num in comp.pins:
-                    try:
-                        pin_conn = netlist_parser.trace_connection(comp_ref, str(pin_num))
-                        net_name = pin_conn.get("net") if pin_conn else None
-                        if net_name and ("GPIO" in net_name.upper() or "IO" in net_name.upper()):
-                            gpio_configs.append({
+                for node in comp.nodes:
+                    if "GPIO" in node.net.upper() or "IO" in node.net.upper():
+                        pin_name = base_names.get(comp_ref, no_names).of(node) or node.number
+                        config = configs_of.setdefault(
+                            (comp_ref, node.number, pin_name),
+                            {
                                 "component": comp_ref,
-                                "pin_number": str(pin_num),
-                                "pin_name": pin_name_of.get((comp_ref, str(pin_num)))
-                                or str(pin_num),
-                                "net": net_name,
+                                "pin_number": node.number,
+                                "pin_name": pin_name,
+                                "nets": [],
                                 "soc": comp_value,
-                            })
-                    except Exception:
-                        continue
+                            },
+                        )
+                        if node.net not in config["nets"]:
+                            config["nets"].append(node.net)
+        gpio_configs = list(configs_of.values())
+        for config in gpio_configs:
+            config["net"] = ", ".join(config.pop("nets"))
 
         if not gpio_configs:
             return f"""⚠️ **No GPIO Configurations Found**
@@ -691,6 +693,9 @@ No GPIO configurations were found in the schematic.
         for soc, configs in soc_groups.items():
             result += f"### {soc}\n\n```c\n"
             result += f"// GPIO configuration for {soc}\n\n"
+            # Each C variable and each call one time: the numbers of a stacked pin
+            # ("[5-6]") have one pin name.
+            done: set[str] = set()
 
             for config in configs[:10]:  # Show first 10
                 result += f"// {config['pin_name']} ({config['pin_number']}): {config['net']}\n"
@@ -700,18 +705,27 @@ No GPIO configurations were found in the schematic.
                 if "STM32" in soc.upper() and stm32_pin:
                     port, bit = stm32_pin.group(1).upper(), stm32_pin.group(2)
                     var = f"gpio_p{port.lower()}{bit}"  # A C name also for "PA13/SWDIO".
-                    result += f"GPIO_InitTypeDef {var};\n"
-                    result += f"{var}.Pin = GPIO_PIN_{bit};\n"
-                    result += f"{var}.Mode = GPIO_MODE_OUTPUT_PP;\n"
-                    result += f"HAL_GPIO_Init(GPIO{port}, &{var});\n\n"
+                    if var not in done:
+                        done.add(var)
+                        result += f"GPIO_InitTypeDef {var};\n"
+                        result += f"{var}.Pin = GPIO_PIN_{bit};\n"
+                        result += f"{var}.Mode = GPIO_MODE_OUTPUT_PP;\n"
+                        result += f"HAL_GPIO_Init(GPIO{port}, &{var});\n\n"
                 elif "ESP32" in soc.upper():
-                    result += f"gpio_set_direction(GPIO{config['pin_number']}, GPIO_MODE_OUTPUT);\n\n"
+                    call = f"gpio_set_direction(GPIO{config['pin_number']}, GPIO_MODE_OUTPUT);"
+                    if call not in done:
+                        done.add(call)
+                        result += f"{call}\n\n"
 
             if len(configs) > 10:
                 result += f"// ... and {len(configs) - 10} more GPIO pins\n"
 
             result += "```\n\n"
 
+        if note := netlist_parser.pins_on_more_nets_note(
+            dict.fromkeys(config["component"] for config in gpio_configs)
+        ):
+            result += f"{note}\n"
         return result
 
     except Exception as e:
@@ -755,24 +769,19 @@ async def extract_i2c_devices(
                 binding = _find_component_binding(comp_value, category)
                 if binding:
                     nl_comp = netlist_parser.get_components().get(comp_ref)
-                    pin_numbers = list(nl_comp.pins.keys()) if nl_comp else []
-                    for pin_num in pin_numbers:
-                        try:
-                            pin_conn = netlist_parser.trace_connection(comp_ref, str(pin_num))
-                            net_name = pin_conn.get("net") if pin_conn else None
-                            if net_name and ("I2C" in net_name.upper() or "TWI" in net_name.upper()):
-                                i2c_address = _extract_i2c_address_from_net(net_name)
-                                i2c_devices.append({
+                    for node in nl_comp.nodes if nl_comp else []:
+                        if "I2C" in node.net.upper() or "TWI" in node.net.upper():
+                            i2c_devices.append(
+                                {
                                     "component": comp_ref,
                                     "value": comp_value,
                                     "compatible": binding["compatible"],
-                                    "address": i2c_address,
-                                    "net": net_name,
-                                    "pin": pin_num,
-                                })
-                                break
-                        except Exception:
-                            continue
+                                    "address": _extract_i2c_address_from_net(node.net),
+                                    "net": node.net,
+                                    "pin": node.number,
+                                }
+                            )
+                            break
 
         if not i2c_devices:
             return f"""⚠️ **No I2C Devices Found**
@@ -816,6 +825,8 @@ No I2C devices were found in the schematic.
 
         result += "};\n```"
 
+        if note := netlist_parser.pins_on_more_nets_note(d["component"] for d in i2c_devices):
+            result += f"\n\n{note}"
         return result
 
     except Exception as e:
@@ -860,22 +871,18 @@ async def extract_spi_devices(
                 binding = _find_component_binding(comp_value, category)
                 if binding:
                     nl_comp = netlist_parser.get_components().get(comp_ref)
-                    pin_numbers = list(nl_comp.pins.keys()) if nl_comp else []
-                    for pin_num in pin_numbers:
-                        try:
-                            pin_conn = netlist_parser.trace_connection(comp_ref, str(pin_num))
-                            net_name = pin_conn.get("net") if pin_conn else None
-                            if net_name and "SPI" in net_name.upper():
-                                spi_devices.append({
+                    for node in nl_comp.nodes if nl_comp else []:
+                        if "SPI" in node.net.upper():
+                            spi_devices.append(
+                                {
                                     "component": comp_ref,
                                     "value": comp_value,
                                     "compatible": binding["compatible"],
-                                    "net": net_name,
-                                    "pin": pin_num,
-                                })
-                                break
-                        except Exception:
-                            continue
+                                    "net": node.net,
+                                    "pin": node.number,
+                                }
+                            )
+                            break
 
         if not spi_devices:
             return f"""⚠️ **No SPI Devices Found**
@@ -918,6 +925,8 @@ No SPI devices were found in the schematic.
 
         result += "};\n```"
 
+        if note := netlist_parser.pins_on_more_nets_note(d["component"] for d in spi_devices):
+            result += f"\n\n{note}"
         return result
 
     except Exception as e:

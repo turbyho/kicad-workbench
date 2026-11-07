@@ -122,6 +122,13 @@ class SchematicPin:
         )
 
 
+def _pin_key(pin: dict[str, Any]) -> tuple:
+    """The values of a pin of _component_pins that make two pins equal."""
+    return tuple(
+        pin.get(key) for key in ("number", "name", "base_name", "electrical_type", "alternate")
+    )
+
+
 def merge_units(
     components: list[SchematicComponent],
 ) -> list[SchematicComponent]:
@@ -129,9 +136,11 @@ def merge_units(
 
     KiCad stores each unit of a multi-unit symbol as its own symbol block
     (often spread across sub-sheets), but the physical component is one
-    entity — netlist lookups and per-reference reports expect it once. Pin
-    metadata from all units is unioned by pin number; the first instance's
-    value/footprint wins (units share them by construction).
+    entity — netlist lookups and per-reference reports expect it once. The pins of
+    all units are unioned: a pin that is equal to a pin of an earlier unit (the
+    pins of unit 0, which each placed unit has) is there one time. Two pins with
+    one number and an other name stay two pins (a pin number on more than one net).
+    The first instance's value/footprint wins (units share them by construction).
     """
     merged: dict[str, SchematicComponent] = {}
     for comp in components:
@@ -143,9 +152,10 @@ def merge_units(
         if existing is None:
             merged[key] = comp
             continue
-        known_pins = {str(p.get("number", "")) for p in existing.pins}
+        known_pins = {_pin_key(p) for p in existing.pins}
         for p in comp.pins:
-            if str(p.get("number", "")) not in known_pins:
+            if _pin_key(p) not in known_pins:
+                known_pins.add(_pin_key(p))
                 existing.pins.append(p)
     return list(merged.values())
 

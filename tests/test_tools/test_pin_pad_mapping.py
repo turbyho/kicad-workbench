@@ -11,7 +11,6 @@ from kicad_workbench.parsers.board_netlist import NetlistPin, read_board_netlist
 from kicad_workbench.parsers.symbol_info import SymbolPin
 from kicad_workbench.tools import library as library_tools
 from kicad_workbench.utils import kicad_cli as kicad_cli_module
-from kicad_workbench.utils import pin_pad_mapping
 from kicad_workbench.utils.library_footprint import FootprintItems, PadNumber, footprint_info
 from kicad_workbench.utils.pin_pad_mapping import (
     MAX_STACKED,
@@ -66,9 +65,9 @@ class TestExpandStacked:
         assert expand_stacked("1") == (["1"], True)
         assert expand_stacked("[1-2]") == (["1", "2"], True)
 
-    def test_number_larger_than_long(self, monkeypatch):
-        # wxString::ToLong gives LONG_MAX for a number that is too large.
-        monkeypatch.setattr(pin_pad_mapping, "_LONG_MAX", 2**31 - 1)
+    def test_number_larger_than_long(self, long32):
+        # wxString::ToLong gives LONG_MAX for a number that is too large (Windows:
+        # a long has 32 bits).
         assert expand_stacked("[99999999999-99999999999]") == ([str(2**31 - 1)], True)
 
     def test_too_many_numbers(self):

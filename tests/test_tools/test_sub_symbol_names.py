@@ -10,7 +10,6 @@ cases of spike/kicad-versions/sub_symbol_names_check.py, measured with kicad-cli
 import pytest
 
 from kicad_workbench.errors import KicadParseError, LocaleNumberError
-from kicad_workbench.parsers.c_numbers import to_int, to_long
 from kicad_workbench.parsers.kicad_versions import KicadFileError
 from kicad_workbench.parsers.lib_symbols import flatten, unit_count
 from kicad_workbench.parsers.sexpr import parse
@@ -32,11 +31,10 @@ from .test_lib_symbols import ROOT, lib  # noqa: F401 (fixture)
         ("S_-2_1", (-2, 1)),
         ("S_2_1_", (2, 1)),  # no token after the last character that is not "_"
         ("S_2_1___", (2, 1)),
-        ("S_4294967298_1", (2, 1)),  # the cast of the long to an int
         ("S{slash}_2_1", None),
     ],
 )
-def test_names_that_kicad_reads(name, unit):
+def test_names_that_kicad_reads(long64, name, unit):
     if unit is None:
         # "{slash}" is "/": "S/_2_1" starts with "S", the rest "_2_1" has three tokens.
         with pytest.raises(KicadFileError, match="Invalid symbol unit name suffix"):
@@ -61,9 +59,21 @@ def test_names_that_kicad_reads(name, unit):
         ("S_2_1 ", "Invalid symbol body style number"),
     ],
 )
-def test_names_that_kicad_refuses(name, message):
+def test_names_that_kicad_refuses(long64, name, message):
     with pytest.raises(KicadFileError, match=message):
         sub_symbol_unit("S", name)
+
+
+def test_a_unit_out_of_the_range_of_an_int_on_linux(long64):
+    # Measured with kicad-cli 8.0.9 to 10.0.7 on Linux: unit 2, the cast of the long
+    # 2**32 + 2 to an int.
+    assert sub_symbol_unit("S", "S_4294967298_1") == (2, 1)
+
+
+def test_a_unit_out_of_the_range_of_a_long_on_windows(long32):
+    # A long of 32 bits: wxString::ToLong gives false (from the source).
+    with pytest.raises(KicadParseError, match="Invalid symbol unit number 4294967298_1"):
+        sub_symbol_unit("S", "S_4294967298_1")
 
 
 def test_the_unit_count():
@@ -81,38 +91,10 @@ def test_flatten_writes_the_numbers(lib):  # noqa: F811
     assert [sub.value(0) for sub in node.children("symbol")][0] == "R_0_1"
 
 
-@pytest.mark.parametrize(
-    "text, value",
-    [
-        ("12", 12),
-        (" \t+12", 12),
-        ("-0012", -12),
-        ("12 ", None),
-        ("", None),
-        ("1e3", None),
-        ("9223372036854775807", 2**63 - 1),
-        ("9223372036854775808", None),
-        ("-9223372036854775808", -(2**63)),
-    ],
-)
-def test_to_long(text, value):
-    assert to_long(text) == value
-
-
-def test_to_int():
-    assert (to_int(2**32 + 2), to_int(2**31), to_int(-1)) == (2, -(2**31), -1)
-
-
 def test_a_white_space_that_is_not_ascii():
-    # Measured with kicad-cli 10.0.6 on Linux: U+2003 is white space in a UTF-8
-    # locale, not in the locale C. The server does not know the locale of KiCad.
+    # The number of a name depends on the locale of KiCad (c_numbers.to_long).
     with pytest.raises(LocaleNumberError, match="only in some locales"):
         sub_symbol_unit("S", "S_\u20032_1")
-    with pytest.raises(LocaleNumberError):
-        to_long("\u00a012")
-    # Not at the start, or no number after it: no number in each locale.
-    assert to_long("12\u2003") is None
-    assert to_long("\u2003abc") is None
 
 
 def test_the_errors_are_parse_errors():

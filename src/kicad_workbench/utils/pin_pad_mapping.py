@@ -27,17 +27,14 @@ expands to the pad number (COMPONENT::GetNet). KiCad 8 and 9 use the text as
 one number.
 """
 
-import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from ..errors import InputError
+from ..parsers.c_numbers import strtol
 from ..parsers.symbol_info import SymbolPin
 
-# wxString::ToLong gives LONG_MAX for a number that is too large. A long has
-# 32 bits on Windows and 64 bits on Linux and macOS.
-_LONG_MAX = 2**31 - 1 if sys.platform == "win32" else 2**63 - 1
 # wxString::Trim removes these characters.
 _SPACES = " \t\n\r\v\f"
 # The server does not expand one pin number to more numbers than this.
@@ -66,10 +63,9 @@ def _alphanumeric(text: str) -> tuple[str, int]:
         start -= 1
     if start == len(text):
         return "", -1
-    digits = text[start:].lstrip("0") or "0"
-    # A number of more than 19 digits is larger than LONG_MAX. int() also
-    # refuses a text of more than 4300 digits.
-    return text[:start], _LONG_MAX if len(digits) > 19 else min(int(digits), _LONG_MAX)
+    # wxString::ToLong (wcstol) of the digits stores the value of strtol, LONG_MAX
+    # on overflow.
+    return text[:start], strtol(text[start:])
 
 
 def stacked_text(number: str) -> bool:

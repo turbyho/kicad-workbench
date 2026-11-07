@@ -81,7 +81,7 @@ from ..utils.schematic_settings import (
     subpart_settings,
     unknown_severity_reason,
 )
-from .c_numbers import to_int, to_long
+from .c_numbers import atoi, to_int, to_long
 from .kicad_fields import symbol_field_nodes
 from .kicad_versions import file_text, kicad_release, version_triple
 from .lib_symbols import unit_count
@@ -431,17 +431,8 @@ def split_reference(text: str) -> SplitReference:
             continue
         number = -1
         if _is_digit(data[last + 1]):
-            digits = data[last + 1 :]
-            end = 0
-            while end < len(digits) and _is_digit(digits[end]):
-                end += 1
-            # atoi: strtol gives LONG_MAX on overflow, then the cast to int. More than
-            # 19 digits is more than LONG_MAX (int() refuses more than 4300 digits).
-            significant = digits[:end].lstrip(b"0")
-            value = 2**63 - 1
-            if len(significant) <= 19:
-                value = min(int(significant or b"0"), value)
-            number = to_int(value)
+            # atoi stops at the first byte that is not a digit.
+            number = atoi(data[last + 1 :].decode("utf-8"))
         return SplitReference(
             data[: last + 1].decode("utf-8"), number, data[last + 1 :].decode("utf-8"), False
         )

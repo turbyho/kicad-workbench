@@ -7,6 +7,8 @@ the code of KiCad step by step. A Python str index is one Unicode code point,
 as a wxString index on Linux.
 """
 
+from .c_numbers import strtol
+
 _ESCAPES = {
     "dblquote": '"',
     "quote": "'",
@@ -24,8 +26,6 @@ _ESCAPES = {
     "brace": "{",
 }
 _DIGITS = "0123456789"
-# wxString::ToLong gives LONG_MAX for a number that is too large (64-bit Linux).
-_LONG_MAX = 2**63 - 1
 
 
 def unescape_string(text: str) -> str:
@@ -83,14 +83,6 @@ def _escaped(text: str, pos: int) -> bool:
     return count % 2 == 1
 
 
-def _to_long(digits: str) -> int:
-    """wxString::ToLong of ASCII digits: 0 for no digit, LONG_MAX on overflow."""
-    significant = digits.lstrip("0")
-    # More than 19 digits is more than LONG_MAX. int() also refuses a text of more
-    # than 4300 digits.
-    return _LONG_MAX if len(significant) > 19 else min(int(significant or "0"), _LONG_MAX)
-
-
 def parse_bus_vector(text: str) -> bool:
     """NET_SETTINGS::ParseBusVector: PREFIX[n..m]SUFFIX, with n != m."""
     n = len(text)
@@ -140,7 +132,8 @@ def parse_bus_vector(text: str) -> bool:
     digits = ""
     while i < n:
         if text[i] == "." and i + 1 < n and text[i + 1] == ".":
-            begin = _to_long(digits)
+            # wxString::ToLong (wcstol) of the digits: also LONG_MAX on overflow.
+            begin = strtol(digits)
             i += 2
             break
         if text[i] not in _DIGITS:
@@ -152,7 +145,7 @@ def parse_bus_vector(text: str) -> bool:
         return False
     while i < n:
         if text[i] == "]":
-            end = _to_long(digits)
+            end = strtol(digits)
             i += 1
             break
         if text[i] not in _DIGITS:

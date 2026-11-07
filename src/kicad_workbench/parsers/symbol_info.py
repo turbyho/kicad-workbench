@@ -23,11 +23,11 @@ rules of ``SCH_IO_KICAD_SEXPR_PARSER::parseLibSymbol`` and
   style, number (numbers in it as numbers), position.
 """
 
-import re
 from dataclasses import dataclass
 from functools import cmp_to_key
 
 from ..errors import InputError
+from .c_numbers import atoi
 from .kicad_fields import SYMBOL_FIELD_NAMES
 from .kicad_versions import DECLARED_BODY_STYLES, KicadFileError, file_text
 from .lib_symbols import (
@@ -89,7 +89,6 @@ _SHAPE_RANK = {name: rank for rank, name in enumerate(PIN_SHAPES)}
 _ORIENTATION_RANK = {name: rank for rank, name in enumerate(_ORIENTATION_ORDER)}
 # The drawings of a symbol (ParseSymbolDrawItem).
 _DRAW_ITEMS = ("arc", "bezier", "circle", "pin", "polyline", "rectangle", "text", "text_box")
-_LEADING_INT = re.compile(r"[+-]?\d+")
 # The defaults of LIB_SYMBOL and SCH_PIN: 100 mil and 20 mil.
 _PIN_LENGTH = 25400
 _PIN_NAME_OFFSET = 5080
@@ -264,10 +263,10 @@ def _pin(root: LibrarySymbol, pin: Node, unit: int, body_style: int) -> SymbolPi
             continue
         if item.head == "at":
             x, y = iu(_number(root, item, 0)), iu(_number(root, item, 1))
-            # parseInt: strtol of the number.
-            angle = _LEADING_INT.match(item.value(2) or "")
+            # NeedNUMBER, then parseInt: (int)strtol of the number.
             _number(root, item, 2)
-            orientation = _ORIENTATIONS.get(int(angle.group()) if angle else -1, "")
+            angle = atoi(item.value(2) or "")
+            orientation = _ORIENTATIONS.get(angle, "")
             if not orientation:
                 raise _error(
                     root, f"has a pin with the angle {item.value(2)}, not 0, 90, 180 or 270"

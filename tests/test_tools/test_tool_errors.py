@@ -298,12 +298,11 @@ def test_numbers_of_more_than_4300_digits():
     # int() refuses a text of more than 4300 digits: the readers give the value of
     # KiCad (LONG_MAX, out of range, or the order of the numbers) with no int().
     from kicad_workbench.parsers.annotation import split_reference
-    from kicad_workbench.parsers.bus_names import _to_long
-    from kicad_workbench.parsers.c_numbers import to_long
+    from kicad_workbench.parsers.c_numbers import LONG_MAX, strtol, to_long
     from kicad_workbench.parsers.symbol_info import str_num_cmp
 
     many = "9" * 5000
-    assert _to_long(many) == 2**63 - 1 and _to_long("0" * 5000 + "7") == 7
+    assert strtol(many) == LONG_MAX and strtol("0" * 5000 + "7") == 7
     assert to_long(many) is None and to_long("0" * 5000 + "7") == 7
     assert split_reference("R" + many).number == split_reference("R" + "9" * 20).number
     assert split_reference("R" + "0" * 5000 + "7").number == 7

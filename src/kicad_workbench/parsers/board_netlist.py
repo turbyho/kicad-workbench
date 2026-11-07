@@ -13,12 +13,10 @@ its (pin ...), (pinfunction ...) and (pintype ...) to the component of its
 reference.
 """
 
-import re
 from dataclasses import dataclass, field
 
+from .c_numbers import strtol
 from .sexpr import Node, parse
-
-_LEADING_INT = re.compile(r"\s*[+-]?\d+")
 
 
 @dataclass(frozen=True)
@@ -62,8 +60,7 @@ def read_board_netlist(text: str) -> list[NetlistComponent]:
     section = root.first("nets")
     for net in section.children("net") if section is not None else []:
         # strtol( code ) >= 1
-        code = _LEADING_INT.match(_text(net, "code"))
-        if code is None or int(code.group()) < 1:
+        if strtol(_text(net, "code")) < 1:
             continue
         for node in net.children("node"):
             component = components.get(_text(node, "ref"))

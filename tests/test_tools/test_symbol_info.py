@@ -145,6 +145,17 @@ class TestBodyStyles:
 
 
 class TestPins:
+    def test_angle_out_of_the_range_of_an_int(self, info, long64):
+        # parseInt: (int)strtol. Measured with kicad-cli 8.0.9 to 10.0.7 on Linux:
+        # "4294967386" (2**32 + 90) is 90 (spike/kicad-versions/c_numbers_check.py).
+        result = info('(symbol "U" (pin input line (at 0 0 4294967386) (number "1")))')
+        assert result.pins[0].orientation == "up"
+
+    def test_angle_out_of_the_range_of_a_long(self, info, long32):
+        # Windows (a long of 32 bits): strtol gives LONG_MAX, not an angle of KiCad.
+        with pytest.raises(KicadFileError, match="the angle 4294967386"):
+            info('(symbol "U" (pin input line (at 0 0 4294967386) (number "1")))')
+
     def test_pin(self, info):
         result = info(
             """(symbol "U" (symbol "U_0_1"

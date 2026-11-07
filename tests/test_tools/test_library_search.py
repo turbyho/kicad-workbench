@@ -11,12 +11,14 @@ from pathlib import Path
 
 import pytest
 
+from kicad_workbench.parsers import lib_symbols
 from kicad_workbench.tools import library as library_tools
 from kicad_workbench.utils import library_index, library_tables, user_files
 from kicad_workbench.utils.kicad_cli import get_kicad_version
 from kicad_workbench.utils.library_index import LibraryItem, library_items, search
 from kicad_workbench.utils.library_tables import LibraryRow
 
+from .file_times import move_clock_forward
 from .test_sch_hierarchy import sch
 
 
@@ -224,6 +226,7 @@ class TestIndexCache:
     def test_index_on_disk_is_used_after_a_restart(self, tmp_path, cache, monkeypatch):
         path = tmp_path / "Lib.kicad_sym"
         self.write(path, "one")
+        move_clock_forward(monkeypatch)
         library_items("symbol", row("Lib", path))
         assert len(list(cache.glob("symbol-*.json"))) == 1
         assert not list(cache.glob("*.tmp"))
@@ -243,7 +246,9 @@ class TestIndexCache:
         items, _ = library_items("symbol", row("Lib", path))
         assert items[0].description == "one"
 
-    def test_changed_file_is_read_again(self, tmp_path):
+    def test_changed_file_is_read_again(self, tmp_path, monkeypatch):
+        # The files are old: only the stamp shows the changes.
+        move_clock_forward(monkeypatch)
         path = tmp_path / "Lib.kicad_sym"
         self.write(path, "one")
         library_items("symbol", row("Lib", path))
@@ -255,7 +260,64 @@ class TestIndexCache:
         os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
         assert library_items("symbol", row("Lib", path))[0][0].description == "eight"
 
-    def test_new_file_in_directory_library(self, tmp_path):
+    def same_stamp(self, path: Path, monkeypatch, reliable: bool) -> None:
+        """Give each read of the library the current stamp of path."""
+        stamp = lib_symbols.files_stamp([path])[0]
+        monkeypatch.setattr(lib_symbols, "files_stamp", lambda files: (stamp, reliable))
+
+    def test_change_with_the_same_stamp_is_read(self, tmp_path, cache, monkeypatch):
+        # Two writes in one interval of the time resolution of the file system
+        # can give the same stamp. For a new file, the index also compares the
+        # content, in memory and on the disk.
+        path = tmp_path / "Lib.kicad_sym"
+        self.write(path, "one")
+        self.same_stamp(path, monkeypatch, reliable=False)
+        assert library_items("symbol", row("Lib", path))[0][0].description == "one"
+        self.write(path, "two")
+        assert library_items("symbol", row("Lib", path))[0][0].description == "two"
+        # A new server process: the index on the disk has the digest of "two".
+        monkeypatch.setattr(library_index, "_memory", {})
+        assert library_items("symbol", row("Lib", path))[0][0].description == "two"
+        self.write(path, "six")
+        monkeypatch.setattr(library_index, "_memory", {})
+        assert library_items("symbol", row("Lib", path))[0][0].description == "six"
+
+    def test_digest_only_until_the_stamp_is_reliable(self, tmp_path, cache, monkeypatch):
+        path = tmp_path / "Lib.kicad_sym"
+        self.write(path, "one")
+        self.same_stamp(path, monkeypatch, reliable=False)
+        library_items("symbol", row("Lib", path))
+        key = ("symbol", path, "Lib")
+        assert library_index._memory[key][1] is not None
+        cache_file = next(cache.glob("symbol-*.json"))
+        assert json.loads(cache_file.read_text(encoding="utf-8"))["digest"] is not None
+        self.same_stamp(path, monkeypatch, reliable=True)
+        assert library_items("symbol", row("Lib", path))[0][0].description == "one"
+        assert library_index._memory[key][1] is None
+        # A new server process: the index on the disk is written again with no
+        # digest.
+        monkeypatch.setattr(library_index, "_memory", {})
+        assert library_items("symbol", row("Lib", path))[0][0].description == "one"
+        assert json.loads(cache_file.read_text(encoding="utf-8"))["digest"] is None
+
+        def no_digest(self):
+            raise AssertionError("the content was compared")
+
+        monkeypatch.setattr(lib_symbols.LibraryFiles, "digest", property(no_digest))
+        assert library_items("symbol", row("Lib", path))[0][0].description == "one"
+        monkeypatch.setattr(library_index, "_memory", {})
+        assert library_items("symbol", row("Lib", path))[0][0].description == "one"
+
+    def test_index_of_an_old_file_has_no_digest(self, tmp_path, cache, monkeypatch):
+        path = tmp_path / "Lib.kicad_sym"
+        self.write(path, "one")
+        move_clock_forward(monkeypatch)
+        library_items("symbol", row("Lib", path))
+        cache_file = next(cache.glob("symbol-*.json"))
+        assert json.loads(cache_file.read_text(encoding="utf-8"))["digest"] is None
+
+    def test_new_file_in_directory_library(self, tmp_path, monkeypatch):
+        move_clock_forward(monkeypatch)
         path = tmp_path / "Lib.pretty"
         path.mkdir()
         (path / "A.kicad_mod").write_text(footprint("A"), encoding="utf-8")
@@ -266,6 +328,7 @@ class TestIndexCache:
     def test_bad_index_file_is_replaced(self, tmp_path, cache, monkeypatch):
         path = tmp_path / "Lib.kicad_sym"
         self.write(path, "one")
+        move_clock_forward(monkeypatch)
         library_items("symbol", row("Lib", path))
         cache_file = next(cache.glob("symbol-*.json"))
         good = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -292,7 +355,9 @@ class TestIndexCache:
         text = "Odpor 电阻 مقاومة Ω"
         path = tmp_path / "Knihovna_电阻.kicad_sym"
         self.write(path, text)
+        move_clock_forward(monkeypatch)
         library_items("symbol", row("Lib", path))
+        assert len(list(cache.glob("symbol-*.json"))) == 1
         monkeypatch.setattr(library_index, "_memory", {})
         assert library_items("symbol", row("Lib", path))[0][0].description == text
 
@@ -301,6 +366,7 @@ class TestConcurrentReads:
     def test_one_read_for_parallel_calls(self, tmp_path, cache, monkeypatch):
         path = tmp_path / "Lib.kicad_sym"
         path.write_text(symbol_lib(symbol("A")), encoding="utf-8")
+        move_clock_forward(monkeypatch)
         reads = []
         real_read = library_index._read
 
@@ -315,6 +381,27 @@ class TestConcurrentReads:
         assert len(reads) == 1
         assert all([item.name for item in items] == ["A"] for items, _ in results)
         assert [file.suffix for file in cache.iterdir()] == [".json"]
+
+    def test_one_read_for_parallel_calls_of_a_new_file(self, tmp_path, cache, monkeypatch):
+        # The stamp of a new file is not reliable. The calls that wait compare
+        # the content, and do not read the library again.
+        path = tmp_path / "Lib.kicad_sym"
+        path.write_text(symbol_lib(symbol("A")), encoding="utf-8")
+        stamp = lib_symbols.files_stamp([path])[0]
+        monkeypatch.setattr(lib_symbols, "files_stamp", lambda files: (stamp, False))
+        reads = []
+        real_read = library_index._read
+
+        def slow_read(*args):
+            reads.append(args)
+            time.sleep(0.2)
+            return real_read(*args)
+
+        monkeypatch.setattr(library_index, "_read", slow_read)
+        with ThreadPoolExecutor(4) as pool:
+            results = list(pool.map(lambda _: library_items("symbol", row("Lib", path)), range(4)))
+        assert len(reads) == 1
+        assert all([item.name for item in items] == ["A"] for items, _ in results)
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions")

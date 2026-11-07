@@ -1,5 +1,8 @@
 """Tests for parsers/lib_symbols.py: library symbols as KiCad copies them into a schematic."""
 
+import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -8,6 +11,7 @@ from kicad_workbench.parsers import lib_symbols
 from kicad_workbench.parsers.kicad_versions import KicadFileError
 from kicad_workbench.parsers.lib_symbols import (
     PlacedField,
+    files_stamp,
     flatten,
     placed_fields,
     read_library,
@@ -17,11 +21,19 @@ from kicad_workbench.parsers.lib_symbols import (
 )
 from kicad_workbench.parsers.sexpr import Node, parse, property_field
 
+from .file_times import move_clock_forward
+
 PINS = (
     '(symbol "R_0_1" (rectangle (start -1 -2) (end 1 2)))\n'
     '(symbol "R_1_1" (pin passive line (at 0 3 270) (length 1) (name "~") (number "1"))\n'
     '  (pin passive line (at 0 -3 90) (length 1) (name "~") (number "2")))'
 )
+
+
+@pytest.fixture(autouse=True)
+def empty_cache(monkeypatch):
+    """An empty library cache for each test."""
+    monkeypatch.setattr(lib_symbols, "_cache", {})
 
 
 def prop(name: str, value: str, extra: str = "") -> str:
@@ -396,7 +408,7 @@ class TestReadLibrary:
         assert symbols["R"].other_files == ()
 
     def test_cache_keeps_the_library_that_was_used_last(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(lib_symbols, "_cache", {})
+        move_clock_forward(monkeypatch)
         paths = []
         for index in range(lib_symbols._CACHE_SIZE + 1):
             path = tmp_path / f"L{index}.kicad_sym"
@@ -409,13 +421,62 @@ class TestReadLibrary:
         assert read_library(paths[0]) is first
         assert paths[1] not in lib_symbols._cache
 
-    def test_cache_until_a_file_changes(self, tmp_path):
+    def test_cache_until_a_file_changes(self, tmp_path, monkeypatch):
         path = tmp_path / "Device.kicad_sym"
         path.write_text(library(ROOT), encoding="utf-8")
+        move_clock_forward(monkeypatch)
         first = read_library(path)
         assert read_library(path) is first
         path.write_text(library(ROOT, symbol("R_US", "R")), encoding="utf-8")
         assert sorted(read_library(path)) == ["R", "R_US"]
+
+    def test_change_with_the_same_stamp_is_read(self, tmp_path, monkeypatch):
+        # Two writes in one interval of the time resolution of the file system
+        # can give the same stamp. For a new file, the cache also compares the
+        # content, thus it gives the symbols of the second write.
+        path = tmp_path / "Device.kicad_sym"
+        path.write_text(library(ROOT), encoding="utf-8")
+        stamp = files_stamp([path])[0]
+        monkeypatch.setattr(lib_symbols, "files_stamp", lambda files: (stamp, False))
+        first = read_library(path)
+        assert read_library(path) is first
+        path.write_text(library(ROOT.replace('"Resistor"', '"Resistox"')), encoding="utf-8")
+        assert dict(fields(read_library(path)["R"].node))["Description"] == "Resistox"
+
+    def test_digest_only_until_the_stamp_is_reliable(self, tmp_path, monkeypatch):
+        path = tmp_path / "Device.kicad_sym"
+        path.write_text(library(ROOT), encoding="utf-8")
+        stamp = files_stamp([path])[0]
+        monkeypatch.setattr(lib_symbols, "files_stamp", lambda files: (stamp, False))
+        first = read_library(path)
+        assert lib_symbols._cache[path][1] is not None
+        monkeypatch.setattr(lib_symbols, "files_stamp", lambda files: (stamp, True))
+        assert read_library(path) is first
+        assert lib_symbols._cache[path][1] is None
+
+        def no_digest(self):
+            raise AssertionError("the content was compared")
+
+        monkeypatch.setattr(lib_symbols.LibraryFiles, "digest", property(no_digest))
+        assert read_library(path) is first
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no change time")
+    def test_replaced_file_with_the_old_time_and_size(self, tmp_path, monkeypatch):
+        # A program (for example cp -p) can write a file and give it the old
+        # modification time. The change time shows the change.
+        path = tmp_path / "Device.kicad_sym"
+        path.write_text(library(ROOT), encoding="utf-8")
+        move_clock_forward(monkeypatch)
+        first = read_library(path)
+        assert read_library(path) is first
+        stat = path.stat()
+        # The second write must be in a later tick of the kernel clock (10 ms
+        # or less), else it has the same change time.
+        time.sleep(0.05)
+        path.write_text(library(ROOT.replace('"Resistor"', '"Resistox"')), encoding="utf-8")
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        assert (path.stat().st_mtime_ns, path.stat().st_size) == (stat.st_mtime_ns, stat.st_size)
+        assert dict(fields(read_library(path)["R"].node))["Description"] == "Resistox"
 
     def test_library_with_no_version(self, tmp_path):
         path = tmp_path / "Device.kicad_sym"
@@ -425,6 +486,30 @@ class TestReadLibrary:
     def test_missing_file(self, tmp_path):
         with pytest.raises(OSError):
             read_library(Path(tmp_path / "none.kicad_sym"))
+
+
+class TestFilesStamp:
+    def test_stamp(self, tmp_path):
+        path = tmp_path / "Device.kicad_sym"
+        path.write_text("(kicad_symbol_lib)", encoding="utf-8")
+        stat = path.stat()
+        change_ns = 0 if sys.platform == "win32" else stat.st_ctime_ns
+        stamp, _ = files_stamp([path])
+        assert stamp == [["Device.kicad_sym", stat.st_mtime_ns, change_ns, stat.st_ino, 18]]
+
+    def test_reliable_only_for_a_file_older_than_2_s(self, tmp_path, monkeypatch):
+        path = tmp_path / "Device.kicad_sym"
+        path.write_text("(kicad_symbol_lib)", encoding="utf-8")
+        stamp, _ = files_stamp([path])
+        newest_ns = max(stamp[0][1], stamp[0][2])
+        for now_ns, reliable in (
+            (newest_ns + 3_000_000_000, True),
+            (newest_ns + 1_000_000_000, False),
+            # A time in the future: a clock that is not correct.
+            (newest_ns - 3_600_000_000_000, False),
+        ):
+            monkeypatch.setattr(lib_symbols, "_now_ns", lambda now_ns=now_ns: now_ns)
+            assert files_stamp([path])[1] is reliable
 
 
 def test_body_points_of_the_graphic_items():

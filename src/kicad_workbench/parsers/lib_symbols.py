@@ -27,12 +27,15 @@ the schematic as in the library, when kicad_versions.symbol_library_problem
 finds no problem for each symbol of the chain.
 """
 
+import hashlib
 import re
+import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..utils.kicad_text import read_as_kicad
+from ..utils.kicad_text import decode_as_kicad
 from .bus_names import unescape_string
 from .kicad_fields import SYMBOL_FIELD_NAMES
 from .kicad_versions import KicadFileError, file_text, header_version
@@ -87,24 +90,131 @@ def library_files(path: Path) -> list[Path]:
     return [path]
 
 
-def files_stamp(files: list[Path]) -> list:
-    """Return the name, time and size of each file. A change makes a cache old.
+# A file system keeps the time of a file with a limited resolution: 2 s on FAT,
+# one tick of the kernel clock (1 ms to 10 ms) on ext4. Two writes in one such
+# interval can give the same time, and with the same size also the same stamp.
+# Thus only the stamp of a file that is older than this interval shows each
+# later change (git does the same for "racily clean" files).
+_RACY_NS = 2_000_000_000
+
+
+def _now_ns() -> int:
+    """Return the time of the clock. The tests replace this function."""
+    return time.time_ns()
+
+
+def files_stamp(files: list[Path]) -> tuple[list, bool]:
+    """Return the stamp of the files of a library. A change makes a cache old.
+
+    The stamp holds the name, the modification time, the change time, the
+    inode number and the size of each file. The change time shows also a
+    file that a program replaced and gave the old modification time (for
+    example cp -p). Windows has no change time: there, the value is 0.
+
+    The check of the age uses the clock of this computer, and the file system
+    sets the times of the files. Two limits come from this:
+
+    - A time in the future (a FAT disk with local times east of UTC, or a
+      server clock that is ahead) makes the stamp not reliable until the time
+      is in the past. Until then, each use of a cache reads all files of the
+      library to compare their digest. It does not parse them again.
+    - When the clock of a file server is more than 2 s behind this clock, a
+      new file can look old. Two writes with the same size in one tick of the
+      server can then give a stamp that does not change.
+
+    Returns:
+        (stamp, reliable). reliable is True when each file is older than the
+        resolution of the time of the file system. Only then does each later
+        change give a different stamp. Else a cache must also compare the
+        content (LibraryFiles).
 
     Raises:
         OSError: A file cannot be read.
     """
+    read_ns = _now_ns()
     stamp = []
     for file in files:
         stat = file.stat()
-        stamp.append([file.name, stat.st_mtime_ns, stat.st_size])
-    return stamp
+        change_ns = 0 if sys.platform == "win32" else stat.st_ctime_ns
+        stamp.append([file.name, stat.st_mtime_ns, change_ns, stat.st_ino, stat.st_size])
+    reliable = all(
+        read_ns - max(mtime_ns, change_ns) >= _RACY_NS for _, mtime_ns, change_ns, _, _ in stamp
+    )
+    return stamp, reliable
+
+
+class LibraryFiles:
+    """The files of a library for a cache: their stamp, and their content.
+
+    The object reads the content only when the cache needs it, and only one
+    time. Thus the comparison of the digest and the parse use the same bytes.
+    """
+
+    def __init__(self, files: list[Path]):
+        """Get the stamp of the files.
+
+        Raises:
+            OSError: A file cannot be read.
+        """
+        self.files = files
+        self.stamp, self.reliable = files_stamp(files)
+        self._contents: list[bytes | OSError] | None = None
+        self._digest: str | None = None
+
+    @property
+    def contents(self) -> list[bytes | OSError]:
+        """The bytes of each file, or the error when a file cannot be read."""
+        if self._contents is None:
+            contents: list[bytes | OSError] = []
+            for file in self.files:
+                try:
+                    contents.append(file.read_bytes())
+                except OSError as e:
+                    contents.append(e)
+            self._contents = contents
+        return self._contents
+
+    @property
+    def digest(self) -> str:
+        """The SHA-256 of the contents. A file that cannot be read has a mark."""
+        if self._digest is None:
+            digest = hashlib.sha256()
+            for data in self.contents:
+                if isinstance(data, OSError):
+                    digest.update(b"\xff" * 8)
+                else:
+                    digest.update(len(data).to_bytes(8, "little"))
+                    digest.update(data)
+            self._digest = digest.hexdigest()
+        return self._digest
+
+    def matches(self, stamp: list, digest: str | None) -> bool:
+        """Return True when a cache entry with this stamp and digest is current.
+
+        An entry has a digest when its stamp was not reliable (files_stamp).
+        """
+        return stamp == self.stamp and (digest is None or digest == self.digest)
+
+    def digest_to_keep(self) -> str | None:
+        """The digest for a new cache entry: None when the stamp is reliable."""
+        return None if self.reliable else self.digest
 
 
 # The libraries that read_library used last, the last at the end:
-# path -> (stamp, symbols).
+# path -> (stamp, digest, symbols). The digest is None when the stamp was
+# reliable. Else it is the SHA-256 of the files that gave the symbols.
 _CACHE_SIZE = 8
-_cache: dict[Path, tuple[list, dict[str, "LibrarySymbol"]]] = {}
+_cache: dict[Path, tuple[list, str | None, dict[str, "LibrarySymbol"]]] = {}
 _cache_lock = threading.Lock()
+
+
+def _keep(path: Path, entry: tuple) -> None:
+    """Put a library at the end of the cache, and remove the oldest ones."""
+    with _cache_lock:
+        _cache.pop(path, None)
+        _cache[path] = entry
+        while len(_cache) > _CACHE_SIZE:
+            del _cache[next(iter(_cache))]
 
 
 def read_library(path: Path) -> dict[str, LibrarySymbol]:
@@ -112,7 +222,8 @@ def read_library(path: Path) -> dict[str, LibrarySymbol]:
 
     In a file, a later symbol replaces an earlier symbol with the same name, as
     in KiCad. A cache keeps the last libraries until one of their files
-    changes.
+    changes. For a file that changed less than 2 s before the read, the cache
+    also compares the content (files_stamp, LibraryFiles).
 
     Raises:
         OSError, KiCadEncodingError: A file cannot be read.
@@ -120,16 +231,18 @@ def read_library(path: Path) -> dict[str, LibrarySymbol]:
             library, also when only one file of a directory library has an
             error (SCH_IO_KICAD_SEXPR_LIB_CACHE::Load).
     """
-    files = library_files(path)
-    stamp = files_stamp(files)
+    library = LibraryFiles(library_files(path))
     with _cache_lock:
-        cached = _cache.pop(path, None)
-        if cached is not None and cached[0] == stamp:
-            _cache[path] = cached
-            return cached[1]
+        cached = _cache.get(path)
+    if cached is not None and library.matches(cached[0], cached[1]):
+        # When the stamp is reliable now, the next read needs no digest.
+        _keep(path, (library.stamp, library.digest_to_keep(), cached[2]))
+        return cached[2]
     found: dict[str, list[LibrarySymbol]] = {}
-    for file in files:
-        text = read_as_kicad(file)
+    for file, data in zip(library.files, library.contents, strict=True):
+        if isinstance(data, OSError):
+            raise data
+        text = decode_as_kicad(data, file)
         version = header_version(text, "kicad_symbol_lib")
         in_file: dict[str, LibrarySymbol] = {}
         for node in parse(text).children("symbol"):
@@ -142,10 +255,7 @@ def read_library(path: Path) -> dict[str, LibrarySymbol]:
         last = versions[-1]
         others = tuple(symbol.file for symbol in versions[:-1])
         symbols[name] = LibrarySymbol(name, last.node, last.file, last.version, others)
-    with _cache_lock:
-        _cache[path] = (stamp, symbols)
-        while len(_cache) > _CACHE_SIZE:
-            del _cache[next(iter(_cache))]
+    _keep(path, (library.stamp, library.digest_to_keep(), symbols))
     return symbols
 
 

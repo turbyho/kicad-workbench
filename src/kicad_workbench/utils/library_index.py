@@ -3,8 +3,10 @@
 A full read of the libraries of KiCad 10 takes some 17 s. The index keeps the
 name, the description and the keywords of each item. It is in memory and in
 the cache directory of the user, thus a restart of the server does not read
-all libraries again. A library is read again only when the time or the size
-of one of its files changed.
+all libraries again. A library is read again only when the stamp of one of
+its files changed: the modification time, the change time, the inode number
+or the size. For a file that changed less than 2 s before the read, the index
+also compares the content (lib_symbols.files_stamp, LibraryFiles).
 
 - A symbol library is a .kicad_sym file, or a directory of .kicad_sym files
   (KiCad 10). In a directory, the index reads the files sorted by name, and a
@@ -30,18 +32,21 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..parsers.lib_symbols import files_stamp, library_files, parent_name, symbol_name
+from ..parsers.lib_symbols import LibraryFiles, library_files, parent_name, symbol_name
 from ..parsers.sexpr import Node, SExprError, parse, property_field
-from .kicad_text import KiCadEncodingError, read_as_kicad
+from .kicad_text import KiCadEncodingError, decode_as_kicad
 from .library_tables import LibraryRow
 from .user_files import cache_home, write_atomic
 
 # Change the version when the content of an index entry changes.
-_INDEX_VERSION = 3
+# Version 4: the stamp has the change time and the inode number, and an index of
+# a file that changed just before the read has the digest of the files.
+_INDEX_VERSION = 4
 _EXTENSIONS = {"symbol": ".kicad_sym", "footprint": ".kicad_mod"}
 _ENTRY_KEYS = ("name", "description", "keywords", "footprint", "description_field")
-# The items of each library: key -> (stamp, items, problems).
-_memory: dict[tuple[str, Path, str], tuple[list, list["LibraryItem"], list[str]]] = {}
+# The items of each library: key -> (stamp, digest, items, problems). The digest
+# is None when the stamp was reliable (lib_symbols.files_stamp).
+_memory: dict[tuple[str, Path, str], tuple[list, str | None, list["LibraryItem"], list[str]]] = {}
 # One read of a library at a time: the search tools run in worker threads.
 _locks: dict[tuple[str, Path, str], threading.Lock] = {}
 _locks_lock = threading.Lock()
@@ -138,13 +143,15 @@ def _inherit(entries: dict[str, dict], library: Path, problems: list[str]) -> No
             entry[key] = value
 
 
-def _read(kind: str, path: Path, files: list[Path]) -> tuple[list[dict], list[str]]:
+def _read(kind: str, path: Path, library: LibraryFiles) -> tuple[list[dict], list[str]]:
     """Read the items of the library files. Return (entries, problems)."""
     entries: dict[str, dict] = {}
     problems = []
-    for file in files:
+    for file, data in zip(library.files, library.contents, strict=True):
         try:
-            root = parse(read_as_kicad(file))
+            if isinstance(data, OSError):
+                raise data
+            root = parse(decode_as_kicad(data, file))
         except (OSError, KiCadEncodingError, SExprError) as e:
             problems.append(f"{file} cannot be read: {e}")
             continue
@@ -175,7 +182,13 @@ def _cache_file(kind: str, path: Path) -> Path:
     return cache_dir() / f"{kind}-{digest}.json"
 
 
-def _load_cache(file: Path, path: Path, stamp: list) -> tuple[list[dict], list[str]] | None:
+def _load_cache(
+    file: Path, path: Path, library: LibraryFiles
+) -> tuple[list[dict], list[str], str | None] | None:
+    """Return (entries, problems, digest) of the index on the disk, or None.
+
+    An index with a digest is used only when the files have this digest now.
+    """
     try:
         data = json.loads(file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -184,11 +197,11 @@ def _load_cache(file: Path, path: Path, stamp: list) -> tuple[list[dict], list[s
         not isinstance(data, dict)
         or data.get("version") != _INDEX_VERSION
         or data.get("path") != str(path)
-        or data.get("stamp") != stamp
     ):
         return None
     entries = data.get("entries")
     problems = data.get("problems")
+    digest = data.get("digest")
     # The file can be damaged: use it only when each value has its type.
     if not (
         isinstance(entries, list)
@@ -198,17 +211,23 @@ def _load_cache(file: Path, path: Path, stamp: list) -> tuple[list[dict], list[s
         )
         and isinstance(problems, list)
         and all(isinstance(problem, str) for problem in problems)
+        and (digest is None or isinstance(digest, str))
     ):
         return None
-    return entries, problems
+    if not library.matches(data.get("stamp"), digest):
+        return None
+    return entries, problems, digest
 
 
-def _save_cache(file: Path, path: Path, stamp: list, entries: list, problems: list) -> None:
+def _save_cache(
+    file: Path, path: Path, stamp: list, digest: str | None, entries: list, problems: list
+) -> None:
     """Write the index of a library. A failure only makes the next read slower."""
     data = {
         "version": _INDEX_VERSION,
         "path": str(path),
         "stamp": stamp,
+        "digest": digest,
         "entries": entries,
         "problems": problems,
     }
@@ -265,8 +284,7 @@ def library_items(kind: str, row: LibraryRow) -> tuple[list[LibraryItem], list[s
     if problem is not None:
         return [], [f"The library {row.name} {problem}"]
     try:
-        files = _files(kind, path)
-        stamp = files_stamp(files)
+        library = LibraryFiles(_files(kind, path))
     except OSError as e:
         return [], [f"The library {row.name} cannot be read: {e}"]
 
@@ -275,14 +293,19 @@ def library_items(kind: str, row: LibraryRow) -> tuple[list[LibraryItem], list[s
         lock = _locks.setdefault(key, threading.Lock())
     with lock:
         cached = _memory.get(key)
-        if cached is None or cached[0] != stamp:
+        if cached is None or not library.matches(cached[0], cached[1]):
             cache_file = _cache_file(kind, path)
-            loaded = _load_cache(cache_file, path, stamp)
+            loaded = _load_cache(cache_file, path, library)
             if loaded is None:
-                entries, problems = _read(kind, path, files)
-                _save_cache(cache_file, path, stamp, entries, problems)
+                entries, problems = _read(kind, path, library)
+                _save_cache(
+                    cache_file, path, library.stamp, library.digest_to_keep(), entries, problems
+                )
             else:
-                entries, problems = loaded
+                entries, problems, digest = loaded
+                if digest is not None and library.reliable:
+                    # The stamp is reliable now: a restart needs no digest.
+                    _save_cache(cache_file, path, library.stamp, None, entries, problems)
             items = [
                 LibraryItem(
                     row.name,
@@ -294,8 +317,11 @@ def library_items(kind: str, row: LibraryRow) -> tuple[list[LibraryItem], list[s
                 )
                 for entry in entries
             ]
-            cached = _memory[key] = (stamp, items, problems)
-    return list(cached[1]), list(cached[2])
+        else:
+            items, problems = cached[2], cached[3]
+        # When the stamp is reliable now, the next read needs no digest.
+        _memory[key] = (library.stamp, library.digest_to_keep(), items, problems)
+    return list(items), list(problems)
 
 
 # KiCad shortens a long search term (EDA_COMBINED_MATCHER::ScoreTerms).

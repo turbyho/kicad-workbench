@@ -90,8 +90,12 @@ async def setup_pcb_layout(
             return f"❌ Schematic file not found: {schematic_path}"
 
         pcb_path = sch_path.with_suffix(".kicad_pcb")
-        stamp = file_stamp(pcb_path)
-        if stamp is not None and not overwrite:
+        try:
+            pcb_path.stat()
+            board_exists = True
+        except FileNotFoundError:
+            board_exists = False
+        if board_exists and not overwrite:
             return (
                 f"❌ The board file {pcb_path} exists. This tool writes a new, "
                 "empty board, which removes all footprints, tracks and zones of the "
@@ -99,6 +103,9 @@ async def setup_pcb_layout(
                 "Ask the user if the existing board can be replaced. Only when the "
                 "user agrees, do this operation again with overwrite=True."
             )
+        # The write refuses the new board when an other program changes the
+        # board file (or makes it) after this point.
+        stamp = file_stamp(pcb_path)
 
         # The outline goes to pcbnew in millimetres (issue #17: the old code
         # wrote nanometres as millimetres, a 100 km outline).

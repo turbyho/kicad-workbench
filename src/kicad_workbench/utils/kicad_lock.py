@@ -17,6 +17,7 @@ error message tells how to remove it.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Callable
@@ -31,7 +32,7 @@ from .file_save import (
     file_locks,
     save_files,
 )
-from .kicad_text import kicad_text_bytes, write_kicad_text
+from .kicad_text import kicad_text_bytes, text_for_write, write_kicad_text
 from .sch_hierarchy import (
     PRO_SUFFIX,
     in_hierarchy,
@@ -155,7 +156,10 @@ def check_project_not_open(file_path: str | Path) -> str | None:
     return _check_file_not_open(file_path, "project", "KiCad project manager")
 
 
-FileStamp = tuple[int, int] | None
+# The stamp of a file: the SHA-256 of its bytes, or None when there is no file.
+# The time and the size of a file cannot show each change: two writes with the
+# same size in one tick of the clock of the file system give the same time.
+FileStamp = str | None
 
 # The tools write in threads (the save flushes the file to the disk). The lock of
 # each file (file_save.file_locks) keeps the check of the stamp and the write
@@ -163,19 +167,54 @@ FileStamp = tuple[int, int] | None
 # and no change is lost. The writes of different files do not wait for each other.
 
 
-def file_stamp(path: Path) -> FileStamp:
-    """Return the modification time and the size of a file, or None if no file.
+def bytes_stamp(data: bytes) -> str:
+    """Return the stamp of the bytes of a file (FileStamp)."""
+    return hashlib.sha256(data).hexdigest()
 
-    A tool gets the stamp before it reads the file, and gives it to
-    write_schematic() or write_board(). When the stamp changed before the
-    write, an other program (for example KiCad, before it closed) saved the
-    file in the meantime, and the write would remove that save.
+
+def read_stamped(path: Path) -> tuple[bytes, str]:
+    """Return the bytes of a file and their stamp, from one read.
+
+    A tool or a parser that reads a file for a later write uses this function.
+    Thus a change between two reads cannot go unseen.
+
+    Raises:
+        OSError: The file cannot be read.
+    """
+    data = path.read_bytes()
+    return data, bytes_stamp(data)
+
+
+def file_stamp(path: Path) -> FileStamp:
+    """Return the stamp of the current bytes of a file, or None if no file.
+
+    The write functions compare it with the stamp of the bytes that the tool
+    read. When the two are different, an other program (for example KiCad,
+    before it closed) saved the file in the meantime, and the write would
+    remove that save.
+
+    Raises:
+        OSError: The file cannot be read.
     """
     try:
-        stat = path.stat()
+        data = path.read_bytes()
     except FileNotFoundError:
         return None
-    return (stat.st_mtime_ns, stat.st_size)
+    return bytes_stamp(data)
+
+
+def read_for_write_stamped(path: Path) -> tuple[str, str]:
+    """Return the text of a file that a tool changes (kicad_text.read_for_write),
+    and the stamp of the same bytes.
+
+    A tool gives the stamp to write_schematic() (read_stamped).
+
+    Raises:
+        OSError: The file cannot be read.
+        KiCadEncodingError: The file is not valid UTF-8.
+    """
+    data, stamp = read_stamped(path)
+    return text_for_write(data, path), stamp
 
 
 def _changed_error(path: Path) -> str:
@@ -186,14 +225,27 @@ def _changed_error(path: Path) -> str:
     )
 
 
+def _change_error(path: Path, stamp: FileStamp) -> str | None:
+    """Return the error when the file does not have the stamp now, or None."""
+    try:
+        current = file_stamp(path)
+    except OSError as e:
+        return (
+            f"❌ The tool cannot read the file {path} again before the write ({e}). "
+            "Thus the tool did not write the file."
+        )
+    return _changed_error(path) if current != stamp else None
+
+
 def _guarded_write(
     path: Path, content: str, stamp: FileStamp, open_error: str | None
 ) -> str | None:
     if open_error:
         return open_error
     with file_locks([path]):
-        if file_stamp(path) != stamp:
-            return _changed_error(path)
+        error = _change_error(path, stamp)
+        if error:
+            return error
         # KiCad reads and writes its files as UTF-8 on each platform. The locale
         # encoding (on Windows the code page of the region, for example cp1252, cp936
         # or cp1256) cannot encode all characters, and KiCad reads its bytes
@@ -245,7 +297,8 @@ def write_schematic(path: Path, content: str, stamp: FileStamp) -> str | None:
     Args:
         path: The .kicad_sch file.
         content: The new content of the file.
-        stamp: The file_stamp() of the file before the tool read it.
+        stamp: The stamp of the bytes that the tool read
+            (read_for_write_stamped).
 
     Returns:
         None after the write. Else, the error message for the LLM.
@@ -278,7 +331,7 @@ def write_schematics(
 
     Args:
         texts: The new text of each file.
-        stamps: The file_stamp() of each file before the tool read it.
+        stamps: The stamp of the bytes of each file that the tool read.
 
     Returns:
         (the written files, warnings), or the error message for the LLM. A
@@ -292,9 +345,7 @@ def write_schematics(
         return f"❌ {e} Give each sheet file one name."
     with file_locks(files):
         for path in files:
-            error = _schematic_error(path, texts[path])
-            if not error and file_stamp(path) != stamps[path]:
-                error = _changed_error(path)
+            error = _schematic_error(path, texts[path]) or _change_error(path, stamps[path])
             if error:
                 return f"❌ The tool wrote no file: {error.removeprefix('❌ ')}"
         data = []
@@ -318,8 +369,8 @@ def write_board(path: Path, content: str, stamp: FileStamp) -> str | None:
     Args:
         path: The .kicad_pcb file.
         content: The new content of the file.
-        stamp: The file_stamp() of the file before the tool read it, or
-            before the tool made the new content.
+        stamp: The stamp of the bytes of the file that the tool read, or the
+            file_stamp() before the tool made the new content.
 
     Returns:
         None after the write. Else, the error message for the LLM.

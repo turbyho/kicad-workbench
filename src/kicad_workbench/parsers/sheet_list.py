@@ -42,8 +42,8 @@ from functools import cmp_to_key
 from pathlib import Path
 
 from ..errors import InputError
-from ..utils.kicad_lock import FileStamp, file_stamp
-from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
+from ..utils.kicad_lock import FileStamp, read_stamped
+from ..utils.kicad_text import KiCadEncodingError, decode_as_kicad
 from ..utils.sch_hierarchy import TopLevelSheet, expand_text_variables
 from .kicad_fields import FieldRules, rules_for_file, sheet_fields
 from .kicad_versions import schematic_version
@@ -214,7 +214,7 @@ class Screen:
 
     file: Path
     root: Node
-    stamp: FileStamp  # before the read (kicad_lock.file_stamp)
+    stamp: FileStamp  # of the bytes that the parser read (kicad_lock.read_stamped)
     version: int
     rules: FieldRules
     library: dict[str, Node]  # the definitions of lib_symbols
@@ -431,8 +431,8 @@ def _read_screen(file: Path, kicad: int) -> tuple[Screen, str | None]:
         KicadFileError: The file has a version that the server does not know,
             or KiCad cannot read a sheet field.
     """
-    stamp = file_stamp(file)
-    root = parse(read_as_kicad(file))
+    data, stamp = read_stamped(file)
+    root = parse(decode_as_kicad(data, file))
     rules = rules_for_file(root)
     screen = Screen(file, root, stamp, schematic_version(root), rules, definitions(root))
     screen.kiids = parsed_kiids(root, kicad)

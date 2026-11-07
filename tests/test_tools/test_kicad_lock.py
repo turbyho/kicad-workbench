@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sys
 
 import pytest
 
@@ -19,6 +20,7 @@ from kicad_workbench.utils.kicad_lock import (
     check_schematic_not_open,
     file_stamp,
     lock_file_path,
+    read_for_write_stamped,
     write_board,
     write_schematic,
 )
@@ -252,12 +254,51 @@ class TestWriteAfterAChange:
 
     def test_schematic(self, board):
         root, _ = board
-        stamp = file_stamp(root)
+        _, stamp = read_for_write_stamped(root)
         root.write_text(sch("saved/by/kicad.kicad_sch"), encoding="utf-8")
-        os.utime(root, ns=(stamp[0] + 1_000_000, stamp[0] + 1_000_000))
         error = write_schematic(root, NEW_SCHEMATIC, stamp)
         assert error is not None and "changed after this tool read it" in error
         assert "saved/by/kicad" in root.read_text(encoding="utf-8")
+
+    def test_change_with_the_same_time_and_size(self, board):
+        # Two writes with the same size in one tick of the clock of the file
+        # system give the same time. The stamp of the bytes shows the change.
+        root, _ = board
+        _, stamp = read_for_write_stamped(root)
+        stat = root.stat()
+        data = root.read_bytes()
+        changed = data[:-1] + (b" " if data[-1:] != b" " else b"\n")
+        root.write_bytes(changed)
+        os.utime(root, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        assert (root.stat().st_mtime_ns, root.stat().st_size) == (stat.st_mtime_ns, stat.st_size)
+        error = write_schematic(root, NEW_SCHEMATIC, stamp)
+        assert error is not None and "changed after this tool read it" in error
+        assert root.read_bytes() == changed
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions"
+    )
+    def test_file_that_cannot_be_read_before_the_write(self, board):
+        root, _ = board
+        before = root.read_bytes()
+        _, stamp = read_for_write_stamped(root)
+        root.chmod(0)
+        try:
+            error = write_schematic(root, NEW_SCHEMATIC, stamp)
+        finally:
+            root.chmod(0o644)
+        assert error is not None and error.startswith(
+            f"❌ The tool cannot read the file {root} again before the write"
+        ), error
+        assert root.read_bytes() == before
+
+    def test_only_the_time_changed(self, board):
+        # The bytes are the same: the write removes no change of an other program.
+        root, _ = board
+        _, stamp = read_for_write_stamped(root)
+        os.utime(root, ns=(1_000_000_000, 1_000_000_000))
+        assert write_schematic(root, NEW_SCHEMATIC, stamp) is None
+        assert root.read_text(encoding="utf-8") == NEW_SCHEMATIC
 
     def test_board_made_after_the_stamp(self, tmp_path):
         pcb = tmp_path / "board.kicad_pcb"
@@ -402,7 +443,7 @@ class TestWriteInThreads:
         a, b = tmp_path / "a.kicad_sch", tmp_path / "b.kicad_sch"
         for path in (a, b):
             path.write_text(text, encoding="utf-8")
-        stamps = {a: file_stamp(a), b: (0, 0)}  # b changed after the read
+        stamps = {a: file_stamp(a), b: "0" * 64}  # b changed after the read
         new = text.replace("eeschema", "eeschema2")
         result = write_schematics({a: new, b: new}, stamps)
         assert result.startswith(f"❌ The tool wrote no file: The file {b} changed after"), result

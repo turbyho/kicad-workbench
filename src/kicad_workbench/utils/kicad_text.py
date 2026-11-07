@@ -89,7 +89,16 @@ def read_for_write(path: Path) -> str:
         OSError: The file cannot be read.
         KiCadEncodingError: The file is not valid UTF-8.
     """
-    data = path.read_bytes()
+    return text_for_write(path.read_bytes(), path)
+
+
+def text_for_write(data: bytes, path: Path) -> str:
+    """Return the text of the bytes of a KiCad file that a tool changes and writes
+    back (see read_for_write).
+
+    Raises:
+        KiCadEncodingError: The bytes are not valid UTF-8.
+    """
     try:
         return _universal_newlines(data.decode("utf-8"))
     except UnicodeDecodeError as error:

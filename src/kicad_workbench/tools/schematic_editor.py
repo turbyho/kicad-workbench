@@ -66,12 +66,12 @@ from ..parsers.sexpr import (
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.kicad_lock import (
-    file_stamp,
+    FileStamp,
+    read_for_write_stamped,
     writable_schematic_version,
     write_in_thread,
     write_schematic,
 )
-from ..utils.kicad_text import read_for_write
 from ..utils.library_lookup import LibraryLookupError, find_library_symbol
 from ..utils.sch_hierarchy import (
     PRO_SUFFIX,
@@ -854,6 +854,18 @@ async def _label_position(
     return point, text, _grid_note(settings)
 
 
+@dataclasses.dataclass(frozen=True)
+class _LabelTarget:
+    """The schematic of a new label, and the place of the label."""
+
+    content: str
+    stamp: FileStamp  # of the content (read_for_write_stamped)
+    point: Point  # IU
+    angle: int
+    where: str  # the text of the position
+    note: str  # about the project settings
+
+
 async def _resolve_label_target(
     path: Path,
     reference: str,
@@ -861,18 +873,17 @@ async def _resolve_label_target(
     x: float | None,
     y: float | None,
     snap_to_grid: bool,
-) -> tuple[str, Point, int, str, str] | str:
-    """Return the content, the position (IU), the angle, the text of the position
-    and the note about the project settings of a label, or the error.
+) -> _LabelTarget | str:
+    """Return the schematic and the place of a label, or the error.
 
     The label goes on the pin of the reference, or at explicit x, y.
     """
-    content = read_for_write(path)
+    content, stamp = read_for_write_stamped(path)
     if x is not None and y is not None:
         found = await _label_position(path, content, x, y, snap_to_grid)
         if isinstance(found, str):
             return found
-        return content, found[0], 0, found[1], found[2]
+        return _LabelTarget(content, stamp, found[0], 0, found[1], found[2])
     anchor = _pin_anchor(content, reference, pin)
     if anchor is None:
         return (
@@ -880,7 +891,8 @@ async def _resolve_label_target(
             f"component first, or pass explicit x/y coordinates."
         )
     point, angle = anchor
-    return content, point, angle, f"anchored on {reference}.{pin} at {_shown(point)}", ""
+    where = f"anchored on {reference}.{pin} at {_shown(point)}"
+    return _LabelTarget(content, stamp, point, angle, where, "")
 
 
 @mcp.tool()
@@ -930,12 +942,11 @@ async def add_hierarchical_label(
         path = Path(file_path)
         if not path.exists():
             return f"❌ The file {file_path} does not exist."
-        stamp = file_stamp(path)
-
-        resolved = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
-        if isinstance(resolved, str):
-            return resolved
-        content, point, angle, where, note = resolved
+        target = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
+        if isinstance(target, str):
+            return target
+        content, stamp, point = target.content, target.stamp, target.point
+        angle, where, note = target.angle, target.where, target.note
 
         justify = _JUSTIFY.get(angle, "left")
         entry = (
@@ -995,12 +1006,11 @@ async def add_global_label(
         path = Path(file_path)
         if not path.exists():
             return f"❌ The file {file_path} does not exist."
-        stamp = file_stamp(path)
-
-        resolved = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
-        if isinstance(resolved, str):
-            return resolved
-        content, point, angle, where, note = resolved
+        target = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
+        if isinstance(target, str):
+            return target
+        content, stamp, point = target.content, target.stamp, target.point
+        angle, where, note = target.angle, target.where, target.note
 
         justify = _JUSTIFY.get(angle, "left")
         entry = (
@@ -1086,9 +1096,7 @@ async def add_component_from_library(
         path = Path(file_path)
         if not path.exists():
             return f"❌ The file {file_path} does not exist."
-        stamp = file_stamp(path)
-
-        content = read_for_write(path)
+        content, stamp = read_for_write_stamped(path)
         version = writable_schematic_version(path, content)
         if isinstance(version, str):
             return version
@@ -1311,9 +1319,7 @@ async def add_wire(
         path = Path(file_path)
         if not path.exists():
             return f"❌ The file {file_path} does not exist."
-        stamp = file_stamp(path)
-
-        content = read_for_write(path)
+        content, stamp = read_for_write_stamped(path)
         version = writable_schematic_version(path, content)
         if isinstance(version, str):
             return version
@@ -1473,9 +1479,7 @@ async def add_label(
         path = Path(file_path)
         if not path.exists():
             return f"❌ The file {file_path} does not exist."
-        stamp = file_stamp(path)
-
-        content = read_for_write(path)
+        content, stamp = read_for_write_stamped(path)
         found = await _label_position(path, content, x, y, snap_to_grid)
         if isinstance(found, str):
             return found

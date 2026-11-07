@@ -81,9 +81,10 @@ from ..utils.schematic_settings import (
     subpart_settings,
     unknown_severity_reason,
 )
+from .c_numbers import to_int, to_long
 from .kicad_fields import symbol_field_nodes
 from .kicad_versions import file_text, kicad_release, version_triple
-from .lib_symbols import SUB_SYMBOL, unit_count
+from .lib_symbols import unit_count
 from .sch_geometry import IU_PER_MM, Point, definition_key, node_point, placed_symbols
 from .sexpr import Node
 from .sheet_list import (
@@ -97,10 +98,9 @@ from .sheet_list import (
     kiid_path,
     kiid_text,
     sort_by_page_numbers,
-    to_int,
-    to_long,
     unknown_page_order,
 )
+from .sub_symbols import sub_symbols
 
 KICAD_VERSIONS = (8, 9, 10)
 # "erc": the ERC dialog; "update": "Update PCB from Schematic" of the schematic editor
@@ -253,15 +253,16 @@ class _Symbol:
 
 def _unit_names(definition: Node) -> dict[int, str]:
     """The (unit_name ...) of each unit of a library symbol, as the parser reads
-    them: the last name of a unit wins."""
+    them: the last name of a unit wins.
+
+    Raises:
+        KicadFileError: KiCad cannot read the name of a sub-symbol.
+    """
     names: dict[int, str] = {}
-    for sub in definition.children("symbol"):
-        match = SUB_SYMBOL.search(sub.value(0, ""))
-        if match is None:
-            continue
+    for unit, _style, sub in sub_symbols(definition):
         for node in sub.children("unit_name"):
             if node.value(0) is not None:
-                names[int(match.group(1))] = node.value(0, "")
+                names[unit] = node.value(0, "")
     return names
 
 

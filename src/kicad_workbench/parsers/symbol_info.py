@@ -35,10 +35,10 @@ from .lib_symbols import (
     flattened_fields,
     footprint_filters,
     pin_number,
-    sub_symbols,
 )
 from .sch_geometry import iu
 from .sexpr import Atom, Node
+from .sub_symbols import sub_symbols
 
 # The electrical types of a pin. KiCad reads "unconnected" as "no_connect".
 PIN_TYPES = (
@@ -401,7 +401,7 @@ def symbol_info(chain: list[LibrarySymbol], kicad: int) -> SymbolInfo:
     """
     root = chain[-1]
     # The items of the root are in unit 1 with body style 1.
-    groups = [(1, 1, root.node), *sub_symbols(root)]
+    groups = [(1, 1, root.node), *sub_symbols(root.node)]
     body_styles = _body_styles(root, groups)
     style_count = max(1, len(body_styles))
 

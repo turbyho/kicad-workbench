@@ -239,7 +239,7 @@ class TestPins:
             ("(pin input line (hide maybe))", "(hide maybe), not yes or no"),
             ("(pin_names (hide))", "(hide ), not yes or no"),
             ("(pin_numbers (hide maybe))", "(hide maybe), not yes or no"),
-            ('(symbol "U_A_1")', 'a unit with the name "U_A_1"'),
+            ('(symbol "U_A_1")', "Invalid symbol unit number A_1"),
             ("(jumper_pin_groups (1 2))", "a jumper pin group"),
         ],
     )

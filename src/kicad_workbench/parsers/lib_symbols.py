@@ -40,14 +40,12 @@ from .bus_names import unescape_string
 from .kicad_fields import SYMBOL_FIELD_NAMES
 from .kicad_versions import KicadFileError, file_text, header_version
 from .sexpr import Node, edited, parse, property_atoms, quote
+from .sub_symbols import sub_symbols, symbol_name
 
 _FLAGS = ("exclude_from_sim", "in_bom", "on_board", "in_pos_files")
 # KiCad tries these suffixes for a user field with the name of an earlier
 # field (parseProperty), and skips the field when all names are used.
 _RENAMES = range(1, 10)
-# The name of a sub-symbol: "<symbol name>_<unit>_<body style>".
-_UNIT_SUFFIX = re.compile(r"(\d+)_(\d+)")
-SUB_SYMBOL = re.compile(r"_(\d+)_(\d+)\Z")
 # The characters that wxString::Strip removes (wxSafeIsspace: ASCII isspace).
 _BLANKS = " \t\n\v\f\r"
 
@@ -62,15 +60,6 @@ class LibrarySymbol:
     version: int | None  # The file version of the library file.
     # The other files of a directory library with a symbol of this name.
     other_files: tuple[Path, ...] = ()
-
-
-def symbol_name(text: str) -> str:
-    """Return the name of a library symbol as KiCad reads it.
-
-    "{slash}" is "/", and a library nickname before ":" is not part of the
-    name (LIB_ID::Parse).
-    """
-    return text.replace("{slash}", "/").split(":", 1)[-1]
 
 
 def parent_name(extends: Node) -> str:
@@ -227,9 +216,10 @@ def read_library(path: Path) -> dict[str, LibrarySymbol]:
 
     Raises:
         OSError, KiCadEncodingError: A file cannot be read.
-        SExprError: KiCad cannot read a file. KiCad then does not load the
-            library, also when only one file of a directory library has an
-            error (SCH_IO_KICAD_SEXPR_LIB_CACHE::Load).
+        SExprError, KicadParseError: KiCad cannot read a file. KiCad then does
+            not load the library, also when only one file of a directory library
+            has an error (SCH_IO_KICAD_SEXPR_LIB_CACHE::Load).
+        LocaleNumberError: A number of a sub-symbol name depends on the locale.
     """
     library = LibraryFiles(library_files(path))
     with _cache_lock:
@@ -246,6 +236,9 @@ def read_library(path: Path) -> dict[str, LibrarySymbol]:
         version = header_version(text, "kicad_symbol_lib")
         in_file: dict[str, LibrarySymbol] = {}
         for node in parse(text).children("symbol"):
+            # parseLibSymbol reads each symbol: a sub-symbol name that it cannot
+            # read stops the load of the library.
+            sub_symbols(node)
             name = symbol_name(node.value(0, ""))
             in_file[name] = LibrarySymbol(name, node, file, version)
         for name, symbol in in_file.items():
@@ -467,13 +460,13 @@ def placed_fields(definition: Node, kicad: int) -> list[PlacedField]:
 
 
 def unit_count(definition: Node) -> int:
-    """Return the number of units of a symbol: the highest unit of its sub-symbols."""
-    units = [1]
-    for sub in definition.children("symbol"):
-        match = SUB_SYMBOL.search(sub.value(0, ""))
-        if match:
-            units.append(int(match.group(1)))
-    return max(units)
+    """Return the number of units of a symbol: the highest unit of its sub-symbols
+    (parseLibSymbol: SetUnitCount for a unit above the count, which starts at 1).
+
+    Raises:
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
+    """
+    return max([1, *(unit for unit, _style, _sub in sub_symbols(definition))])
 
 
 def _chain_fields(chain: list[LibrarySymbol], kicad: int) -> list[_Field]:
@@ -537,37 +530,6 @@ def _embedded_files(chain: list[LibrarySymbol], kicad: int) -> list[str]:
     return added
 
 
-def _unit_suffix(symbol: LibrarySymbol, sub: Node) -> str:
-    """Return the "<unit>_<body style>" of a sub-symbol "<name>_<unit>_<body style>".
-
-    Raises:
-        KicadFileError: KiCad cannot read the name (parseLibSymbol).
-    """
-    atoms = sub.atoms()
-    sub_name = atoms[0].value.replace("{slash}", "/") if atoms else ""
-    prefix = symbol.name + "_"
-    suffix = sub_name[len(prefix) :] if sub_name.startswith(prefix) else ""
-    if not _UNIT_SUFFIX.fullmatch(suffix):
-        raise KicadFileError(
-            f'The symbol "{symbol.name}" has a unit with the name "{sub_name}". '
-            f'The name must be "{prefix}<unit>_<body style>".'
-        )
-    return suffix
-
-
-def sub_symbols(symbol: LibrarySymbol) -> list[tuple[int, int, Node]]:
-    """Return (unit, body style, sub-symbol) for each sub-symbol of a library symbol.
-
-    Raises:
-        KicadFileError: KiCad cannot read the name of a sub-symbol.
-    """
-    result = []
-    for sub in symbol.node.children("symbol"):
-        unit, style = _unit_suffix(symbol, sub).split("_")
-        result.append((int(unit), int(style), sub))
-    return result
-
-
 def flatten(chain: list[LibrarySymbol], lib_id: str, kicad: int) -> str:
     """Return the text of a symbol for the lib_symbols section of a schematic.
 
@@ -587,10 +549,11 @@ def flatten(chain: list[LibrarySymbol], lib_id: str, kicad: int) -> str:
 
     name_atom = root.atoms()[0]
     edits.append((name_atom.start, name_atom.end, quote(lib_id)))
-    for sub in root.children("symbol"):
-        suffix = _unit_suffix(chain[-1], sub)
+    # KiCad saves the name of a sub-symbol with the numbers that it read
+    # (SCH_IO_KICAD_SEXPR_LIB_CACHE::saveSymbol: "%s_%d_%d").
+    for unit, style, sub in sub_symbols(root):
         atom = sub.atoms()[0]
-        edits.append((atom.start, atom.end, quote(f"{item_name}_{suffix}")))
+        edits.append((atom.start, atom.end, quote(f"{item_name}_{unit}_{style}")))
 
     # A symbol that is not derived keeps its fields. Else the fields, and the
     # flags of the parent when it is not the root, go to the place of the
@@ -670,12 +633,11 @@ def _groups(symbol: Node, body_style: int, units: set[int] | None) -> list[Node]
     A sub-symbol "<name>_<unit>_<body style>" shows for its unit and for unit 0
     (all units), with its body style or body style 0. The items outside a
     sub-symbol are in unit 1 with body style 1.
+
+    Raises:
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
     """
-    groups = [(1, 1, symbol)]
-    for sub in symbol.children("symbol"):
-        match = SUB_SYMBOL.search(sub.value(0, ""))
-        if match:
-            groups.append((int(match.group(1)), int(match.group(2)), sub))
+    groups = [(1, 1, symbol), *sub_symbols(symbol)]
     return [
         group
         for unit, style, group in groups
@@ -699,6 +661,7 @@ def body_points(symbol: Node, body_style: int, units: set[int]) -> list[tuple[fl
 
     Raises:
         InputError: A position is not a number.
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
     """
     points = []
     for group in _groups(symbol, body_style, units):
@@ -741,6 +704,7 @@ def library_pins(
 
     Raises:
         InputError: The (at ...) of a pin is not a number.
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
     """
     pins = []
     for group in _groups(symbol, body_style, units):

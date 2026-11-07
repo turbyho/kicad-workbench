@@ -32,8 +32,9 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..parsers.lib_symbols import LibraryFiles, library_files, parent_name, symbol_name
+from ..parsers.lib_symbols import LibraryFiles, library_files, parent_name
 from ..parsers.sexpr import Node, SExprError, parse, property_field
+from ..parsers.sub_symbols import symbol_name
 from .kicad_text import KiCadEncodingError, decode_as_kicad
 from .library_tables import LibraryRow
 from .user_files import cache_home, write_atomic

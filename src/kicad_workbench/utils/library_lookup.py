@@ -87,7 +87,7 @@ def find_library_symbol(
     row, problems = find_kicad_library("symbol", library_name, kicad, project)
     try:
         symbols = read_library(row.path)
-    except (OSError, KiCadEncodingError, SExprError) as e:
+    except (OSError, KiCadEncodingError, SExprError, KicadFileError) as e:
         raise LibraryLookupError(f"the symbol library {row.path} cannot be read: {e}") from e
     try:
         chain = symbol_chain(symbols, symbol_name)

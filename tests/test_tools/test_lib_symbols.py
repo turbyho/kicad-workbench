@@ -282,7 +282,7 @@ class TestChain:
 
     def test_unit_name_that_kicad_cannot_read(self, lib):
         root = ROOT.replace('"R_0_1"', '"X_0_1"')
-        with pytest.raises(KicadFileError, match='unit with the name "X_0_1"'):
+        with pytest.raises(KicadFileError, match="Invalid symbol unit name prefix X_0_1"):
             flat(lib(root, symbol("R_US", "R")), "R_US")
 
 

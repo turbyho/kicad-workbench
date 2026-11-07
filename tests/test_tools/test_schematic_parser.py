@@ -311,7 +311,7 @@ def test_pins_outside_a_sub_symbol_and_with_no_number():
 
 def test_sub_symbol_name_that_kicad_cannot_read():
     text = '(symbol "Lib:U" (symbol "Other_1_1" (pin input line (number "1"))))'
-    with pytest.raises(KicadFileError, match="must be"):
+    with pytest.raises(KicadFileError, match="Invalid symbol unit name prefix Other_1_1"):
         definition_pins(text)
 
 

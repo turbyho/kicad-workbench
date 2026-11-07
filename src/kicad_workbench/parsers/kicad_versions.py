@@ -13,12 +13,9 @@ source). All file formats use the same time line.
 import re
 from dataclasses import dataclass
 
-from ..errors import WorkbenchError
+from ..errors import KicadFileError
 from .sexpr import Atom, Node, file_header, property_field
-
-
-class KicadFileError(WorkbenchError):
-    """KiCad cannot read the file, or this server has no rules for its version."""
+from .sub_symbols import sub_symbols
 
 
 @dataclass(frozen=True)
@@ -226,16 +223,13 @@ def _has_empty_text_marker(symbol: Node) -> bool:
     return False
 
 
-_SUB_SYMBOL_STYLE = re.compile(r"_\d+_(\d+)\Z")
-
-
 def _has_alternate_body_style(symbol: Node) -> bool:
-    """Return True if a sub-symbol "<name>_<unit>_<style>" has a style after 1."""
-    for sub in symbol.children("symbol"):
-        match = _SUB_SYMBOL_STYLE.search(sub.value(0, ""))
-        if match and int(match.group(1)) > 1:
-            return True
-    return False
+    """Return True if a sub-symbol "<name>_<unit>_<style>" has a style after 1.
+
+    Raises:
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
+    """
+    return any(style > 1 for _unit, style, _sub in sub_symbols(symbol))
 
 
 def _has_bold_stroke_text(symbol: Node) -> bool:
@@ -302,6 +296,10 @@ def symbol_library_problem(symbol: Node, library: int | None, schematic: int) ->
         symbol: The (symbol ...) of the library.
         library: The file version of the symbol library, or None.
         schematic: The file version of the schematic.
+
+    Raises:
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
+        LocaleNumberError: A number of such a name depends on the locale of KiCad.
     """
     if library is None:
         return "The symbol library has no file version, (version N)."

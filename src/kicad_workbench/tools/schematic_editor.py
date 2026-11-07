@@ -275,10 +275,10 @@ def _library_definition(
         return f"{error} {e}"
     # Each symbol of the chain goes into the schematic in the format of its
     # library file. KiCad must read it there in the same way.
-    for symbol in chain:
-        if library_error := _library_error(symbol.file, symbol.node, symbol.version, version):
-            return library_error
     try:
+        for symbol in chain:
+            if library_error := _library_error(symbol.file, symbol.node, symbol.version, version):
+                return library_error
         text = flatten(chain, lib_id, rules_for_version(version).kicad)
     except KicadFileError as e:
         return f"{error} {e}"
@@ -837,7 +837,7 @@ def _label_position(
     grid = settings.connection_grid
     try:
         existing = read_sheet(parse(content), settings.wire_widths).connection_points(label=True)
-    except InputError as e:
+    except (InputError, KicadFileError) as e:
         return f"❌ Cannot add the label: the sheet has an item that KiCad cannot read: {e}."
     point = _snapped_label(requested, grid, existing)
     text = f"at {_shown(point)}"
@@ -878,7 +878,10 @@ def _resolve_label_target(
         if isinstance(found, str):
             return found
         return _LabelTarget(content, stamp, found[0], 0, found[1], found[2])
-    anchor = _pin_anchor(content, reference, pin)
+    try:
+        anchor = _pin_anchor(content, reference, pin)
+    except (InputError, KicadFileError) as e:
+        return f"❌ Cannot add the label: the sheet has an item that KiCad cannot read: {e}."
     if anchor is None:
         return (
             f"❌ Pin '{pin}' not found on component '{reference}' — place the "
@@ -1129,7 +1132,10 @@ def _add_component_from_library_sync(
             )
 
     definition_node = parse(symbol_block)
-    units = unit_count(definition_node)
+    try:
+        units = unit_count(definition_node)
+    except KicadFileError as e:
+        return f"❌ Cannot add component {lib_id}: {e}"
     if not 1 <= unit <= units:
         return (
             f"❌ Cannot add component {lib_id}: the symbol has {units} "
@@ -1144,7 +1150,7 @@ def _add_component_from_library_sync(
     grid = settings.connection_grid
     try:
         items = read_sheet(parse(content), settings.wire_widths)
-    except InputError as e:
+    except (InputError, KicadFileError) as e:
         return (
             f"❌ Cannot add component {lib_id}: the sheet has an item that KiCad cannot read: {e}."
         )
@@ -1188,7 +1194,7 @@ def _add_component_from_library_sync(
         return f"❌ Cannot add component {lib_id}: {e}"
     try:
         new_pins = junction_symbol(parse(component_entry), definition_node)
-    except InputError as e:
+    except (InputError, KicadFileError) as e:
         return f"❌ Cannot add component {lib_id}: the library symbol: {e}."
     try:
         place_symbol(items, new_pins, _junction_rules(version), is_bus_label)
@@ -1374,7 +1380,7 @@ def _add_wire_sync(
     try:
         root = parse(content)
         sheet = read_sheet(root, settings.wire_widths)
-    except InputError as e:
+    except (InputError, KicadFileError) as e:
         return f"❌ Cannot add the wire: the sheet has an item that KiCad cannot read: {e}."
     final = requested
     if snap_to_grid:

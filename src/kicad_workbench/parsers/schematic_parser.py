@@ -26,11 +26,12 @@ from .kicad_versions import (
     kicad_release,
     version_triple,
 )
-from .lib_symbols import LibrarySymbol, pin_number, sub_symbols, symbol_name
+from .lib_symbols import pin_number
 from .sch_geometry import body_style, node_point, symbol_unit
 from .sch_geometry import definition_key as _lib_key
 from .sexpr import Node, parse
 from .sheet_list import str_num_cmp
+from .sub_symbols import sub_symbols
 
 # KiCad-defined boolean flags (fixed set, not user-extensible)
 KICAD_SYMBOL_FLAGS = ("dnp", "in_bom", "on_board", "exclude_from_sim")
@@ -236,9 +237,8 @@ def _definition_pins(definition: Node, file: Path, version: int) -> list[dict[st
     Raises:
         KicadFileError: KiCad cannot read the name of a sub-symbol.
     """
-    symbol = LibrarySymbol(symbol_name(definition.value(0, "")), definition, file, version)
     pins = []
-    for unit, style, group in [(1, 1, definition), *sub_symbols(symbol)]:
+    for unit, style, group in [(1, 1, definition), *sub_symbols(definition)]:
         # (pin <electrical type> <graphic style> ... (name "X") (number "N"))
         for pin in group.children("pin"):
             name = pin.first("name")
@@ -710,7 +710,8 @@ class SchematicParser:
                         definition, Path(self.file_path), self.field_rules.file_version
                     )
                 except KicadFileError as e:
-                    raise KicadFileError(f"{self.file_path}: {e}") from e
+                    # The same class: KicadParseError and LocaleNumberError stay.
+                    raise type(e)(f"{self.file_path}: {e}") from e
                 self._lib_pins[key] = pins
                 if definition.first("power") is not None:
                     self._power_keys.add(key)

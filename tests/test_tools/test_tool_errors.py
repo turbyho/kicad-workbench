@@ -299,7 +299,7 @@ def test_numbers_of_more_than_4300_digits():
     # KiCad (LONG_MAX, out of range, or the order of the numbers) with no int().
     from kicad_workbench.parsers.annotation import split_reference
     from kicad_workbench.parsers.bus_names import _to_long
-    from kicad_workbench.parsers.sheet_list import to_long
+    from kicad_workbench.parsers.c_numbers import to_long
     from kicad_workbench.parsers.symbol_info import str_num_cmp
 
     many = "9" * 5000

@@ -184,6 +184,9 @@ class TestConnectionPoints:
         sheet = SHEET.replace(
             '(symbol (lib_id "Lib:U")', '(symbol (lib_name "U_1") (lib_id "Lib:U")'
         )
+        # KiCad names the sub-symbols with the item name of the lib_name
+        # (SCH_IO_KICAD_SEXPR_LIB_CACHE::SaveSymbol).
+        sheet = sheet.replace('(symbol "U_', '(symbol "U_1_')
         sheet = sheet.replace('(lib_symbols (symbol "Lib:U"', '(lib_symbols (symbol "U_1"')
         assert (iu(17.78), iu(20.32)) in read_sheet(parse(sheet)).connection_points()
 

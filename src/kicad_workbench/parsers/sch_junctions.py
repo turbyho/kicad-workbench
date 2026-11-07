@@ -354,6 +354,8 @@ def read_sheet(root: Node, wire_widths: tuple[int, int] | None = None) -> Sheet:
 
     Raises:
         InputError: A position is not a number, or KiCad cannot read a symbol.
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
+        LocaleNumberError: A number of such a name depends on the locale of KiCad.
     """
     lines = []
     for head in ("wire", "bus"):
@@ -447,6 +449,8 @@ def junction_symbol(symbol: Node, definition: Node) -> SymbolPins:
 
     Raises:
         InputError: A position is not a number, or KiCad cannot read the symbol.
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
+        LocaleNumberError: A number of such a name depends on the locale of KiCad.
     """
     where = placement(symbol)
     style = body_style(symbol)

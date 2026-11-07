@@ -41,10 +41,11 @@ from dataclasses import dataclass, field
 from functools import cmp_to_key
 from pathlib import Path
 
-from ..errors import InputError
+from ..errors import InputError, KicadParseError
 from ..utils.kicad_lock import FileStamp, read_stamped
 from ..utils.kicad_text import KiCadEncodingError, decode_as_kicad
 from ..utils.sch_hierarchy import TopLevelSheet, expand_text_variables
+from .c_numbers import to_int, to_long
 from .kicad_fields import FieldRules, rules_for_file, sheet_fields
 from .kicad_versions import schematic_version
 from .sch_geometry import Point, definitions, node_point
@@ -56,7 +57,6 @@ _UUID_RE = re.compile(
 )
 _HEX_DIGITS = set("0123456789abcdefABCDEF")
 _PAGE_SPACES = str.maketrans("", "", "\r\n\t ")
-_LONG_MIN, _LONG_MAX = -(2**63), 2**63 - 1
 
 
 @dataclass(frozen=True, eq=False)
@@ -122,32 +122,6 @@ def page_text(raw: str) -> str:
     """Return a page as the parser keeps it: "#" for an empty page, and no "\\r",
     "\\n", "\\t" and " "."""
     return "#" if raw == "" else raw.translate(_PAGE_SPACES)
-
-
-def to_long(text: str) -> int | None:
-    """Return the integer of a text as ``wxString::ToLong`` reads it (base 10, a
-    64-bit long), or None.
-
-    ``wcstol`` skips the white space at the start, reads a sign and digits,
-    and the full text must be the number.
-    """
-    match = re.fullmatch(r"[ \t\n\v\f\r]*([+-]?[0-9]+)", text)
-    if match is None:
-        return None
-    number = match.group(1)
-    sign = "-" if number.startswith("-") else ""
-    digits = number.lstrip("+-").lstrip("0") or "0"
-    # More than 19 digits is out of the range. int() refuses a text of more than
-    # 4300 digits, also with zeros at the start.
-    if len(digits) > 19:
-        return None
-    value = int(sign + digits)
-    return value if _LONG_MIN <= value <= _LONG_MAX else None
-
-
-def to_int(value: int) -> int:
-    """Return a long as C++ casts it to a 32-bit int."""
-    return (value + 2**31) % 2**32 - 2**31
 
 
 def str_num_cmp(text1: str, text2: str) -> int:
@@ -428,8 +402,10 @@ def _read_screen(file: Path, kicad: int) -> tuple[Screen, str | None]:
 
     Raises:
         OSError, KiCadEncodingError, SExprError: The file cannot be read.
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
         KicadFileError: The file has a version that the server does not know,
             or KiCad cannot read a sheet field.
+        LocaleNumberError: A number of the file depends on the locale of KiCad.
     """
     data, stamp = read_stamped(file)
     root = parse(decode_as_kicad(data, file))
@@ -535,7 +511,9 @@ def build_sheet_list(
             screen, _root_page = _read_screen(file, kicad)
         except FileNotFoundError:
             return None  # KiCad shows an empty sheet.
-        except (OSError, KiCadEncodingError, SExprError) as e:
+        except (OSError, KiCadEncodingError, SExprError, KicadParseError) as e:
+            # A parse error of KiCad (measured with a sub-symbol name that KiCad
+            # cannot read: kicad-cli 8.0.9 to 10.0.7 export the other sheets).
             problems.append(f"{file} cannot be read: {e}. KiCad shows an empty sheet.")
             return None
         screens[file] = screen
@@ -572,7 +550,7 @@ def build_sheet_list(
             continue
         try:
             screen, root_page = _read_screen(file, kicad)
-        except (OSError, KiCadEncodingError, SExprError) as e:
+        except (OSError, KiCadEncodingError, SExprError, KicadParseError) as e:
             raise InputError(f"KiCad cannot load the top-level sheet {file}: {e}") from e
         screens[file] = screen
         top_screens.append(screen)

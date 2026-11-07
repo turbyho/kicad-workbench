@@ -19,3 +19,23 @@ class InputError(WorkbenchError, ValueError):
 
     It is also a ValueError: the code that catches ValueError gets it too.
     """
+
+
+class KicadFileError(WorkbenchError):
+    """KiCad cannot read the file, or this server has no rules for its version."""
+
+
+class KicadParseError(KicadFileError):
+    """The parser of KiCad refuses the text of a file (THROW_PARSE_ERROR).
+
+    KiCad then does not load the file: a sub-sheet is an empty sheet, a
+    top-level sheet stops the load.
+    """
+
+
+class LocaleNumberError(KicadFileError):
+    """KiCad reads a text of the file as a number only in some locales.
+
+    wcstol skips the white space at the start with iswspace of the C library,
+    which depends on the locale and the system. The server does not know them.
+    """

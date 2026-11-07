@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from ..errors import InputError
 from .lib_symbols import LibraryPin, library_pins
 from .sexpr import Node
+from .sub_symbols import sub_symbols
 
 IU_PER_MM = 10000
 IU_PER_MIL = 254
@@ -165,11 +166,23 @@ def body_style(symbol: Node) -> int:
 
 
 def definitions(root: Node) -> dict[str, Node]:
-    """Return the symbol definitions of the lib_symbols section by lib_id."""
+    """Return the symbol definitions of the lib_symbols section by lib_id.
+
+    KiCad reads each definition when it loads the file (parseLibSymbol): a
+    sub-symbol name that it cannot read stops the load, also for a definition that
+    no placed symbol uses.
+
+    Raises:
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
+        LocaleNumberError: A number of such a name depends on the locale of KiCad.
+    """
     lib_symbols = root.first("lib_symbols")
     if lib_symbols is None:
         return {}
-    return {symbol.value(0, ""): symbol for symbol in lib_symbols.children("symbol")}
+    symbols = lib_symbols.children("symbol")
+    for symbol in symbols:
+        sub_symbols(symbol)
+    return {symbol.value(0, ""): symbol for symbol in symbols}
 
 
 def definition_key(symbol: Node) -> str:

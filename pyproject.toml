@@ -126,3 +126,6 @@ disallow_untyped_defs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "schematic_conversion: the test runs the conversion of the schematic files by the installed KiCad (utils/schematic_upgrade.py)",
+]

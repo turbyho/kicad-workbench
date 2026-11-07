@@ -121,6 +121,18 @@ def _files(sheet_list: SheetList) -> list[Path]:
     return [screens[0].file for screens in by_file.values()]
 
 
+def files_of_load(
+    tops: list[TopLevelSheet], project_dir: Path, variables: dict[str, str], kicad: int | None
+) -> list[Path]:
+    """Return each file of a tolerant load of the hierarchy one time (see _load and
+    sheet_files).
+
+    Args:
+        kicad: The major version of the KiCad that loads the files; None: not known.
+    """
+    return _files(_load(tops, project_dir, variables, kicad))
+
+
 def netlist_root(project: Path, kicad: str | None, output: str = "netlist") -> tuple[Path, int]:
     """Return the schematic that gives kicad-cli the netlist of the full project.
 

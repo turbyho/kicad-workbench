@@ -60,10 +60,12 @@ The tools must give the result that KiCad gives. A small difference is also a de
    the KiCad function in the docstring or the comment (for example
    `BOARD_NETLIST_UPDATER::testConnectivity`). Give the limits of the copy in the
    output.
-3. Read a file with the rules of its file version (the KiCad version that saved it),
-   not with the rules of the installed KiCad. The installed version applies to
-   kicad-cli, the global library tables and the checks that KiCad runs. A file of an
-   unknown version gives an error. The minimum is KiCad 8.
+3. Work with the files in the version of the installed KiCad: before a tool works
+   with a schematic project, the installed KiCad converts and saves each schematic
+   file of an older version (`utils/schematic_upgrade.py`, `with_current_schematics`
+   on each tool). The installed version also applies to kicad-cli, the global
+   library tables and the checks that KiCad runs. A file of an unknown version, or of
+   a newer version than the installed KiCad, gives an error. The minimum is KiCad 8.
 4. Compare a new rule with real KiCad 8, 9 and 10. Unit tests alone do not show that a
    rule is correct.
 
@@ -77,7 +79,8 @@ example kiutils). The license of this project is MIT.
 
 - The server writes S-expression files only through `parsers/sexpr.py` (the
   round-trip parser and serializer, with the lexer rules of KiCad), in the format of
-  the file version. Do not use regular expressions for KiCad files.
+  the file version (after the conversion: the version of the installed KiCad). Do
+  not use regular expressions for KiCad files.
 - Before each write, `utils/kicad_lock.py` refuses a file that KiCad has open.
 - The server saves a KiCad file as KiCad 10.0.7 does (`utils/file_save.py`): a
   temporary file in the same folder, then a rename over the file. After an error,
@@ -132,3 +135,4 @@ src/kicad_workbench/
 | `utils/library_tables.py`, `library_lookup.py`, `library_index.py` | Library tables, path variables, library search |
 | `utils/kicad_lock.py`, `kicad_text.py`, `user_files.py` | Lock files, text encoding, the cache folder |
 | `utils/file_save.py` | The save of a file as KiCad 10.0.7 saves it (a temporary file, then a rename) |
+| `utils/schematic_upgrade.py` | The schematic files of a project in the version of the installed KiCad (the conversion before each tool) |

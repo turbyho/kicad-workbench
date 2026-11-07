@@ -18,6 +18,7 @@ non-async contexts.
 
 import asyncio
 import codecs
+import contextvars
 import functools
 import json
 import locale
@@ -48,6 +49,11 @@ from .sch_hierarchy import (
 )
 
 _cached_exe: str | None = None
+# The version of kicad-cli in one tool call (utils/schematic_upgrade.py sets it): the
+# conversion of the files and the tool use one version, and kicad-cli runs one time.
+_call_version: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "kicad_cli_call_version", default=None
+)
 
 
 class KicadCliError(WorkbenchError):
@@ -384,9 +390,24 @@ async def run_kicad_cli(
     return await asyncio.to_thread(run_kicad_cli_sync, args, timeout, english)
 
 
+def set_call_version(version: str) -> contextvars.Token:
+    """Keep the version of kicad-cli for the rest of a tool call (reset_call_version
+    ends it)."""
+    return _call_version.set(version)
+
+
+def reset_call_version(token: contextvars.Token) -> None:
+    """End the version of set_call_version."""
+    _call_version.reset(token)
+
+
 def kicad_cli_version_sync() -> str | None:
     """Return the version of kicad-cli (e.g. "10.0.6"), or None if unknown. No
-    cache: KiCad can change while the server runs (one run takes about 0.1 s)."""
+    cache between tool calls: KiCad can change while the server runs (one run takes
+    about 0.1 s). In a tool call, the version of set_call_version."""
+    known = _call_version.get()
+    if known is not None:
+        return known
     try:
         result = run_kicad_cli_sync(["version"], timeout=30)
     except (FileNotFoundError, subprocess.TimeoutExpired):

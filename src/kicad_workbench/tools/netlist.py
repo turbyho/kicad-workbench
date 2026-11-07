@@ -13,6 +13,7 @@ from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
 from ..utils.kicad_cli import KicadCliError, cli_root, cli_sheet_paths, export_with_kicad_cli
 from ..utils.sch_hierarchy import AmbiguousRootError, SheetPath, schematic_project_file
+from ..utils.schematic_upgrade import with_current_schematics
 from ..utils.tool_errors import error_answer
 from ..utils.user_files import write_atomic
 
@@ -267,6 +268,7 @@ async def write_netlist(sch_path: Path) -> tuple[Path, Path | None]:
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 async def generate_netlist(
     schematic_path: str,
 ) -> str:

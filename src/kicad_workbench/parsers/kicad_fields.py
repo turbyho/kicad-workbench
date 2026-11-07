@@ -1,8 +1,10 @@
 """Fields of schematic symbols and sheets, as the KiCad version of the file reads them.
 
 A schematic is read with the rules of the KiCad version that saved it (see
-kicad_versions). When a newer KiCad converts the file, the file gets a newer
-version, and the next read uses the newer rules.
+kicad_versions). Before a tool works with a schematic project, the installed
+KiCad converts and saves each file of an older version
+(utils/schematic_upgrade.py), thus the rules of the file version are the rules of
+the installed KiCad.
 
 The parsers of KiCad 8 and 9, and of KiCad 10, find the mandatory fields
 (Reference, Value, ... and Sheetname, Sheetfile) in different ways

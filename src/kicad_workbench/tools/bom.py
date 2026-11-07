@@ -51,6 +51,7 @@ from ..utils.kicad_bom import (
 from ..utils.kicad_cli import CliExport, KicadCliError, get_kicad_version
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
+from ..utils.schematic_upgrade import with_current_schematics
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
 from .library import NO_KICAD_CLI, cell
@@ -533,6 +534,7 @@ async def _export_bom(
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 async def export_bom(
     schematic_path: str,
     output_path: str = "",

@@ -16,6 +16,7 @@ from ..parsers.kicad_fields import with_field_rules_note
 from ..server import mcp
 from ..utils.file_save import AfterSaveError
 from ..utils.kicad_text import write_kicad_text
+from ..utils.schematic_upgrade import with_current_schematics
 from ..utils.tool_errors import error_answer
 from .schematic import BaseNames, components_of_project
 
@@ -358,6 +359,7 @@ def _extract_i2c_address_from_net(net_name: str) -> int | None:
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def generate_device_tree(
     schematic_path: str,
@@ -582,6 +584,7 @@ The device tree source file has been generated and saved to the specified locati
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def extract_gpio_config(
     schematic_path: str,
@@ -733,6 +736,7 @@ No GPIO configurations were found in the schematic.
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def extract_i2c_devices(
     schematic_path: str,
@@ -834,6 +838,7 @@ No I2C devices were found in the schematic.
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def extract_spi_devices(
     schematic_path: str,
@@ -934,6 +939,7 @@ No SPI devices were found in the schematic.
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def extract_power_domains(
     schematic_path: str,
@@ -1034,6 +1040,7 @@ No power management components were found in the schematic.
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def validate_pin_configuration(
     schematic_path: str,

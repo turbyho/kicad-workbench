@@ -2,8 +2,9 @@
 
 KiCad has no Python interface for schematics in KiCad 8, 9 and 10. Thus the edit tools
 write the S-expression file of the schematic themselves, with the rules of the KiCad
-source code for the file version (the KiCad version that saved the file). They write
-the file in that format. Use the schematic editor of KiCad for the design work, and
+source code for the file version. Before the work, the installed KiCad converts and
+saves the schematic files of an older version (see the README, "File versions"), thus
+the tools write the format of the installed KiCad. Use the schematic editor of KiCad for the design work, and
 the edit tools for well-defined changes: a symbol from a library, a wire, a label,
 the fields of a symbol.
 
@@ -99,7 +100,8 @@ there. Make sure that a new connection is in the netlist: `generate_netlist` and
 - With a variant (KiCad 10), the tool writes the fields of that variant into each
   unit. A value equal to the field of the symbol removes the field from the variant.
 - The tool checks all changes and all files first, and writes no file when a check
-  fails.
+  fails. Before the check, the installed KiCad converts and saves the schematic files
+  of an older version, as before each tool (see the README, "File versions").
 - A symbol in a sheet that the hierarchy uses more than one time has one set of
   fields for all its references (`U201` and `U301`). Give the same fields for each
   of these references, or write different fields through a variant. Else the tool

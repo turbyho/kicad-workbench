@@ -71,6 +71,7 @@ from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
 from ..utils.library_tables import kicad_environment
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.schematic_upgrade import with_current_schematics
 from ..utils.tool_errors import error_answer
 from ..utils.variants import file_variants, project_variants
 from .library import cell
@@ -740,6 +741,7 @@ async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) ->
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> str:
     """Write the fields of placed symbols, as KiCad writes them.
 
@@ -748,10 +750,12 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
     a new field, hidden as KiCad 9 and 10 make it (a file of KiCad 8: visible;
     Value_Confirmed and MPN_Confirmed: always hidden). With a variant (KiCad 10), the
     tool writes the fields of that variant into each unit: a value equal to the
-    field of the symbol removes the field from the variant. The tool checks all changes and all
-    files first, and writes no file when a check fails. It writes all files or
-    no file: an error of the disk also changes no file. KiCad must not have the
-    files open.
+    field of the symbol removes the field from the variant. The tool checks all
+    changes and all files first, and writes no file when a check fails. It writes
+    all files or no file: an error of the disk also changes no file. KiCad must not
+    have the files open. Before the check, the installed KiCad converts and saves the
+    schematic files of an older version, as before each tool (the output tells it):
+    that is a save by KiCad, not a change of this tool.
 
     A symbol in a sheet that the hierarchy uses more than one time has one set
     of fields for all its references (U201 and U301): give the same fields for

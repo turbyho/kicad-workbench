@@ -21,6 +21,7 @@ from ..parsers.sheet_list import EMPTY_REASONS
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.schematic_upgrade import with_current_schematics
 from ..utils.tool_errors import error_answer
 from .netlist import NetlistError, netlist_of
 
@@ -144,6 +145,7 @@ def _problem_lines(problems: list[str]) -> list[str]:
 
 
 @mcp.tool()
+@with_current_schematics("file_path")
 @with_field_rules_note
 async def list_schematic_components(
     file_path: str,
@@ -261,6 +263,7 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
 
 
 @mcp.tool()
+@with_current_schematics("file_path")
 @with_field_rules_note
 async def get_symbol_details(file_path: str, reference: str) -> str:
     """Get detailed information about a specific symbol/component.
@@ -358,6 +361,7 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
 
 
 @mcp.tool()
+@with_current_schematics("file_path")
 @with_field_rules_note
 async def search_symbols(
     file_path: str,
@@ -434,6 +438,7 @@ async def search_symbols(
 
 
 @mcp.tool()
+@with_current_schematics("file_path")
 @with_field_rules_note
 async def list_schematic_nets(
     file_path: str,
@@ -526,6 +531,7 @@ def _sheet_symbol_lines(screen: SchematicFile) -> list[str]:
 
 
 @mcp.tool()
+@with_current_schematics("file_path")
 @with_field_rules_note
 async def get_schematic_info(file_path: str) -> str:
     """Get general information about a schematic file.

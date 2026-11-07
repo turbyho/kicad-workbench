@@ -4,11 +4,13 @@ from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
 from ..server import mcp
+from ..utils.schematic_upgrade import with_current_schematics
 from ..utils.tool_errors import error_answer
 from .netlist import current_netlist, reference_key
 
 
 @mcp.tool()
+@with_current_schematics("file_path")
 @with_field_rules_note
 async def trace_hierarchical_connection(
     file_path: str, reference: str, pin_number: str = ""
@@ -113,6 +115,7 @@ async def trace_hierarchical_connection(
 
 
 @mcp.tool()
+@with_current_schematics("file_path")
 @with_field_rules_note
 async def analyze_hierarchical_nets(
     file_path: str,

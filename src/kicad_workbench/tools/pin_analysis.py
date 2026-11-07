@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
 from ..server import mcp
+from ..utils.schematic_upgrade import with_current_schematics
 from ..utils.tool_errors import error_answer
 from .netlist import current_netlist
 from .schematic import BaseNames, components_of_project
@@ -188,6 +189,7 @@ def _get_mcu_pin_mapping(mcu_family: str, pin_name: str) -> dict:
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def analyze_pin_functions(
     schematic_path: str,
@@ -381,6 +383,7 @@ def _extract_pin_info_from_symbol_details(details_text: str) -> list[dict]:
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def detect_pin_conflicts(
     schematic_path: str,
@@ -553,6 +556,7 @@ The schematic has been analyzed and no pin conflicts were found.
 
 
 @mcp.tool()
+@with_current_schematics("schematic_path")
 @with_field_rules_note
 async def extract_pinmux_config(
     schematic_path: str,

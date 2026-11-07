@@ -156,13 +156,13 @@ class TestNetlistErrorsOfTheTools:
         )
         assert "Traceback" not in result
 
-    def test_search_tells_that_it_did_not_use_the_nets(self, sch):
+    def test_search_with_no_netlist_is_an_error(self, sch):
+        # The components of the hierarchy come from the netlist of kicad-cli.
         result = asyncio.run(schematic_search.search_components_by_type(str(sch), "OLED"))
-        assert result.startswith("# No OLED components found"), result
-        assert (
-            "⚠️ The search did not use the nets of the components: The server cannot make "
-            f"the netlist of {sch}: kicad-cli stopped with the exit code 1: cannot load"
-        ) in result
+        assert result == (
+            f"❌ The server cannot make the netlist of {sch}: kicad-cli stopped with the exit "
+            "code 1: cannot load"
+        ), result
 
 
 def test_hierarchical_nets_with_a_filter_that_is_not_a_regular_expression(monkeypatch, sch):
@@ -179,7 +179,7 @@ def test_hierarchical_nets_with_a_filter_that_is_not_a_regular_expression(monkey
 
 def test_trace_of_a_reference_that_is_not_there(sch):
     result = asyncio.run(hierarchical_analysis.trace_hierarchical_connection(str(sch), "U9"))
-    assert result.startswith("❌ Component 'U9' not found in schematic hierarchy."), result
+    assert result.startswith("❌ The netlist of kicad-cli has no component 'U9'"), result
 
 
 @pytest.mark.parametrize(

@@ -22,6 +22,21 @@ class NetlistComponent:
     # (pin_name_of_node; the "+no_connect" of a pintype is not a type).
     pin_names: dict[str, str] = field(default_factory=dict)
     pin_types: dict[str, str] = field(default_factory=dict)
+    # The sheet path of the component (<sheetpath>): "names"
+    # (SCH_SHEET_PATH::PathHumanReadable, for example "/Power/") and "tstamps"
+    # (SCH_SHEET_PATH::PathAsString). Empty: a symbol with no library symbol (no
+    # <comp>, only nodes).
+    sheet_names: str = ""
+    sheet_tstamps: str = ""
+
+
+@dataclass
+class NetlistSheet:
+    """A sheet path of the design (<design><sheet>), as kicad-cli writes it."""
+
+    names: str  # "name": SCH_SHEET_PATH::PathHumanReadable
+    tstamps: str  # SCH_SHEET_PATH::PathAsString
+    source: str  # <title_block><source>: the file name, with no folder
 
 
 def pin_name_of_node(pinfunction: str, number: str, kicad: str | None) -> str:
@@ -113,8 +128,13 @@ class NetlistParser:
 
         # Parse components (KiCad 9.0+ uses <comp> not <component>)
         components = {}
+        # A reference of more than one <comp>: the annotation is not complete
+        # (an unannotated "U?" or the same reference two times). The dict keeps one.
+        duplicates: list[str] = []
         for comp in root.findall(".//comp"):
             ref = comp.get("ref")
+            if ref in components and ref not in duplicates:
+                duplicates.append(ref)
             value = comp.findtext("value", "")
             # KiCad XML: footprint is a direct <footprint>Lib:Footprint</footprint>
             # element (NOT footprint/libpart), and libsource is an attribute-only
@@ -123,6 +143,7 @@ class NetlistParser:
             libsource = comp.find("libsource")
             library = libsource.get("lib", "") if libsource is not None else ""
 
+            sheetpath = comp.find("sheetpath")
             # Pins will be populated from nets later
             components[ref] = NetlistComponent(
                 reference=ref,
@@ -130,6 +151,8 @@ class NetlistParser:
                 library=library,
                 footprint=footprint,
                 pins={},  # Empty initially, will populate from nets
+                sheet_names=sheetpath.get("names", "") if sheetpath is not None else "",
+                sheet_tstamps=sheetpath.get("tstamps", "") if sheetpath is not None else "",
             )
 
         # Parse nets and populate component pins
@@ -161,9 +184,20 @@ class NetlistParser:
 
             nets[name] = NetlistNet(name=name, code=code, pins=pins_list)
 
+        sheets = [
+            NetlistSheet(
+                names=sheet.get("name", ""),
+                tstamps=sheet.get("tstamps", ""),
+                source=sheet.findtext("title_block/source", ""),
+            )
+            for sheet in root.findall("design/sheet")
+        ]
+
         self._data = {
             "components": components,
             "nets": nets,
+            "sheets": sheets,
+            "duplicates": duplicates,
             "kicad_version": kicad_version,
         }
 
@@ -208,6 +242,14 @@ class NetlistParser:
         """
         data = self._parse_file()
         return data["components"]
+
+    def get_duplicate_references(self) -> list[str]:
+        """Get the references of more than one <comp> (get_components keeps one)."""
+        return self._parse_file()["duplicates"]
+
+    def get_sheets(self) -> list[NetlistSheet]:
+        """Get the sheet paths of the design, in the order of the netlist."""
+        return self._parse_file()["sheets"]
 
     def get_nets(self) -> dict[str, NetlistNet]:
         """Get all nets from netlist.

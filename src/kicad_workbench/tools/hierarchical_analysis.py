@@ -3,86 +3,76 @@
 from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
 from ..utils.tool_errors import error_answer
-
-
-def _find_component_location(file_path: str, reference: str, sheets: list[dict]) -> tuple[object | None, str]:
-    """Find a component across the main sheet and sub-sheets.
-
-    Returns (component_or_None, sheet_name).
-    """
-    parser = SchematicParser(file_path)
-    for component in parser.get_components():
-        if component.reference == reference:
-            return component, "Main Schematic"
-
-    project_dir = Path(file_path).parent
-    for sheet in sheets:
-        sheet_path = project_dir / sheet.get("file", "")
-        if sheet_path.exists():
-            # A sheet that the server cannot read gives an error: the search
-            # would not be complete.
-            for component in SchematicParser(str(sheet_path)).get_components():
-                if component.reference == reference:
-                    return component, sheet.get("name", sheet.get("file", ""))
-    return None, ""
+from .netlist import current_netlist, reference_key
 
 
 @mcp.tool()
 @with_field_rules_note
 async def trace_hierarchical_connection(
-    file_path: str,
-    reference: str,
-    pin_number: str = ""
+    file_path: str, reference: str, pin_number: str = ""
 ) -> str:
-    """Trace component connections across hierarchical schematics.
+    """Trace the connections of a component across the full schematic hierarchy.
 
-    This tool traces connections through the entire schematic hierarchy,
-    including sub-sheets, to show complete signal paths.
+    The tool reads the netlist that kicad-cli writes now: it has each component of
+    each sheet path, at each level of the hierarchy, with the reference of that
+    path (a sheet that the hierarchy uses two times gives two references). The
+    netlist has no power symbols and no symbol with no library symbol. The tool
+    needs kicad-cli.
 
     Args:
-        file_path: Path to main .kicad_sch file
+        file_path: A .kicad_sch file of the project (the root schematic or a
+            sub-sheet: the tool uses the netlist of the root schematic).
         reference: Component reference designator (e.g., 'U1', 'R5')
         pin_number: Optional pin number to trace (if empty, trace all pins)
 
     Returns:
-        Complete connection trace through hierarchy
+        The sheet of the component, and the net and the connected pins of each
+        pin.
     """
     try:
-        from .netlist import current_netlist
-
-        parser = SchematicParser(file_path)
-        sheets = parser.get_sheets()
-
-        # Search the main sheet AND sub-sheets (previously only the root was
-        # searched, so any component placed in a sub-sheet was "Not Found").
-        target_component, location = _find_component_location(file_path, reference, sheets)
-
-        if not target_component:
-            refs = [c.reference for c in parser.get_components()][:10]
+        if not Path(file_path).is_file():
+            return f"❌ File not found: {file_path}"
+        nl = await current_netlist(Path(file_path))
+        components = nl.get_components()
+        comp = components.get(reference)
+        if comp is None:
+            refs = [c.reference for c in sorted(components.values(), key=reference_key)]
+            listed = ", ".join(refs[:10]) + (" ..." if len(refs) > 10 else "")
             return (
-                f"❌ Component '{reference}' not found in schematic hierarchy.\n\n"
-                f"Available components: {', '.join(refs)}..."
+                f"❌ The netlist of kicad-cli has no component '{reference}' (the netlist has "
+                "no power symbols and no symbol with no library symbol).\n\n"
+                f"Components: {listed or 'none'}"
             )
 
+        sheets = [s for s in nl.get_sheets() if s.tstamps == comp.sheet_tstamps]
+        # One sheet for the path: else (KiCad 10.0.7 and later with more than one
+        # top-level sheet) the file is not known.
+        source = sheets[0].source if len(sheets) == 1 else ""
+        notes = []
+        if reference in nl.get_duplicate_references():
+            notes.append(
+                f"⚠️ The annotation is not complete: the netlist has more than one component "
+                f"{reference}. The trace is of one of them."
+            )
+        if len(sheets) > 1:
+            notes.append(
+                f"⚠️ The netlist has {len(sheets)} sheets with the path of {reference}: the "
+                "file of the component is not known."
+            )
         lines = [
-            f"# Connection Trace for {target_component.reference}",
+            f"# Connection Trace for {comp.reference}",
             "",
-            f"**Component:** {target_component.reference}",
-            f"**Value:** {target_component.value}",
-            f"**Location:** {location}",
-            f"**File:** {file_path}",
+            f"**Component:** {comp.reference}",
+            f"**Value:** {comp.value}",
+            f"**Sheet:** {comp.sheet_names or '(not in the netlist)'}"
+            + (f" (`{source}`)" if source else ""),
+            f"**Schematic:** {file_path}",
+            *notes,
             "",
         ]
-
-        # The authoritative pin<->net map lives in the netlist. SchematicParser
-        # nets carry no pin list (SchematicNet.pins is always empty), so tracing
-        # via them always reported "no connections".
-        nl = await current_netlist(Path(file_path))
-        comp = nl.get_components().get(reference)
-        if not comp or not comp.pins:
+        if not comp.pins:
             lines.append("No connections found for this component.")
             return "\n".join(lines)
 
@@ -116,28 +106,29 @@ async def analyze_hierarchical_nets(
     filter_pattern: str = "",
     show_hierarchy: bool = True
 ) -> str:
-    """Analyze all nets in hierarchical schematic design.
+    """Analyze all nets of the full schematic hierarchy.
 
-    This tool analyzes network connections across the entire hierarchy,
-    showing how signals flow between main schematic and sub-sheets.
+    The tool reads the netlist that kicad-cli writes now: the nets of all sheets
+    at each level of the hierarchy. It groups them as power, interface and signal
+    nets (by their names), and gives the sheet paths of the hierarchy.
 
     Args:
-        file_path: Path to main .kicad_sch file
+        file_path: A .kicad_sch file of the project (the root schematic or a
+            sub-sheet: the tool uses the netlist of the root schematic).
         filter_pattern: Optional regex pattern to filter net names
-        show_hierarchy: Whether to show hierarchical structure (default: True)
+        show_hierarchy: True (default): list the sheet paths of the hierarchy with
+            their files.
 
     Returns:
-        Complete hierarchical net analysis
+        The nets by group, with the number of pins of each net.
     """
     try:
         import re
 
-        from .netlist import current_netlist
-
-        parser = SchematicParser(file_path)
-        sheets = parser.get_sheets()
-
+        if not Path(file_path).is_file():
+            return f"❌ File not found: {file_path}"
         nl = await current_netlist(Path(file_path))
+        sheets = nl.get_sheets()
 
         # docstring promises a regex; honour it (was a plain substring check).
         try:
@@ -165,7 +156,7 @@ async def analyze_hierarchical_nets(
             f"**File:** {file_path}",
             f"**Total nets:** {len(hierarchical_nets)}",
             f"**Filter:** {filter_pattern if filter_pattern else 'none'}",
-            f"**Hierarchical sheets:** {len(sheets)}",
+            f"**Sheet paths:** {len(sheets)}",
             "",
             "## Network Summary",
             "",
@@ -196,6 +187,13 @@ async def analyze_hierarchical_nets(
         _emit("Power Nets", power_nets, 20)
         _emit("Interface Nets", interface_nets, 30)
         _emit(f"Signal Nets (showing first 20 of {len(signal_nets)})", signal_nets, 20)
+
+        if show_hierarchy:
+            lines += ["### Sheet Hierarchy", ""]
+            lines += [
+                f"- {sheet.names}" + (f" (`{sheet.source}`)" if sheet.source else "")
+                for sheet in sheets
+            ]
 
         return "\n".join(lines)
 

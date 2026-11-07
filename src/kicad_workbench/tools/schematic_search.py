@@ -1,9 +1,12 @@
 """Intelligent component search tools for KiCad Workbench."""
 
+import asyncio
+from pathlib import Path
+
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
-from ..utils.tool_errors import EXPECTED_ERRORS, error_answer
+from ..utils.tool_errors import error_answer
+from .netlist import components_of_file
 
 
 @mcp.tool()
@@ -15,41 +18,29 @@ async def search_components_by_type(
 ) -> str:
     """Search for components by type (OLED, sensor, display, etc.).
 
-    This tool intelligently searches for components by their type, value,
-    footprint, or network connections to identify specific component categories.
+    The tool searches the value, the footprint and the net names of each
+    component. It reads the netlist that kicad-cli writes now: each component of
+    each sheet path, at each level of the hierarchy, with the reference of that
+    path. The netlist has no power symbols and no symbol with no library symbol.
+    The tool needs kicad-cli.
 
     Args:
-        file_path: Path to .kicad_sch file
+        file_path: A .kicad_sch file of the project.
         component_type: Type of component to search for (e.g., 'OLED', 'sensor', 'display', 'SPI', 'I2C')
-        search_in_subsheets: Whether to search in hierarchical subsheets (default: True)
+        search_in_subsheets: True (default): the components of the file and of all
+            sheets below it (for the root schematic: the full project). False: only
+            the components that are placed in the file.
 
     Returns:
-        Formatted list of matching components with their connections and details
+        The matching components with their sheet, footprint and nets.
     """
     try:
-        from pathlib import Path
-
-        from .netlist import current_netlist
-
-        parser = SchematicParser(file_path)
-        components = parser.get_components()
-
-        # SchematicNet.pins is always empty, so build component -> nets from
-        # the netlist (the authoritative pin<->net map).
-        comp_nets: dict[str, set[str]] = {}
-        comp_pins_map: dict[str, list[tuple[str, str]]] = {}
-        # The netlist only adds the nets of each component, thus the search
-        # continues without it, and the answer tells it.
-        net_note = ""
-        try:
-            netlist_components = (await current_netlist(Path(file_path))).get_components()
-        except EXPECTED_ERRORS as e:  # also a netlist that is not XML (InputError)
-            netlist_components = {}
-            net_note = f"\n\n⚠️ The search did not use the nets of the components: {e}"
-        for ref, comp in netlist_components.items():
-            pins = [(pn, nn) for pn, nn in comp.pins.items() if nn]
-            comp_pins_map[ref] = pins
-            comp_nets[ref] = {nn for _, nn in pins}
+        path = Path(file_path)
+        if not path.is_file():
+            return f"❌ File not found: {path}"
+        _netlist, components, warnings = await asyncio.to_thread(
+            components_of_file, path, search_in_subsheets
+        )
 
         # Smart component type detection patterns
         type_patterns = {
@@ -64,42 +55,34 @@ async def search_components_by_type(
             'wireless': ['wifi', 'bluetooth', 'nrf', 'esp'],
         }
 
-        # Get search patterns for the requested type
-        search_type = component_type.upper()
-        patterns = type_patterns.get(search_type, [component_type.lower()])
+        # Get search patterns for the requested type. The keys have different
+        # cases ('OLED', 'sensor'): the type matches with no regard to case (an
+        # upper-case look-up did not find 'sensor', 'display' and the others).
+        by_name = {name.lower(): words for name, words in type_patterns.items()}
+        patterns = by_name.get(component_type.lower(), [component_type.lower()])
 
-        # Search for matching components
-        matching_components = []
+        def matches(component) -> bool:
+            texts = [component.value, component.footprint or ""]
+            texts += [net for net in component.pins.values() if net]
+            return any(pattern in text.lower() for text in texts for pattern in patterns)
 
-        for component in components:
-            # Check value field
-            if any(pattern in component.value.lower() for pattern in patterns):
-                matching_components.append(component)
-                continue
-
-            # Check footprint
-            if hasattr(component, 'footprint') and component.footprint:
-                if any(pattern in component.footprint.lower() for pattern in patterns):
-                    matching_components.append(component)
-                    continue
-
-            # Check network connections from the netlist
-            cnets = comp_nets.get(component.reference, set())
-            if any(any(pattern in n.lower() for n in cnets) for pattern in patterns):
-                matching_components.append(component)
+        matching_components = [c for c in components if matches(c)]
+        scope = "the file and the sheets below it" if search_in_subsheets else "the file"
+        notes = "".join(f"\n\n{warning}" for warning in warnings)
 
         if not matching_components:
             return (
                 f"# No {component_type} components found\n\n"
                 f"Searched for patterns: {', '.join(patterns)}\n\n"
-                f"Found 0 matching components in {len(components)} total components.{net_note}"
+                f"Found 0 matching components in {len(components)} components of {scope}."
+                f"{notes}"
             )
 
-        # Format results
         lines = [
             f"# {component_type} Components Found",
             "",
             f"**File:** {file_path}",
+            f"**Searched:** {len(components)} components of {scope}",
             f"**Total {component_type} components:** {len(matching_components)}",
             f"**Searched patterns:** {', '.join(patterns)}",
             "",
@@ -109,13 +92,11 @@ async def search_components_by_type(
 
         for i, component in enumerate(matching_components, 1):
             lines.append(f"### {i}. {component.reference} - {component.value}")
-
-            if hasattr(component, 'footprint') and component.footprint:
+            lines.append(f"**Sheet:** {component.sheet_names or '(not in the netlist)'}")
+            if component.footprint:
                 lines.append(f"**Footprint:** {component.footprint}")
 
-            # List this component's nets from the netlist
-            component_nets = comp_pins_map.get(component.reference, [])
-
+            component_nets = [(pin, net) for pin, net in component.pins.items() if net]
             if component_nets:
                 lines.append(f"**Connections ({len(component_nets)}):**")
                 for pin_num, net_name in component_nets[:10]:  # Show first 10 connections
@@ -125,44 +106,7 @@ async def search_components_by_type(
 
             lines.append("")
 
-        # Search in subsheets if requested
-        if search_in_subsheets:
-            sheets = parser.get_sheets()
-            if sheets:
-                lines.extend([
-                    "## Sub-Sheet Search",
-                    ""
-                ])
-
-                project_dir = Path(file_path).parent
-
-                for sheet in sheets:
-                    sheet_path = project_dir / sheet['file']
-                    if sheet_path.exists():
-                        try:
-                            sheet_parser = SchematicParser(str(sheet_path))
-                            sheet_components = sheet_parser.get_components()
-
-                            # Search for matching components in subsheet
-                            sheet_matches = []
-                            for component in sheet_components:
-                                if any(pattern in component.value.lower() for pattern in patterns):
-                                    sheet_matches.append(component)
-
-                            if sheet_matches:
-                                lines.append(f"### {sheet['name']}")
-                                lines.append(f"Found {len(sheet_matches)} {component_type} components:")
-                                for component in sheet_matches:
-                                    lines.append(f"  - {component.reference}: {component.value}")
-                                lines.append("")
-
-                        except EXPECTED_ERRORS as e:
-                            # The search of this sheet is not complete.
-                            lines.append(f"### {sheet['name']}")
-                            lines.append(f"❌ The server cannot read this sheet: {e}")
-                            lines.append("")
-
-        return "\n".join(lines) + net_note
+        return "\n".join(lines) + notes
 
     except Exception as e:
         return error_answer(e, "Error searching components")

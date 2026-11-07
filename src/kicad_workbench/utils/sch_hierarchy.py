@@ -228,6 +228,18 @@ class SheetPath:
         """The sheet names, for example "/Power/Regulator/". The root is "/"."""
         return "/" + "".join(f"{name}/" for name in self.names)
 
+    @property
+    def netlist_path(self) -> str | None:
+        """The UUID path as the XML netlist of kicad-cli writes it ("tstamps"):
+        each UUID but the first, each with "/" after it. The root is "/".
+        SCH_SHEET_PATH::PathAsString starts at the second sheet of the path: KiCad
+        8 and 9 skip the root sheet, KiCad 10 the top-level sheet (BuildSheetList
+        puts no virtual root into a path). None: no UUIDs. Checked with kicad-cli
+        8.0.9, 9.0.9 and 10.0.6 (spike/kicad-versions/netlist_sheets_check.py)."""
+        if self.uuids is None:
+            return None
+        return "/" + "".join(f"{uuid}/" for uuid in self.uuids[1:])
+
 
 def _walk(
     tops: list[TopLevelSheet], variables: dict[str, str], unique: bool = False
@@ -301,6 +313,29 @@ def _walk(
                     child_uuids = (*uuids, sheet.uuid)
             pending.append((child, child_uuids, (*names, sheet.name), (*parents, real)))
     return places, problems
+
+
+def root_sheet_paths(root: Path) -> tuple[list[SheetPath], list[str]]:
+    """Return each place of each file in the hierarchy of a root schematic, as
+    kicad-cli loads it: the schematic is the one top-level sheet
+    (EESCHEMA_HELPERS::LoadSchematic of KiCad 8, 9 and 10.0.0 to 10.0.6; KiCad
+    10.0.7 and later also load the other top-level sheets of its project).
+
+    A root schematic with no UUID gets NIL_UUID as the first UUID: KiCad gives it
+    a new UUID at each load, and netlist_path does not use the first UUID. Thus
+    the paths below it have UUIDs. Use these paths for the netlist only, not for
+    the instances of the symbols (path).
+
+    Returns:
+        (paths, problems), see _walk.
+    """
+    root = Path(os.path.abspath(root))
+    try:
+        file_uuid, _sheets = _read_sheets(root)
+    except (OSError, RuntimeError, KiCadEncodingError, SExprError):
+        file_uuid = None  # _walk gives the problem
+    uuid = None if file_uuid else NIL_UUID
+    return _walk([TopLevelSheet(root, uuid, root.stem)], text_variables(root))
 
 
 def sheet_files(root: Path) -> list[Path]:

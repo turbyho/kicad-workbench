@@ -1,15 +1,18 @@
 """Netlist generation and analysis tools for KiCad Workbench."""
 
 import asyncio
+import collections
+import functools
 import hashlib
 import tempfile
 from pathlib import Path
 
 from ..errors import WorkbenchError
-from ..parsers.netlist_parser import NetlistParser
+from ..parsers.netlist_parser import NetlistComponent, NetlistParser
+from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
 from ..utils.kicad_cli import KicadCliError, export_with_kicad_cli
-from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic
+from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic, root_sheet_paths
 from ..utils.tool_errors import error_answer
 from ..utils.user_files import write_atomic
 
@@ -74,6 +77,11 @@ def _write_netlist_sync(sch_path: Path) -> tuple[Path, Path | None]:
     return netlist_path, root
 
 
+def _parsed_netlist(sch_path: Path) -> tuple[NetlistParser, Path | None]:
+    data, root = export_netlist(sch_path)
+    return NetlistParser.from_bytes(data, f"of kicad-cli for {root or sch_path}"), root
+
+
 def netlist_of(sch_path: Path) -> NetlistParser:
     """Return the netlist of the schematic as kicad-cli writes it now.
 
@@ -89,13 +97,107 @@ def netlist_of(sch_path: Path) -> NetlistParser:
         NetlistError: kicad-cli is not there or cannot run, did not stop in
             time, or did not write the netlist.
     """
-    data, root = export_netlist(sch_path)
-    return NetlistParser.from_bytes(data, f"of kicad-cli for {root or sch_path}")
+    return _parsed_netlist(sch_path)[0]
 
 
 async def current_netlist(sch_path: Path) -> NetlistParser:
     """netlist_of off the event loop."""
     return await asyncio.to_thread(netlist_of, sch_path)
+
+
+_REFERENCE_KEY = functools.cmp_to_key(str_num_cmp)
+
+
+def reference_key(component: NetlistComponent):
+    """The sort key of a component: its reference in the order of KiCad (StrNumCmp)."""
+    return _REFERENCE_KEY(component.reference)
+
+
+def components_of_file(
+    sch_path: Path, below: bool
+) -> tuple[NetlistParser, list[NetlistComponent], list[str]]:
+    """Return the netlist of kicad-cli, the components of a schematic file in it, and
+    the warnings.
+
+    kicad-cli gives each component of each sheet path of the hierarchy, with the
+    reference of that path (NETLIST_EXPORTER_XML::makeSymbols): no power symbols
+    and no other references that start with "#", and no symbol with no library
+    symbol (NETLIST_EXPORTER_BASE::findNextSymbol). The components of the file are
+    the components of each sheet path of the file in the hierarchy that kicad-cli
+    loads (root_sheet_paths), with below also the components of the sheets below
+    these paths. The sheet path of a component is its "tstamps" in the netlist
+    (SheetPath.netlist_path), not its "names": KiCad expands the text variables
+    of the sheet names. The function blocks: run it off the event loop.
+
+    Args:
+        sch_path: The schematic file (the root schematic or a sub-sheet).
+        below: Also the components of the sheets below the file.
+
+    Returns:
+        (the netlist, the components in the order of their references, warnings).
+
+    Raises:
+        AmbiguousRootError: More than one root schematic holds the sheet.
+        NetlistError: kicad-cli did not write the netlist.
+        InputError: The netlist is not valid XML.
+    """
+    netlist, root = _parsed_netlist(sch_path)
+    hierarchy = root or sch_path
+    places, problems = root_sheet_paths(hierarchy)
+    warnings = [f"⚠️ {problem}" for problem in problems] + netlist_warnings(netlist)
+    known = {place.netlist_path for place in places if place.netlist_path is not None}
+    sheets = netlist.get_sheets()
+    counts = collections.Counter(sheet.tstamps for sheet in sheets)
+    # A sheet that root_sheet_paths does not have, or one path for two sheets: kicad-cli
+    # of KiCad 10.0.7 and later also loads the other top-level sheets of the project.
+    unknown = [s.names for s in sheets if s.tstamps not in known or counts[s.tstamps] > 1]
+    if unknown:
+        warnings.append(
+            f"⚠️ The netlist has sheets that the tool does not find in the hierarchy of "
+            f"{hierarchy}: {', '.join(unknown)}. The tool cannot tell if their components "
+            "are in the file: they are not in the result."
+        )
+    target = sch_path.resolve()
+    mine = [
+        place.netlist_path
+        for place in places
+        if place.netlist_path is not None and place.file.resolve() == target
+    ]
+    if not mine:
+        warnings.append(
+            f"⚠️ {sch_path} has no sheet path with UUIDs in the hierarchy of {hierarchy}."
+        )
+    ambiguous = {tstamps for tstamps, count in counts.items() if count > 1}
+
+    def inside(component: NetlistComponent) -> bool:
+        tstamps = component.sheet_tstamps
+        if tstamps not in known or tstamps in ambiguous:
+            return False  # also no sheet path: a symbol with no library symbol
+        return any(tstamps == path or (below and tstamps.startswith(path)) for path in mine)
+
+    components = [c for c in netlist.get_components().values() if inside(c)]
+    return netlist, sorted(components, key=reference_key), warnings
+
+
+def netlist_warnings(netlist: NetlistParser) -> list[str]:
+    """The warnings about the components of a netlist that a search cannot use: a
+    reference of more than one component (the annotation is not complete), and the
+    nodes of a symbol with no library symbol (KiCad writes no <comp> for it)."""
+    warnings = []
+    duplicates = netlist.get_duplicate_references()
+    if duplicates:
+        warnings.append(
+            "⚠️ The annotation is not complete: the netlist has more than one component "
+            f"with the reference {', '.join(duplicates)}. The result has one of them."
+        )
+    no_comp = [ref for ref, c in netlist.get_components().items() if not c.sheet_tstamps]
+    if no_comp:
+        warnings.append(
+            "⚠️ The netlist has the pins of "
+            f"{', '.join(sorted(no_comp, key=functools.cmp_to_key(str_num_cmp)))} but no "
+            "component (a symbol with no library symbol): the result does not have them."
+        )
+    return warnings
 
 
 async def write_netlist(sch_path: Path) -> tuple[Path, Path | None]:

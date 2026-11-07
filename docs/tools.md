@@ -26,14 +26,14 @@ below. Use their result as a start for a review, not as a fact.
 | `list_schematic_nets(file_path, filter_power?)` | The nets, optionally only the power nets |
 | `search_symbols(file_path, pattern, search_fields?)` | The symbols whose reference, value or library ID matches a regular expression |
 | `get_symbol_details(file_path, reference)` | The fields and the pins of one component. The pins (number, name, electrical type) come from the netlist of kicad-cli. `trace_netlist_connection` gives the net of each pin |
-| `search_components_by_type(file_path, component_type, search_in_subsheets?)` | Components of a type, for example "sensor" or "display" (heuristic: value, footprint and nets) |
+| `search_components_by_type(file_path, component_type, search_in_subsheets?)` | Components of a type, for example "sensor" or "display" (heuristic: value, footprint and nets), in the file and in all sheets below it |
 
 ## Sheet hierarchy
 
 | Tool | What it does |
 |---|---|
 | `analyze_hierarchical_nets(file_path, filter_pattern?, show_hierarchy?)` | The nets of all sheets, and the labels and sheet pins that connect them |
-| `trace_hierarchical_connection(file_path, reference, pin_number?)` | The connections of a component across the sheets |
+| `trace_hierarchical_connection(file_path, reference, pin_number?)` | The sheet and the connections of a component, at each level of the hierarchy |
 
 ## Netlist
 
@@ -52,6 +52,11 @@ change of the schematic. The pin, device tree, hierarchy and search tools, and
 `get_symbol_details`, make the netlist with kicad-cli at each call. Thus they always
 give the current state of the schematic, and they need kicad-cli. For a large
 project, each call takes some seconds.
+
+The hierarchy and search tools get the components from the netlist: each component
+of each sheet path, at each level of the hierarchy, with the reference of that path
+(a sheet that the hierarchy uses two times gives two references). The netlist has
+no power symbols and no symbol with no library symbol.
 
 ## Boards
 

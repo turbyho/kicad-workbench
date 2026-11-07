@@ -86,6 +86,13 @@ def _write_netlist_sync(sch_path: Path) -> tuple[Path, Path | None]:
 
 
 def _parsed_netlist(sch_path: Path) -> tuple[NetlistParser, Path | None]:
+    """Return the parsed netlist of kicad-cli and the root schematic that kicad-cli
+    got. The function blocks (the export and the parse of the XML).
+
+    Raises:
+        AmbiguousRootError, NetlistError: As netlist_of.
+        InputError: The netlist is not valid XML.
+    """
     data, root = export_netlist(sch_path)
     return NetlistParser.from_bytes(data, f"of kicad-cli for {root or sch_path}"), root
 
@@ -106,6 +113,7 @@ def netlist_of(sch_path: Path) -> NetlistParser:
         NetlistError: kicad-cli is not there or cannot run, did not stop in
             time, or did not write the netlist; or it cannot write the netlist of
             the full project (cli_root).
+        InputError: The netlist is not valid XML.
     """
     return _parsed_netlist(sch_path)[0]
 
@@ -313,7 +321,7 @@ async def trace_netlist_connection(
         Detailed connection information from netlist
     """
     try:
-        parser = NetlistParser(netlist_path)
+        parser = await asyncio.to_thread(NetlistParser, netlist_path)
 
         if pin_number:
             result = parser.trace_connection(reference, pin_number)
@@ -390,7 +398,7 @@ async def get_netlist_nets(
         List of all nets with their connections
     """
     try:
-        parser = NetlistParser(netlist_path)
+        parser = await asyncio.to_thread(NetlistParser, netlist_path)
         nets = parser.get_nets()
 
         lines = [
@@ -442,7 +450,7 @@ async def get_netlist_components(
         List of components with their net connections
     """
     try:
-        parser = NetlistParser(netlist_path)
+        parser = await asyncio.to_thread(NetlistParser, netlist_path)
         components = parser.get_components()
 
         lines = [

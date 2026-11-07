@@ -66,17 +66,23 @@ class NetlistNet:
 
 
 class NetlistParser:
-    """Parser for KiCad netlist files (.xml)."""
+    """Parser for KiCad netlist files (.xml).
+
+    The constructors read and parse the XML: they block, thus an async tool makes
+    the parser off the event loop (asyncio.to_thread). The methods of the parser use
+    only the data in memory.
+    """
 
     def __init__(self, file_path: str) -> None:
-        """Initialize parser with netlist file.
+        """Read and parse a netlist file.
 
         Args:
             file_path: Path to .xml netlist file
 
         Raises:
             FileNotFoundError: If file doesn't exist
-            InputError: If file is not a .xml file
+            InputError: If file is not a .xml file, or not valid XML
+            OSError: The file cannot be read.
         """
         self.file_path: Path | None = Path(file_path)
         self._origin = str(self.file_path)
@@ -86,8 +92,7 @@ class NetlistParser:
         if self.file_path.suffix != ".xml":
             raise InputError(f"Netlist file must be .xml, got: {self.file_path.suffix}")
 
-        self._data: dict[str, Any] | None = None
-        self._text: bytes | None = None
+        self._data = self._parse(self.file_path.read_bytes())
 
     @classmethod
     def from_bytes(cls, data: bytes, origin: str = "of kicad-cli") -> "NetlistParser":
@@ -96,29 +101,27 @@ class NetlistParser:
         Args:
             origin: The origin of the data for the messages ("The netlist <origin>
                 is not valid XML"), for example "of kicad-cli for <schematic>".
+
+        Raises:
+            InputError: The data is not valid XML.
         """
         parser = cls.__new__(cls)
         parser.file_path = None  # no file: the origin names the data
         parser._origin = origin
-        parser._data = None
-        parser._text = data
+        parser._data = parser._parse(data)
         return parser
 
-    def _parse_file(self) -> dict[str, Any]:
-        """Parse the netlist XML file.
+    def _parse(self, data: bytes) -> dict[str, Any]:
+        """Parse the XML of the netlist.
 
         Returns:
             Parsed data structure
-        """
-        if self._data is not None:
-            return self._data
 
+        Raises:
+            InputError: The data is not valid XML.
+        """
         try:
-            root = (
-                ET.fromstring(self._text)
-                if self._text is not None
-                else ET.parse(self.file_path).getroot()
-            )
+            root = ET.fromstring(data)
         except ET.ParseError as e:
             raise InputError(f"The netlist {self._origin} is not valid XML: {e}") from e
 
@@ -193,7 +196,7 @@ class NetlistParser:
             for sheet in root.findall("design/sheet")
         ]
 
-        self._data = {
+        return {
             "components": components,
             "nets": nets,
             "sheets": sheets,
@@ -201,27 +204,10 @@ class NetlistParser:
             "kicad_version": kicad_version,
         }
 
-        return self._data
-
-    def _get_net_name(self, root: ET.Element, net_code: str) -> str:
-        """Get net name from net code.
-
-        Args:
-            root: XML root element
-            net_code: Net code string (e.g., "3")
-
-        Returns:
-            Net name
-        """
-        net_elem = root.find(f".//net[@code='{net_code}']")
-        if net_elem is not None:
-            return net_elem.get("name", f"net_{net_code}")
-        return f"net_{net_code}"
-
     @property
     def kicad_version(self) -> str | None:
         """The version of the KiCad that wrote the netlist (<design><tool>), or None."""
-        return self._parse_file()["kicad_version"]
+        return self._data["kicad_version"]
 
     def netlist_note(self) -> str:
         """Return the warning when the netlist has no KiCad version that the server can
@@ -240,16 +226,16 @@ class NetlistParser:
         Returns:
             Dictionary mapping reference to component
         """
-        data = self._parse_file()
+        data = self._data
         return data["components"]
 
     def get_duplicate_references(self) -> list[str]:
         """Get the references of more than one <comp> (get_components keeps one)."""
-        return self._parse_file()["duplicates"]
+        return self._data["duplicates"]
 
     def get_sheets(self) -> list[NetlistSheet]:
         """Get the sheet paths of the design, in the order of the netlist."""
-        return self._parse_file()["sheets"]
+        return self._data["sheets"]
 
     def get_nets(self) -> dict[str, NetlistNet]:
         """Get all nets from netlist.
@@ -257,7 +243,7 @@ class NetlistParser:
         Returns:
             Dictionary mapping net name to net
         """
-        data = self._parse_file()
+        data = self._data
         return data["nets"]
 
     def get_component_nets(self, reference: str) -> dict[str, list[str]]:

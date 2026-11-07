@@ -416,6 +416,7 @@ async def _pin_conflicts(sch_path: Path) -> list[dict]:
     Raises:
         AmbiguousRootError: More than one root schematic holds the sheet.
         NetlistError: kicad-cli did not write the netlist.
+        InputError: The netlist is not valid XML.
     """
     # The netlist has the electrical type of each node as KiCad gives it (with the
     # alternate of the pin).

@@ -210,10 +210,9 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
         netlist = netlist_of(file_path)
     except (AmbiguousRootError, NetlistError) as e:
         return None, f"kicad-cli gives no netlist ({e})"
-    try:
-        component = netlist.get_components().get(reference)
     except InputError as e:  # not XML
         return None, str(e)
+    component = netlist.get_components().get(reference)
     if component is None:
         return None, f"the netlist of kicad-cli has no pin of {reference}"
     pins = [

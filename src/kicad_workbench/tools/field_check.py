@@ -41,10 +41,10 @@ from ..utils.kicad_bom import (
     variant_label,
 )
 from ..utils.kicad_cli import KicadCliError, get_kicad_version
-from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
-from .library import NO_KICAD_CLI, netlist_root
+from .library import NO_KICAD_CLI
 
 # The fields of the BOM: "*" adds each field of the symbols (MPN, Value_Confirmed).
 _FIELDS = ["Reference", "Value", "*"]

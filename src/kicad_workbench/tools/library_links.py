@@ -43,7 +43,7 @@ from ..utils.library_tables import (
     project_variables,
 )
 from ..utils.model_paths import ModelFile, resolve_model
-from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.schematic_settings import rule_severities, unknown_severity_reason
 from ..utils.tool_errors import error_answer
 from .library import (
@@ -52,7 +52,6 @@ from .library import (
     annotation_lines,
     annotation_sentences,
     cell,
-    netlist_root,
     not_found_reason,
     problem_lines,
     project_file,

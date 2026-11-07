@@ -50,10 +50,10 @@ from ..utils.kicad_bom import (
 )
 from ..utils.kicad_cli import CliExport, KicadCliError, get_kicad_version
 from ..utils.kicad_text import KiCadEncodingError
-from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
+from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
-from .library import NO_KICAD_CLI, cell, netlist_root
+from .library import NO_KICAD_CLI, cell
 
 DEFAULT_FIELDS = ("Reference", "Value", "Footprint", "Datasheet", "${QUANTITY}", "${DNP}", "*")
 # IsGeneratedField of KiCad: a field name that is one text variable.

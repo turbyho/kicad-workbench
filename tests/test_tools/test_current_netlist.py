@@ -14,6 +14,7 @@ import pytest
 
 from kicad_workbench.errors import InputError
 from kicad_workbench.tools import netlist, pin_analysis
+from kicad_workbench.utils import kicad_cli
 from kicad_workbench.utils.kicad_cli import CliExport
 
 SCH = '(kicad_sch (version 20250114) (generator "eeschema"))\n'
@@ -107,3 +108,194 @@ def test_a_sub_sheet_gives_the_netlist_of_its_root(monkeypatch, tmp_path):
     assert sources == [root]
     with pytest.raises(InputError, match=f"The netlist of kicad-cli for {root} is not valid XML"):
         parser.get_nets()
+
+
+def _two_top_level_sheets(tmp_path):
+    for name in ("board", "extra"):
+        (tmp_path / f"{name}.kicad_sch").write_text(SCH, encoding="utf-8")
+    (tmp_path / "board.kicad_pro").write_text(
+        '{"schematic": {"top_level_sheets": ['
+        '{"filename": "board.kicad_sch", "name": "board", "uuid": "'
+        '11111111-1111-1111-1111-111111111111"}, '
+        '{"filename": "extra.kicad_sch", "name": "Extra", "uuid": "'
+        '22222222-2222-2222-2222-222222222222"}]}}',
+        encoding="utf-8",
+    )
+    return tmp_path / "board.kicad_sch"
+
+
+def test_two_top_level_sheets_with_kicad_10_0_6_are_an_error(monkeypatch, tmp_path):
+    # kicad-cli 10.0.6 loads only the schematic that it gets
+    # (EESCHEMA_HELPERS::LoadSchematic): the netlist would not have the other
+    # top-level sheet. Before, the netlist tools used it with no message.
+    root = _two_top_level_sheets(tmp_path)
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.6")
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: pytest.fail("export"))
+    for sch in (root, tmp_path / "extra.kicad_sch"):
+        with pytest.raises(
+            netlist.NetlistError,
+            match="has 2 top-level sheets. kicad-cli of "
+            "KiCad 10.0.6 writes the netlist of one top-level sheet only",
+        ):
+            netlist.netlist_of(sch)
+
+
+def test_two_top_level_sheets_with_kicad_10_0_7(monkeypatch, tmp_path):
+    root = _two_top_level_sheets(tmp_path)
+    sources = []
+
+    def export(command, source, file_name, timeout):
+        sources.append(source)
+        return CliExport(FIXED, [])
+
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.7")
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", export)
+    netlist.netlist_of(tmp_path / "extra.kicad_sch")
+    assert sources == [root]
+
+
+def test_one_top_level_sheet_needs_no_version(monkeypatch, sch):
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: pytest.fail("version"))
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(FIXED, []))
+    assert netlist.netlist_of(sch).get_components()
+
+
+def test_erc_of_two_top_level_sheets_with_kicad_10_0_6(monkeypatch, tmp_path):
+    from kicad_workbench.tools import validation
+
+    root = _two_top_level_sheets(tmp_path)
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.6")
+    result = asyncio.run(validation.run_erc(str(root)))
+    assert result.startswith(
+        f"❌ The project {tmp_path / 'board.kicad_pro'} has 2 top-level "
+        "sheets. kicad-cli of KiCad 10.0.6 writes the ERC of one"
+    ), result
+
+
+def test_two_top_level_sheets_with_no_kicad_cli(monkeypatch, tmp_path):
+    root = _two_top_level_sheets(tmp_path)
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: None)
+    with pytest.raises(
+        netlist.NetlistError,
+        match="the tool needs the version of kicad-cli, but kicad-cli does not give it",
+    ):
+        netlist.netlist_of(root)
+
+
+def test_the_erc_report_is_stale_after_a_change_of_an_other_top_level_sheet(tmp_path):
+    # kicad-cli 10.0.7 and later check all top-level sheets of the project.
+    from kicad_workbench.tools import validation
+
+    root = _two_top_level_sheets(tmp_path)
+    assert tmp_path / "extra.kicad_sch" in validation._erc_sources(root)
+
+
+def test_the_note_of_a_top_level_sheet_that_is_not_the_root(monkeypatch, tmp_path):
+    root = _two_top_level_sheets(tmp_path)
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.7")
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(FIXED, []))
+    result = asyncio.run(netlist.generate_netlist(str(tmp_path / "extra.kicad_sch")))
+    assert (
+        "`extra.kicad_sch` is not the root schematic of its project. The netlist is the "
+        f"netlist of `{root.name}`" in result
+    ), result
+    assert "sub-sheet. Switched" not in result
+
+
+@pytest.mark.parametrize("tool", ["get_erc_violations", "export_erc_report"])
+def test_the_erc_tools_of_two_top_level_sheets_with_kicad_10_0_6(monkeypatch, tmp_path, tool):
+    from kicad_workbench.tools import validation
+
+    root = _two_top_level_sheets(tmp_path)
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.6")
+    result = asyncio.run(getattr(validation, tool)(str(tmp_path / "extra.kicad_sch")))
+    assert result.startswith(f"❌ The project {root.with_suffix('.kicad_pro')} has 2 "), result
+
+
+def test_the_drc_report_is_stale_after_a_change_of_an_other_top_level_sheet(tmp_path):
+    from kicad_workbench.tools import validation
+
+    _two_top_level_sheets(tmp_path)
+    assert tmp_path / "extra.kicad_sch" in validation._drc_sources(tmp_path / "board.kicad_pcb")
+
+
+def test_the_nets_note_of_the_root_runs_no_kicad_cli(monkeypatch, tmp_path):
+    from kicad_workbench.tools import schematic
+
+    root = _two_top_level_sheets(tmp_path)
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: pytest.fail("version"))
+    result = asyncio.run(schematic.list_schematic_nets(str(root)))
+    assert "Note" not in result, result
+
+
+def test_the_nets_note_of_an_other_top_level_sheet(monkeypatch, tmp_path):
+    # The note needs no kicad-cli: it names the schematic of the project name.
+    from kicad_workbench.tools import schematic
+
+    root = _two_top_level_sheets(tmp_path)
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: pytest.fail("version"))
+    result = asyncio.run(schematic.list_schematic_nets(str(tmp_path / "extra.kicad_sch")))
+    assert (
+        "`extra.kicad_sch` is not the root schematic of its project. The nets with no "
+        "label need the full hierarchy: they are not here. Use `generate_netlist` on "
+        f"`{root.name}`"
+    ) in result, result
+
+
+def test_the_sheet_paths_of_kicad_cli(tmp_path):
+    # kicad-cli 10.0.7 and later load all top-level sheets (checked with the Docker
+    # image: spike/kicad-versions/netlist_sheets_check.py); 10.0.6 only the root.
+    root = _two_top_level_sheets(tmp_path)
+    paths, _problems = kicad_cli.cli_sheet_paths(root, "10.0.7")
+    assert sorted(p.shown for p in paths) == ["/Extra/", "/board/"]
+    assert {p.netlist_path for p in paths} == {"/"}
+    paths, _problems = kicad_cli.cli_sheet_paths(root, "10.0.6")
+    assert [p.shown for p in paths] == ["/"]
+
+
+def test_the_components_of_each_top_level_sheet_with_kicad_10_0_7(monkeypatch, tmp_path):
+    _two_top_level_sheets(tmp_path)
+    xml = (
+        '<export version="E"><design><tool>Eeschema 10.0.7</tool>'
+        '<sheet number="1" name="/board/" tstamps="/"><title_block><source>board.kicad_sch'
+        "</source></title_block></sheet>"
+        '<sheet number="2" name="/Extra/" tstamps="/"><title_block><source>extra.kicad_sch'
+        "</source></title_block></sheet></design><components>"
+        '<comp ref="R1"><value>1k</value><sheetpath names="/board/" tstamps="/"/></comp>'
+        '<comp ref="R2"><value>2k</value><sheetpath names="/Extra/" tstamps="/"/></comp>'
+        "</components><nets/></export>"
+    ).encode()
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.7")
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(xml, []))
+    for name, ref in (("board", "R1"), ("extra", "R2")):
+        _nl, found, warnings = netlist.components_of_file(tmp_path / f"{name}.kicad_sch", True)
+        assert [c.reference for c in found] == [ref], (name, found, warnings)
+        assert warnings == []
+
+
+def test_a_sheet_below_a_top_level_sheet_with_a_text_variable(monkeypatch, tmp_path):
+    # The sheets below a top-level sheet of kicad-cli 10.0.7 are found by their
+    # "tstamps", not by "names" (KiCad expands the text variables of the names).
+    _two_top_level_sheets(tmp_path)
+    child = "33333333-3333-3333-3333-333333333333"
+    extra = tmp_path / "extra.kicad_sch"
+    extra.write_text(
+        SCH.replace(
+            "))\n",
+            f') (sheet (at 1 1) (size 5 5) (uuid "{child}") (property "Sheetname" "${{V}}_io" '
+            '(at 1 1 0)) (property "Sheetfile" "sub.kicad_sch" (at 1 6 0))))\n',
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "sub.kicad_sch").write_text(SCH, encoding="utf-8")
+    xml = (
+        '<export version="E"><design><tool>Eeschema 10.0.7</tool>'
+        '<sheet number="1" name="/board/" tstamps="/"/><sheet number="2" name="/Extra/" '
+        f'tstamps="/"/><sheet number="3" name="/Extra/main_io/" tstamps="/{child}/"/>'
+        '</design><components><comp ref="R3"><value>3k</value><sheetpath '
+        f'names="/Extra/main_io/" tstamps="/{child}/"/></comp></components><nets/></export>'
+    ).encode()
+    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.7")
+    monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(xml, []))
+    _nl, found, warnings = netlist.components_of_file(extra, True)
+    assert [c.reference for c in found] == ["R3"], warnings

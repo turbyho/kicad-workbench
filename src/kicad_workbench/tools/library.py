@@ -67,8 +67,8 @@ from ..utils.model_paths import ModelFile, resolve_model
 from ..utils.pin_pad_mapping import PinPadMapping, StackedPinError, map_pins, match_pads
 from ..utils.sch_hierarchy import (
     AmbiguousRootError,
+    netlist_root,
     schematic_project_file,
-    top_level_sheets,
 )
 from ..utils.svg_image import (
     Plan,
@@ -1001,49 +1001,6 @@ def _stacked_text(number: str) -> bool:
     start with "[" and end with "]" as one number (ExpandStackedPinNotation).
     """
     return number.startswith("[") and number.endswith("]")
-
-
-def netlist_root(project: Path, kicad: str, output: str = "netlist") -> tuple[Path, int]:
-    """Return the schematic that gives kicad-cli the netlist of the full project.
-
-    kicad-cli uses the project file of the name of the schematic
-    (EESCHEMA_HELPERS::LoadSchematic). From KiCad 10.0.7 it loads all
-    top-level sheets of that project (top_level_sheets) when the schematic is
-    one of them. KiCad 10.0.0 to 10.0.6 load only the schematic. The BOM
-    export loads the schematic in the same way (JobExportBom).
-
-    output: The name of the output in the error messages, for example "BOM".
-
-    Returns:
-        (the schematic, the number of top-level sheets of the project).
-
-    Raises:
-        InputError: kicad-cli cannot write the output of the full project.
-    """
-    tops = top_level_sheets(project)
-    named = Path(os.path.abspath(project.with_suffix(".kicad_sch")))
-    if len(tops) == 1:
-        if project.is_file() and tops[0].file.resolve() != named.resolve():
-            raise InputError(
-                f"The top-level sheet of the project {project} is {tops[0].file.name}. "
-                "kicad-cli uses the project file of the name of the schematic, thus it does "
-                "not use the settings of this project (for example its text variables)."
-            )
-        return tops[0].file, 1
-    numbers = version_triple(kicad)
-    if numbers is None or numbers < (10, 0, 7):
-        raise InputError(
-            f"The project {project} has {len(tops)} top-level sheets. kicad-cli of KiCad "
-            f"{kicad} writes the {output} of one top-level sheet only. KiCad 10.0.7 and later "
-            f"write the {output} of all top-level sheets."
-        )
-    if not named.is_file() or all(top.file.resolve() != named.resolve() for top in tops):
-        raise InputError(
-            f"The project {project} has {len(tops)} top-level sheets, but {named.name} is "
-            f"not one of them. kicad-cli writes the {output} of all top-level sheets only for "
-            "the schematic with the name of the project."
-        )
-    return named, len(tops)
 
 
 def _stacked_rules(kicad: str, unsure: list[str]) -> bool:

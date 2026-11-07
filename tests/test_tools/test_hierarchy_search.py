@@ -193,7 +193,8 @@ def test_two_sheets_with_one_path_are_not_in_the_result(project):
     project["xml"] = netlist_xml(sheets=sheets, components=components)
     result = search(project["dir"] / "root.kicad_sch")
     assert found(result) == ["U2", "U3"], result
-    assert ": /, /Extra/. The tool cannot tell if their components are in the file" in result
+    # "/" of the root is known by its names; "/Extra/" is not in the hierarchy.
+    assert ": /Extra/. The tool cannot tell if their components are in the file" in result
 
 
 def test_a_type_of_the_table_in_lower_case(project):

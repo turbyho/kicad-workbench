@@ -53,6 +53,12 @@ change of the schematic. The pin, device tree, hierarchy and search tools, and
 give the current state of the schematic, and they need kicad-cli. For a large
 project, each call takes some seconds.
 
+For a sub-sheet or an other top-level sheet, these tools and the ERC tools use the
+schematic of the project name, as for the BOM. A KiCad 10 project with more than one
+top-level sheet needs kicad-cli of KiCad 10.0.7 or later, which loads all top-level
+sheets: kicad-cli 10.0.0 to 10.0.6 loads only one, thus these tools give an error, not
+a result with some sheets.
+
 The hierarchy and search tools get the components from the netlist: each component
 of each sheet path, at each level of the hierarchy, with the reference of that path
 (a sheet that the hierarchy uses two times gives two references). The netlist has

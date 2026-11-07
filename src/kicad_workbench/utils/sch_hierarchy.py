@@ -25,9 +25,9 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..errors import WorkbenchError
+from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_fields import FieldRules, rules_for_file, sheet_fields
-from ..parsers.kicad_versions import KicadFileError, file_version
+from ..parsers.kicad_versions import KicadFileError, file_version, version_triple
 from ..parsers.sexpr import Node, SExprError, parse
 from .kicad_text import KiCadEncodingError, decode_as_kicad
 
@@ -315,6 +315,52 @@ def _walk(
     return places, problems
 
 
+def netlist_root(project: Path, kicad: str | None, output: str = "netlist") -> tuple[Path, int]:
+    """Return the schematic that gives kicad-cli the netlist of the full project.
+
+    kicad-cli uses the project file of the name of the schematic
+    (EESCHEMA_HELPERS::LoadSchematic). From KiCad 10.0.7 it loads all
+    top-level sheets of that project (top_level_sheets) when the schematic is
+    one of them. KiCad 10.0.0 to 10.0.6 load only the schematic. The BOM
+    export loads the schematic in the same way (JobExportBom).
+
+    kicad: The version of kicad-cli. A project with one top-level sheet does not
+        need it (None).
+    output: The name of the output in the error messages, for example "BOM".
+
+    Returns:
+        (the schematic, the number of top-level sheets of the project).
+
+    Raises:
+        InputError: kicad-cli cannot write the output of the full project.
+    """
+    tops = top_level_sheets(project)
+    named = Path(os.path.abspath(project.with_suffix(".kicad_sch")))
+    if len(tops) == 1:
+        if project.is_file() and tops[0].file.resolve() != named.resolve():
+            raise InputError(
+                f"The top-level sheet of the project {project} is {tops[0].file.name}. "
+                "kicad-cli uses the project file of the name of the schematic, thus it does "
+                "not use the settings of this project (for example its text variables)."
+            )
+        return tops[0].file, 1
+    numbers = version_triple(kicad) if kicad else None
+    if numbers is None or numbers < (10, 0, 7):
+        which = f"of KiCad {kicad}" if kicad else "of an unknown version"
+        raise InputError(
+            f"The project {project} has {len(tops)} top-level sheets. kicad-cli {which} "
+            f"writes the {output} of one top-level sheet only. KiCad 10.0.7 and later "
+            f"write the {output} of all top-level sheets."
+        )
+    if not named.is_file() or all(top.file.resolve() != named.resolve() for top in tops):
+        raise InputError(
+            f"The project {project} has {len(tops)} top-level sheets, but {named.name} is "
+            f"not one of them. kicad-cli writes the {output} of all top-level sheets only for "
+            "the schematic with the name of the project."
+        )
+    return named, len(tops)
+
+
 def root_sheet_paths(root: Path) -> tuple[list[SheetPath], list[str]]:
     """Return each place of each file in the hierarchy of a root schematic, as
     kicad-cli loads it: the schematic is the one top-level sheet
@@ -465,6 +511,10 @@ def _other_roots(file_path: Path) -> list[Path]:
 
 def find_root_schematic(file_path: Path) -> Path | None:
     """Return the root schematic of a sub-sheet, or None.
+
+    The tools that give a schematic to kicad-cli do not use this function: they
+    use kicad_cli.cli_root, the schematic of the project name that kicad-cli loads
+    with the full project (also with the top-level sheets of KiCad 10).
 
     Returns:
         None if the file is the root schematic of its own project, or if no

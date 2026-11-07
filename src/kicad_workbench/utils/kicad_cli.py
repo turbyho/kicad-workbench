@@ -30,10 +30,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
-from ..parsers.kicad_versions import version_numbers
+from ..parsers.kicad_versions import version_numbers, version_triple
 from .kicad_text import read_kicad_json
 from .kicad_version import find_kicad_install
 from .library_tables import kicad_settings_dir
+from .sch_hierarchy import (
+    PRO_SUFFIX,
+    SheetPath,
+    netlist_root,
+    root_sheet_paths,
+    schematic_project_file,
+    sheet_paths,
+    top_level_sheets,
+)
 
 _cached_exe: str | None = None
 
@@ -387,3 +396,65 @@ def kicad_cli_version_sync() -> str | None:
 async def get_kicad_version() -> str | None:
     """Return the installed KiCad version (e.g. "10.0.6"), or None if unknown."""
     return await asyncio.to_thread(kicad_cli_version_sync)
+
+
+def cli_root(sch_path: Path, output: str) -> Path | None:
+    """Return the schematic that kicad-cli gets for an output of the full project
+    (the netlist, the ERC), when it is not sch_path; None when it is sch_path.
+
+    kicad-cli loads the schematic that it gets and the project file of its name
+    (EESCHEMA_HELPERS::LoadSchematic): thus the schematic of the project name
+    (netlist_root, as for the BOM). A sub-sheet alone does not have the hierarchy
+    that gives the names of the nets with no label. The function blocks: it can
+    run kicad-cli for its version.
+
+    Args:
+        sch_path: A schematic file of the project.
+        output: The name of the output in the error messages.
+
+    Raises:
+        AmbiguousRootError: More than one project holds the sheet.
+        InputError: kicad-cli cannot write the output of the full project (more
+            than one top-level sheet with kicad-cli 10.0.0 to 10.0.6, or a
+            top-level sheet that is not the schematic of the project name).
+    """
+    project = schematic_project_file(sch_path)
+    tops = top_level_sheets(project)
+    kicad = None
+    if len(tops) > 1:
+        # The version of kicad-cli only for a project with more than one top-level sheet.
+        kicad = kicad_cli_version_sync()
+        if kicad is None:
+            raise InputError(
+                f"The project {project} has {len(tops)} top-level sheets: the tool needs the "
+                "version of kicad-cli, but kicad-cli does not give it (it is not there or it "
+                "does not run)."
+            )
+    root, _tops = netlist_root(project, kicad, output)
+    same = Path(root).resolve() == Path(sch_path).resolve()
+    return None if same else root
+
+
+def cli_sheet_paths(
+    root: Path, kicad: str | None, project: Path | None = None
+) -> tuple[list[SheetPath], list[str]]:
+    """Return the sheet paths of the hierarchy that kicad-cli loads for a root
+    schematic (cli_root), and the problems.
+
+    kicad-cli 10.0.7 and later load all top-level sheets of the project when the
+    schematic is one of them (EESCHEMA_HELPERS::LoadSchematic): the paths of
+    sheet_paths, with the name of the top-level sheet in each path. Else kicad-cli
+    loads the schematic as the one top-level sheet: the paths of root_sheet_paths.
+
+    Args:
+        root: The schematic that kicad-cli gets (cli_root).
+        kicad: The version of kicad-cli; None: not known (a project with one
+            top-level sheet does not need it).
+        project: The project file (schematic_project_file); None: the project
+            file of the name of root.
+    """
+    project = project or root.with_suffix(PRO_SUFFIX)
+    numbers = version_triple(kicad) if kicad else None
+    if len(top_level_sheets(project)) > 1 and numbers is not None and numbers >= (10, 0, 7):
+        return sheet_paths(project)
+    return root_sheet_paths(root)

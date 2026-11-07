@@ -10,7 +10,7 @@ from ..parsers.schematic_parser import SchematicParser, unknown_alternate_note
 from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
-from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic
+from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.tool_errors import error_answer
 from .netlist import NetlistError, netlist_of
 
@@ -262,24 +262,29 @@ async def list_schematic_nets(
             power_keywords = ["gnd", "vcc", "vdd", "vss", "+", "-"]
             nets = [n for n in nets if any(kw in n.name.lower() for kw in power_keywords)]
 
-        # Sub-sheet detection: unnamed nets can't be resolved without hierarchy
+        # A file that is not the root schematic: the nets with no label need the
+        # full hierarchy. The root is the schematic that the netlist tools use.
         sch_path = Path(file_path)
-        try:
-            root_sch = find_root_schematic(sch_path)
-            subsheet = f"`{sch_path.name}` is a sub-sheet"
-            root_text = f"the root schematic `{root_sch.name}`" if root_sch else ""
-        except AmbiguousRootError as e:
-            subsheet = str(e)
-            root_text = "one of these root schematics"
         subsheet_note = ""
-        if root_text:
+        try:
+            project = await asyncio.to_thread(schematic_project_file, sch_path)
+            # The schematic of the project name: the netlist tools give it to kicad-cli
+            # (cli_root). The note needs no kicad-cli.
+            root_sch = project.with_suffix(".kicad_sch")
+            if root_sch.resolve() == sch_path.resolve():
+                root_sch = None
+        except AmbiguousRootError as e:
             subsheet_note = (
-                f"**Note:** {subsheet}. "
-                f"Unnamed wire-only nets cannot be resolved without the full "
-                f"hierarchy context and will not appear here. "
-                f"Use `generate_netlist` on {root_text} "
-                f"for complete net data."
+                f"**Note:** {e}. The nets with no label need the full hierarchy: they are "
+                "not here. Use `generate_netlist` on the root schematic of the project."
             )
+        else:
+            if root_sch:
+                subsheet_note = (
+                    f"**Note:** `{sch_path.name}` is not the root schematic of its project. "
+                    "The nets with no label need the full hierarchy: they are not here. Use "
+                    f"`generate_netlist` on `{root_sch.name}` for all nets."
+                )
 
         if not nets:
             if subsheet_note:

@@ -7,12 +7,12 @@ import hashlib
 import tempfile
 from pathlib import Path
 
-from ..errors import WorkbenchError
+from ..errors import InputError, WorkbenchError
 from ..parsers.netlist_parser import NetlistComponent, NetlistParser
 from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
-from ..utils.kicad_cli import KicadCliError, export_with_kicad_cli
-from ..utils.sch_hierarchy import AmbiguousRootError, find_root_schematic, root_sheet_paths
+from ..utils.kicad_cli import KicadCliError, cli_root, cli_sheet_paths, export_with_kicad_cli
+from ..utils.sch_hierarchy import AmbiguousRootError, SheetPath, schematic_project_file
 from ..utils.tool_errors import error_answer
 from ..utils.user_files import write_atomic
 
@@ -39,23 +39,31 @@ def export_netlist(sch_path: Path) -> tuple[bytes, Path | None]:
     """Return the XML netlist of a schematic as kicad-cli writes it.
 
     A sub-sheet does not have the hierarchy that gives the names of the nets with
-    no label. Thus, for a sub-sheet, kicad-cli writes the netlist of the root
-    schematic. kicad-cli writes into its own temporary folder
-    (export_with_kicad_cli). The function blocks: run it off the event loop.
+    no label. Thus kicad-cli writes the netlist of the schematic that gives the
+    netlist of the full project (netlist_root, as for the BOM): the schematic of
+    the project name. A project with more than one top-level sheet (KiCad 10) is
+    an error with kicad-cli 10.0.0 to 10.0.6: it loads only one top-level sheet,
+    and the netlist would not have the others. kicad-cli writes into its own
+    temporary folder (export_with_kicad_cli). The function blocks: run it off the
+    event loop.
 
     Args:
         sch_path: The schematic file.
 
     Returns:
-        The netlist, and the root schematic for a sub-sheet (None for a root
-        schematic).
+        The netlist, and the root schematic when it is not sch_path (None when
+        sch_path is the root schematic).
 
     Raises:
-        AmbiguousRootError: More than one root schematic holds the sheet.
+        AmbiguousRootError: More than one project holds the sheet.
         NetlistError: kicad-cli is not there or cannot run, did not stop in
-            time, or did not write the netlist.
+            time, or did not write the netlist; or it cannot write the netlist of
+            the full project.
     """
-    root = find_root_schematic(sch_path)
+    try:
+        root = cli_root(sch_path, "netlist")
+    except InputError as e:
+        raise NetlistError(f"The server cannot make the netlist of {sch_path}: {e}") from e
     source = root or sch_path
     try:
         export = export_with_kicad_cli(
@@ -88,14 +96,16 @@ def netlist_of(sch_path: Path) -> NetlistParser:
     The tools that use the nets read the files of the schematic at each call: a
     netlist file of an earlier export (of the cache, of the schematic editor, or
     of an other project with the same sheet name) can be old. The netlist stays
-    in memory: no file of an other tool call can change it. For a sub-sheet, it
-    is the netlist of the root schematic (export_netlist). The function blocks:
+    in memory: no file of an other tool call can change it. For a schematic that
+    is not the root schematic of its project, it is the netlist of the root
+    schematic (export_netlist, cli_root). The function blocks:
     run it off the event loop (current_netlist).
 
     Raises:
-        AmbiguousRootError: More than one root schematic holds the sheet.
+        AmbiguousRootError: More than one project holds the sheet.
         NetlistError: kicad-cli is not there or cannot run, did not stop in
-            time, or did not write the netlist.
+            time, or did not write the netlist; or it cannot write the netlist of
+            the full project (cli_root).
     """
     return _parsed_netlist(sch_path)[0]
 
@@ -124,10 +134,13 @@ def components_of_file(
     and no other references that start with "#", and no symbol with no library
     symbol (NETLIST_EXPORTER_BASE::findNextSymbol). The components of the file are
     the components of each sheet path of the file in the hierarchy that kicad-cli
-    loads (root_sheet_paths), with below also the components of the sheets below
-    these paths. The sheet path of a component is its "tstamps" in the netlist
-    (SheetPath.netlist_path), not its "names": KiCad expands the text variables
-    of the sheet names. The function blocks: run it off the event loop.
+    loads (cli_sheet_paths, for the KiCad of the netlist), with below also the
+    components of the sheets below these paths. The sheet path of a component is
+    its "tstamps" in the netlist (SheetPath.netlist_path), not its "names": KiCad
+    expands the text variables of the sheet names. Only the top-level sheets of
+    kicad-cli 10.0.7 and later have the same "tstamps" ("/"): for a component on
+    one of them, "names" (with the name of the top-level sheet) tells which. The
+    function blocks: run it off the event loop.
 
     Args:
         sch_path: The schematic file (the root schematic or a sub-sheet).
@@ -137,20 +150,29 @@ def components_of_file(
         (the netlist, the components in the order of their references, warnings).
 
     Raises:
-        AmbiguousRootError: More than one root schematic holds the sheet.
-        NetlistError: kicad-cli did not write the netlist.
+        AmbiguousRootError: More than one project holds the sheet.
+        NetlistError: kicad-cli did not write the netlist, or it cannot write the
+            netlist of the full project (cli_root).
         InputError: The netlist is not valid XML.
     """
     netlist, root = _parsed_netlist(sch_path)
     hierarchy = root or sch_path
-    places, problems = root_sheet_paths(hierarchy)
+    # The hierarchy of the kicad-cli that wrote the netlist (<tool>Eeschema 10.0.7).
+    places, problems = cli_sheet_paths(
+        hierarchy, netlist.kicad_version, schematic_project_file(sch_path)
+    )
     warnings = [f"⚠️ {problem}" for problem in problems] + netlist_warnings(netlist)
-    known = {place.netlist_path for place in places if place.netlist_path is not None}
     sheets = netlist.get_sheets()
     counts = collections.Counter(sheet.tstamps for sheet in sheets)
-    # A sheet that root_sheet_paths does not have, or one path for two sheets: kicad-cli
-    # of KiCad 10.0.7 and later also loads the other top-level sheets of the project.
-    unknown = [s.names for s in sheets if s.tstamps not in known or counts[s.tstamps] > 1]
+    ambiguous = {tstamps for tstamps, count in counts.items() if count > 1}
+
+    def key(tstamps: str | None, names: str) -> tuple[str | None, str | None]:
+        # One "tstamps" for more sheets: the top-level sheets of kicad-cli 10.0.7 and
+        # later ("/"). Then also "names", which has the name of the top-level sheet.
+        return (tstamps, names) if tstamps in ambiguous else (tstamps, None)
+
+    known = {key(p.netlist_path, p.shown) for p in places if p.netlist_path is not None}
+    unknown = [s.names for s in sheets if key(s.tstamps, s.names) not in known]
     if unknown:
         warnings.append(
             f"⚠️ The netlist has sheets that the tool does not find in the hierarchy of "
@@ -158,22 +180,32 @@ def components_of_file(
             "are in the file: they are not in the result."
         )
     target = sch_path.resolve()
-    mine = [
-        place.netlist_path
-        for place in places
-        if place.netlist_path is not None and place.file.resolve() == target
-    ]
+    mine = [p for p in places if p.netlist_path is not None and p.file.resolve() == target]
     if not mine:
         warnings.append(
             f"⚠️ {sch_path} has no sheet path with UUIDs in the hierarchy of {hierarchy}."
         )
-    ambiguous = {tstamps for tstamps, count in counts.items() if count > 1}
+
+    def below_place(component: NetlistComponent, place: SheetPath) -> bool:
+        if place.netlist_path in ambiguous and place.uuids:
+            # A top-level sheet ("/"): the sheets below it are the paths of the server
+            # that start with its UUID; their "tstamps" are unique.
+            tree = {
+                p.netlist_path
+                for p in places
+                if p.uuids and p.uuids[0] == place.uuids[0] and p.netlist_path not in ambiguous
+            }
+            return component.sheet_tstamps in tree
+        return component.sheet_tstamps.startswith(place.netlist_path)
 
     def inside(component: NetlistComponent) -> bool:
-        tstamps = component.sheet_tstamps
-        if tstamps not in known or tstamps in ambiguous:
+        own = key(component.sheet_tstamps, component.sheet_names)
+        if own not in known:
             return False  # also no sheet path: a symbol with no library symbol
-        return any(tstamps == path or (below and tstamps.startswith(path)) for path in mine)
+        return any(
+            own == key(place.netlist_path, place.shown) or (below and below_place(component, place))
+            for place in mine
+        )
 
     components = [c for c in netlist.get_components().values() if inside(c)]
     return netlist, sorted(components, key=reference_key), warnings
@@ -209,13 +241,14 @@ async def write_netlist(sch_path: Path) -> tuple[Path, Path | None]:
         sch_path: The schematic file.
 
     Returns:
-        The netlist file, and the root schematic for a sub-sheet (None for a
-        root schematic).
+        The netlist file, and the root schematic when it is not sch_path (None
+        for the root schematic of the project).
 
     Raises:
-        AmbiguousRootError: More than one root schematic holds the sheet.
+        AmbiguousRootError: More than one project holds the sheet.
         NetlistError: kicad-cli is not there or cannot run, did not stop in
-            time, or did not write the netlist.
+            time, or did not write the netlist; or it cannot write the netlist of
+            the full project (cli_root).
         OSError: The file of the cache cannot be written.
     """
     return await asyncio.to_thread(_write_netlist_sync, sch_path)
@@ -244,9 +277,10 @@ async def generate_netlist(
         subsheet_note = ""
         if root_sch:
             subsheet_note = (
-                f"\n\n⚠️ **Note:** `{sch_path.name}` is a hierarchical sub-sheet. "
-                f"Switched to root schematic `{root_sch.name}` for complete netlist "
-                f"(unnamed wire-only nets require full hierarchy context to resolve)."
+                f"\n\n⚠️ **Note:** `{sch_path.name}` is not the root schematic of its "
+                f"project. The netlist is the netlist of `{root_sch.name}`, the schematic "
+                "that kicad-cli loads with the full project (a sub-sheet alone does not "
+                "give the names of the nets with no label)."
             )
         return f"""✅ Netlist generated successfully
 

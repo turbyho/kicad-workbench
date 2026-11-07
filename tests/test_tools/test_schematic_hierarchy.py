@@ -32,11 +32,6 @@ class TestHierarchicalParsing:
         assert comps["C9"].value == "100nF"
         assert comps["C9"].footprint == "Capacitor_SMD:C_0603_1608Metric"
 
-    def test_get_sheets_exposes_hierarchy(self):
-        sheets = {s["name"]: s["file"] for s in make_root_parser().get_sheets()}
-        assert sheets["Power"] == "child.kicad_sch"
-        assert sheets["Ghost"] == "missing.kicad_sch"
-
 
 class TestMergeDuplicateReferences:
     def _comp(self, ref: str, pins: list[dict]) -> SchematicComponent:

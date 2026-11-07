@@ -12,6 +12,7 @@ import asyncio
 
 import pytest
 
+from kicad_workbench.parsers import sheet_list
 from kicad_workbench.tools import schematic
 
 from .test_symbol_fields import symbol, write_project
@@ -125,3 +126,94 @@ def test_the_details_of_a_reference_that_is_not_annotated(unannotated):
 def test_the_details_of_two_units(unannotated):
     result = run(schematic.get_symbol_details(str(unannotated), "U3"))
     assert "**Placed units:** unit 1 in /, unit 2 in /" in result, result
+
+
+def test_the_info_lists_the_sheet_symbols_as_kicad_loads_them(tmp_path, monkeypatch):
+    # A sheet with no file field (KiCad 10: an empty file name) and a sheet of a file
+    # that is not there: KiCad shows an empty sheet for each (measured with kicad-cli
+    # 8.0.9 to 10.0.7: the page is in the SVG export). A name of white space only.
+    async def version():
+        return "10.0.7"
+
+    monkeypatch.setattr(schematic, "get_kicad_version", version)
+    monkeypatch.setattr(schematic, "netlist_of", _no_netlist)
+    sheets = (
+        '\t(sheet (at 1 1) (size 2 2) (uuid "c1")\n'
+        '\t\t(property "Sheetname" "Leaf" (at 0 0 0))\n\t)\n'
+        '\t(sheet (at 1 1) (size 2 2) (uuid "c2")\n'
+        '\t\t(property "Sheetname" " " (at 0 0 0))\n'
+        '\t\t(property "Sheetfile" "gone.kicad_sch" (at 0 0 0))\n\t)\n'
+    )
+    path = write_project(tmp_path, symbol("U1", 1, paths=(("/a0", "U1"),)) + sheets)
+    result = run(schematic.get_schematic_info(str(path)))
+    assert "**Sheet symbols:** 2" in result, result
+    assert "- Leaf: (no file name) (the sheet has no file name: an empty sheet in KiCad)" in result
+    assert (
+        "- (no name: ' '): gone.kicad_sch (the file is not there: an empty sheet in KiCad)"
+        in result
+    )
+
+
+def test_the_info_of_a_loaded_sheet_and_of_an_ancestor(project, tmp_path):
+    # The fixture: board.kicad_sch with the sheets A and B of sub.kicad_sch.
+    sub = tmp_path / "sub.kicad_sch"
+    loop = (
+        '\t(sheet (at 1 1) (size 2 2) (uuid "c3")\n'
+        '\t\t(property "Sheetname" "Loop" (at 0 0 0))\n'
+        '\t\t(property "Sheetfile" "board.kicad_sch" (at 0 0 0))\n\t)\n)\n'
+    )
+    sub.write_text(sub.read_text(encoding="utf-8").rstrip()[:-1] + loop, encoding="utf-8")
+    result = run(schematic.get_schematic_info(str(tmp_path / "board.kicad_sch")))
+    assert "- A: sub.kicad_sch\n- B: sub.kicad_sch" in result, result
+    result = run(schematic.get_schematic_info(str(sub)))
+    assert (
+        "- Loop: board.kicad_sch (the file holds its own ancestor: an empty sheet in KiCad)"
+        in result
+    ), result
+
+
+def test_the_info_of_a_file_that_the_load_does_not_hold(project, tmp_path, monkeypatch):
+    # The file tree of sch_hierarchy (the project of the file) and the load of
+    # sheet_list can disagree: then the tool tells that KiCad does not load the file.
+    real = schematic.placed_components_and_files
+
+    def no_file(path, kicad, project_wide=False):
+        placed, _screens, problems = real(path, kicad, project_wide)
+        return placed, {}, problems
+
+    monkeypatch.setattr(schematic, "placed_components_and_files", no_file)
+    result = run(schematic.get_schematic_info(str(tmp_path / "sub.kicad_sch")))
+    assert "⚠️ The hierarchy of the project does not hold this file" in result, result
+
+
+def test_the_info_gives_the_expanded_file_and_loads_a_file_one_time(tmp_path, monkeypatch):
+    async def version():
+        return "10.0.7"
+
+    monkeypatch.setattr(schematic, "get_kicad_version", version)
+    monkeypatch.setattr(schematic, "netlist_of", _no_netlist)
+    sheets = "".join(
+        f'\t(sheet (at 1 1) (size 2 2) (uuid "c{index}")\n'
+        f'\t\t(property "Sheetname" "S{index}" (at 0 0 0))\n'
+        '\t\t(property "Sheetfile" "${DIR}/gone.kicad_sch" (at 0 0 0))\n\t)\n'
+        for index in (1, 2)
+    )
+    path = write_project(
+        tmp_path,
+        symbol("U1", 1, paths=(("/a0", "U1"),)) + sheets,
+        settings=None,
+    )
+    project_file = tmp_path / "board.kicad_pro"
+    project_file.write_text('{"text_variables": {"DIR": "sheets"}}', encoding="utf-8")
+    loads = []
+    real = sheet_list._read_screen
+
+    def counted(file, kicad):
+        loads.append(file.name)
+        return real(file, kicad)
+
+    monkeypatch.setattr(sheet_list, "_read_screen", counted)
+    result = run(schematic.get_schematic_info(str(path)))
+    gone = tmp_path / "sheets" / "gone.kicad_sch"
+    assert f"- S1: ${{DIR}}/gone.kicad_sch = {gone} (the file is not there" in result, result
+    assert loads.count("gone.kicad_sch") == 1

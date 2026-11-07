@@ -59,6 +59,17 @@ def project(directory: Path, name: str, *sheet_names: str) -> Path:
 class TestSheetFields:
     """The sheet fields, read with the field rules of the file version."""
 
+    def test_a_file_name_that_is_empty_after_the_expansion(self, tmp_path):
+        # KiCad shows an empty sheet (loadHierarchy, measured: sheet_fields_check.py),
+        # as sheet_list: no file of the parent directory, no problem.
+        root = project(tmp_path, "board", "${SUB}")
+        (tmp_path / "board.kicad_pro").write_text(
+            '{"text_variables": {"SUB": ""}}', encoding="utf-8"
+        )
+        assert sheet_files(root) == [root]
+        _, problems = sheet_paths(tmp_path / "board.kicad_pro")
+        assert problems == []
+
     @pytest.mark.parametrize("key", ["Sheetfile", "Sheet file"])
     def test_kicad_7_and_kicad_6_property_names(self, tmp_path, key):
         root = project(tmp_path, "board")

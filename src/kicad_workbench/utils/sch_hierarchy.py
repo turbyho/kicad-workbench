@@ -294,9 +294,12 @@ def _walk(
             if sheet.problem:
                 problems.append(f"{file}: {sheet.problem}")
                 continue
-            if not sheet.file:
-                continue  # KiCad reads an invalid name as empty: no file.
-            child = Path(expand_text_variables(sheet.file, variables))
+            name = expand_text_variables(sheet.file, variables)
+            if not name:
+                # An empty file name, also after the expansion: an empty sheet
+                # (SCH_IO_KICAD_SEXPR::loadHierarchy), as sheet_list.build_sheet_list.
+                continue
+            child = Path(name)
             if not child.is_absolute():
                 child = file.parent / child
             child = Path(os.path.normpath(child))

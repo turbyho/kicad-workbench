@@ -151,8 +151,13 @@ def test_nets(parser):
     ]
 
 
-def test_kicad6_sheet_fields(parser):
-    assert parser.get_sheets() == [{"name": "Power", "file": "power.kicad_sch"}]
+def test_kicad6_sheet_fields():
+    # The property names "Sheet name" and "Sheet file" of KiCad 6.
+    from kicad_workbench.parsers.kicad_fields import rules_for_file, sheet_fields
+
+    root = parse(SCH)
+    fields = sheet_fields(root.first("sheet"), rules_for_file(root))
+    assert fields == {"Sheetname": "Power", "Sheetfile": "power.kicad_sch"}
 
 
 def test_wire_network_with_negative_coordinates(parser):

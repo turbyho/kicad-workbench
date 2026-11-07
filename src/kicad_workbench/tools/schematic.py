@@ -10,13 +10,14 @@ from ..errors import InputError
 from ..parsers.annotation import ref_des_prefix
 from ..parsers.kicad_fields import with_field_rules_note
 from ..parsers.netlist_parser import NetlistNode
-from ..parsers.sch_instances import placed_instances
+from ..parsers.sch_instances import SchematicFile, placed_instances
 from ..parsers.schematic_parser import (
     SchematicComponent,
     SchematicParser,
     merge_units,
     unknown_alternate_note,
 )
+from ..parsers.sheet_list import EMPTY_REASONS
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
@@ -44,8 +45,17 @@ class _Placed:
 def placed_components(
     sch_path: Path, kicad: str, project_wide: bool = False
 ) -> tuple[list[_Placed], list[str]]:
+    """Return the components and the problems of placed_components_and_files."""
+    placed, _screens, problems = placed_components_and_files(sch_path, kicad, project_wide)
+    return placed, problems
+
+
+def placed_components_and_files(
+    sch_path: Path, kicad: str, project_wide: bool = False
+) -> tuple[list[_Placed], dict[Path, SchematicFile], list[str]]:
     """Return the components of a schematic file in each of its sheet paths (with
-    project_wide: of all files of the project), and the problems of the hierarchy.
+    project_wide: of all files of the project), the files of the hierarchy as KiCad
+    loads them (sch_instances.SchematicFile), and the problems of the hierarchy.
 
     The reference, the unit and the Value of each sheet path are the values that
     KiCad gives after the load (sch_instances.placed_instances with the view "cli",
@@ -62,7 +72,7 @@ def placed_components(
             cannot be read (placed_instances).
     """
     project = schematic_project_file(sch_path)
-    placed, _screens, problems = placed_instances(project, kicad, "cli")
+    placed, screens, problems = placed_instances(project, kicad, "cli")
     target = sch_path.resolve()
     parsers: dict[Path, SchematicParser] = {}
     result = []
@@ -77,7 +87,7 @@ def placed_components(
         )
         if component is not None:
             result.append(_Placed(component, item.sheet.shown, item.file, item.has_library_symbol))
-    return result, problems
+    return result, screens, problems
 
 
 def project_components(sch_path: Path, kicad: str) -> list[SchematicComponent]:
@@ -502,11 +512,19 @@ async def list_schematic_nets(
 async def get_schematic_info(file_path: str) -> str:
     """Get general information about a schematic file.
 
+    The components and the sheet symbols are the ones that KiCad loads for the
+    project of the file (the references of each sheet path). The tool needs
+    kicad-cli (the rules of the KiCad version).
+
     Args:
         file_path: Path to .kicad_sch file
 
     Returns:
-        Schematic metadata and statistics
+        The title block, the number of components (by the prefix of the reference),
+        nets and sheet symbols, and the list of the sheet symbols with their files.
+        A sheet symbol that KiCad shows as an empty sheet has the reason (no file
+        name, a file that is not there, a file that holds its own ancestor). A file
+        that the hierarchy of the project does not hold gets a warning.
     """
     try:
         path = Path(file_path)
@@ -517,10 +535,14 @@ async def get_schematic_info(file_path: str) -> str:
             return _NO_VERSION
         def read():
             parser = SchematicParser(file_path, kicad)
-            return parser.get_title_block(), parser.get_nets(), parser.get_sheets()
+            placed, screens, problems = placed_components_and_files(path, kicad)
+            # The sheet symbols of the file, as KiCad loads them (sheet_list). None:
+            # the hierarchy of the project does not hold the file.
+            target = path.resolve()
+            screen = next((s for f, s in screens.items() if f.resolve() == target), None)
+            return parser.get_title_block(), parser.get_nets(), placed, screen, problems
 
-        title_block, nets, sheets = await asyncio.to_thread(read)
-        placed, problems = await asyncio.to_thread(placed_components, path, kicad)
+        title_block, nets, placed, screen, problems = await asyncio.to_thread(read)
         # One component for each reference (the units of a package are one
         # component), in each sheet path of the file. A symbol that is not annotated
         # ("R?") is one component.
@@ -559,7 +581,9 @@ async def get_schematic_info(file_path: str) -> str:
                 f"**Total Components:** {len(references)}"
                 + (f" (in {len(paths)} sheet paths of the file)" if len(paths) > 1 else ""),
                 f"**Total Nets:** {len(nets)}",
-                f"**Hierarchical Sheets:** {len(sheets)}",
+                f"**Sheet symbols:** {len(screen.sheets)}"
+                if screen is not None
+                else "**Sheet symbols:** not known (see the warning)",
                 "",
                 "## Components by Type",
             ]
@@ -568,13 +592,23 @@ async def get_schematic_info(file_path: str) -> str:
         for prefix in sorted(component_counts.keys()):
             lines.append(f"- {prefix}: {component_counts[prefix]}")
 
-        if sheets:
-            lines.extend([
-                "",
-                "## Hierarchical Sheets",
-            ])
-            for sheet in sheets:
-                lines.append(f"- {sheet['name']}: {sheet['file']}")
+        if screen is not None and screen.sheets:
+            lines.extend(["", "## Sheet symbols"])
+            for sheet in screen.sheets:
+                name = sheet.name if sheet.name.strip() else f"(no name: {sheet.name!r})"
+                file = sheet.raw_file or "(no file name)"
+                if sheet.file is not None and "${" in sheet.raw_file:
+                    file += f" = {sheet.file}"  # after the expansion of the text variables
+                if sheet.empty:
+                    # A new, empty screen (sheet_list.EMPTY_REASONS).
+                    file += f" ({EMPTY_REASONS[sheet.empty]}: an empty sheet in KiCad)"
+                lines.append(f"- {name}: {file}")
+        if screen is None:
+            problems = [
+                "The hierarchy of the project does not hold this file: KiCad does not "
+                "load it, thus it has no components and no sheets in the project.",
+                *problems,
+            ]
         lines += ["", *_problem_lines(problems)] if problems else []
 
         return "\n".join(lines)

@@ -684,8 +684,8 @@ class SchematicParser:
             "title_block": self._parse_title_block(root),
             "components": self._parse_components(),
             "nets": self._parse_nets(),
-            "sheets": self._parse_sheets(),
         }
+        self._check_sheets()
 
         return self._data
 
@@ -850,20 +850,18 @@ class SchematicParser:
                     }
         return list(nets.values())
 
-    def _parse_sheets(self) -> list[dict[str, str]]:
-        """Parse hierarchical sheets.
+    def _check_sheets(self) -> None:
+        """Read the fields of each sheet as the parser of KiCad does: a field that it
+        cannot read stops the parse of the file (kicad_fields.sheet_fields). This is
+        the check of the parser for a file that a tool reads alone; sheet_list does
+        it for the files of a project. The sheets of a project, as KiCad loads them,
+        come from sheet_list.
 
-        The name and the file of a sheet are the fields that the KiCad version
-        of the file uses (see kicad_fields.sheet_fields).
+        Raises:
+            KicadParseError, KicadFileError: KiCad cannot read the fields of a sheet.
         """
-        sheets = []
         for sheet in self._top("sheet"):
-            fields = self._sheet_fields(sheet)
-            name = fields.get("Sheetname")
-            file = fields.get("Sheetfile")
-            if name and file:
-                sheets.append({"name": name, "file": file})
-        return sheets
+            self._sheet_fields(sheet)
 
     def get_components(self) -> list[SchematicComponent]:
         """Get the components of this schematic file, with the fields of the file.
@@ -928,15 +926,6 @@ class SchematicParser:
         """
         data = self._parse_file()
         return data["title_block"]
-
-    def get_sheets(self) -> list[dict[str, str]]:
-        """Get hierarchical sheets.
-
-        Returns:
-            List of sheet information
-        """
-        data = self._parse_file()
-        return data["sheets"]
 
     def get_component_by_reference(self, reference: str) -> SchematicComponent | None:
         """Get a component by its reference designator.

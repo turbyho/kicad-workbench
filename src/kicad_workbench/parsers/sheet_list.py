@@ -207,6 +207,21 @@ class Screen:
         return self.rules.kicad
 
 
+# The reasons of an empty sheet (SheetItem.empty). SCH_IO_KICAD_SEXPR::loadHierarchy
+# gives such a sheet a new, empty screen: also for an empty file name (the directory
+# of the parent, which loadFile cannot read) and an ancestor (the name is emptied).
+# The first sheet path decides for a sheet of a shared screen (the sheet object gets
+# one screen), as here (SheetItem.loaded). Measured with kicad-cli 8.0.9 to 10.0.7
+# (spike/kicad-versions/sheet_fields_check.py): no file name and an empty expansion.
+EMPTY_REASONS = {
+    "no file name": "the sheet has no file name",
+    "empty expansion": "the file name is empty after the expansion of the text variables",
+    "ancestor": "the file holds its own ancestor",
+    "not there": "the file is not there",
+    "cannot be read": "the system cannot open the file",
+}
+
+
 @dataclass(eq=False)
 class SheetItem:
     """A sheet symbol of a screen."""
@@ -221,6 +236,10 @@ class SheetItem:
     pages: list[tuple[tuple[Kiid, ...], str]]
     screen: Screen | None = None  # None: an empty screen
     loaded: bool = False  # the loader gave it a screen
+    # The file after the expansion of the text variables; None: an empty file name.
+    file: Path | None = None
+    # Why KiCad shows an empty sheet (no screen), or "" (EMPTY_REASONS).
+    empty: str = ""
 
 
 @dataclass(eq=False)
@@ -509,18 +528,22 @@ def build_sheet_list(
             KiCad 8 or 9 cannot read a sheet field of a file.
     """
     screens: dict[Path, Screen] = {}
+    # The files that give an empty sheet, with the reason: one load for each file.
+    empty: dict[Path, str] = {}
     pages: dict[object, str] = {}
     problems: list[str] = []
 
-    def load(file: Path) -> Screen | None:
+    def load(file: Path) -> tuple[Screen | None, str]:
+        """Return the screen of a file, or None and the reason of an empty sheet
+        (EMPTY_REASONS)."""
         try:
             screen, _root_page = _read_screen(file, kicad)
         except FileNotFoundError:
-            return None  # KiCad shows an empty sheet.
+            return None, "not there"  # KiCad shows an empty sheet.
         except OSError as e:
             # KiCad cannot open the file: nothing of it.
             problems.append(f"{file} cannot be read: {e}. KiCad shows an empty sheet.")
-            return None
+            return None, "cannot be read"
         except (KiCadEncodingError, SExprError, KicadParseError) as e:
             # A parse error: KiCad keeps the items of the file before the error, and
             # loads the other sheets (measured with kicad-cli 8.0.9, 9.0.9, 10.0.6 and
@@ -540,7 +563,7 @@ def build_sheet_list(
         except KicadFileError as e:
             raise with_file(e, file) from e
         screens[file] = screen
-        return screen
+        return screen, ""
 
     def load_children(screen: Screen, ancestors: list[str]) -> None:
         for item in screen.sheets:
@@ -549,17 +572,26 @@ def build_sheet_list(
             item.loaded = True
             name = expand_text_variables(item.raw_file, variables)
             child = Path(os.path.normpath(Path(screen.file.parent) / name)) if name else None
-            if child is None or str(child) in ancestors:
-                if child is not None:
-                    problems.append(
-                        f"The sheet {item.name!r} of {screen.file} holds its own ancestor "
-                        f"{child}: KiCad shows it as empty."
-                    )
+            item.file = child
+            if child is None:
+                item.empty = "empty expansion" if item.raw_file else "no file name"
+                continue
+            if str(child) in ancestors:
+                item.empty = "ancestor"
+                problems.append(
+                    f"The sheet {item.name!r} of {screen.file} holds its own ancestor "
+                    f"{child}: KiCad shows it as empty."
+                )
                 continue
             if child in screens:
                 item.screen = screens[child]
                 continue
-            item.screen = load(child)
+            if child in empty:
+                item.empty = empty[child]
+                continue
+            item.screen, item.empty = load(child)
+            if item.screen is None:
+                empty[child] = item.empty
             if item.screen is not None:
                 load_children(item.screen, [*ancestors, str(child)])
 

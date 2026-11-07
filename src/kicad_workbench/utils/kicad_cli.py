@@ -398,7 +398,7 @@ async def get_kicad_version() -> str | None:
     return await asyncio.to_thread(kicad_cli_version_sync)
 
 
-def cli_root(sch_path: Path, output: str) -> Path | None:
+def cli_root(sch_path: Path, output: str, kicad: str | None = None) -> Path | None:
     """Return the schematic that kicad-cli gets for an output of the full project
     (the netlist, the ERC), when it is not sch_path; None when it is sch_path.
 
@@ -411,6 +411,8 @@ def cli_root(sch_path: Path, output: str) -> Path | None:
     Args:
         sch_path: A schematic file of the project.
         output: The name of the output in the error messages.
+        kicad: The version of kicad-cli, when the caller has it; None: the
+            function gets it when it needs it.
 
     Raises:
         AmbiguousRootError: More than one project holds the sheet.
@@ -420,10 +422,11 @@ def cli_root(sch_path: Path, output: str) -> Path | None:
     """
     project = schematic_project_file(sch_path)
     tops = top_level_sheets(project)
-    kicad = None
-    if len(tops) > 1:
+    if len(tops) <= 1:
+        kicad = None
+    else:
         # The version of kicad-cli only for a project with more than one top-level sheet.
-        kicad = kicad_cli_version_sync()
+        kicad = kicad or kicad_cli_version_sync()
         if kicad is None:
             raise InputError(
                 f"The project {project} has {len(tops)} top-level sheets: the tool needs the "

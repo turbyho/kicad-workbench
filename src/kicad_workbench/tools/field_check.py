@@ -1,10 +1,15 @@
 """The tool check_symbol_fields: the check of the confirmed MPNs with no datasheet-lens.
 
-The tool reads the BOM of kicad-cli (one line for each reference, no DNP
+The tool reads the BOM of kicad-cli (one line for each reference, also the DNP
 symbols, the default variant and each variant of KiCad 10), as project_check of
 datasheet-lens reads the BOM that export_bom writes. Then it checks the fields
 Value, MPN and Value_Confirmed of each line by the model of
 parsers/confirmed_mpns.py. Thus the two tools give the same messages.
+
+A DNP symbol gets the same check as a fitted symbol (datasheet-lens, commit 65168da
+of 2026-11-07; an older datasheet-lens does not check the DNP symbols):
+DNP is a setting of the CAD tool that the user can change at any time, and the
+symbol stays in the schematic.
 
 The units of one package with different fields (parsers/unit_fields.py) are a
 conflict of their line: the BOM line joins their values, and the joined MPNs
@@ -230,7 +235,7 @@ async def _check(schematic_path: str) -> str:
     counts = []
     cli_messages = []
     for variant in ["", *variants]:
-        args = bom_args(_FIELDS, [], True, variant)
+        args = bom_args(_FIELDS, [], exclude_dnp=False, variant=variant)
         try:
             export, rows = await asyncio.to_thread(export_bom_file, root, args)
         except KicadCliError as e:
@@ -252,7 +257,7 @@ async def _check(schematic_path: str) -> str:
     out = [f"# Fields of the symbols of {root.name}", ""]
     out += unit_check_lines(unit_errors, units.problems)
     out.append(
-        f"kicad-cli of KiCad {kicad} (`sch export bom`, no DNP symbols), the lines of "
+        f"kicad-cli of KiCad {kicad} (`sch export bom`, also the DNP symbols), the lines of "
         f"{', '.join(counts)}. Symbols with a part: {result.lines}."
     )
     out += [f"⚠️ kicad-cli: {message}" for message in cli_messages]
@@ -267,16 +272,16 @@ async def _check(schematic_path: str) -> str:
             "time needs the same fields for each of its references.",
         ]
     elif unit_errors or units.problems or cli_messages:
-        # The error of the units can be in a symbol that is not in the BOM (DNP), and a
-        # message of kicad-cli can tell that the BOM is not complete.
+        # The error of the units can be in a symbol that is not in the BOM (Exclude from
+        # BOM), and a message of kicad-cli can tell that the BOM is not complete.
         out.append(
             "⚠️ The BOM lines give no message, but the tool did not check the full project: "
             "see the errors and the warnings above."
         )
     else:
         out.append(
-            "✅ The fields Value, MPN and Value_Confirmed of all BOM lines (all symbols that "
-            "are not DNP, in each variant) follow the convention, and the user confirmed them."
+            "✅ The fields Value, MPN and Value_Confirmed of all BOM lines (also the DNP "
+            "symbols, in each variant) follow the convention, and the user confirmed them."
         )
     out += [
         "",
@@ -294,7 +299,8 @@ async def check_symbol_fields(schematic_path: str) -> str:
 
     Use this tool only when the MCP server datasheet-lens is not available: its
     tool project_check does the same check, and also checks the datasheets. The
-    two tools give the same messages.
+    two tools give the same messages (a datasheet-lens of 2026-11-07 or later:
+    an older one does not check the DNP symbols).
 
     The convention: Value holds the general value and the MPNs in one text in
     parentheses, the fitted part first: "2N7002 (2N7002LT1G, BSS138LT1G)". The
@@ -302,12 +308,13 @@ async def check_symbol_fields(schematic_path: str) -> str:
     quotes, as in CSV. The field MPN is the confirmed copy of these MPNs. The
     hidden field Value_Confirmed is the Value of the last confirmation.
 
-    The tool reads the BOM of kicad-cli (no DNP symbols) of the default variant
-    and of each variant (KiCad 10). For each symbol it gives the conflicts, the
-    changes that the user must confirm, the symbols that are not confirmed, the
-    fields that complete a symbol by the convention, and the symbols with no
-    part. Each message gives the change for set_symbol_fields. Write the fields
-    only after the user confirmed them.
+    The tool reads the BOM of kicad-cli (also the DNP symbols: the user can fit
+    them at any time) of the default variant and of each variant (KiCad 10).
+    For each symbol it gives the conflicts, the changes that the user must
+    confirm, the symbols that are not confirmed, the fields that complete a
+    symbol by the convention, and the symbols with no part. Each message gives
+    the change for set_symbol_fields. Write the fields only after the user
+    confirmed them.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool checks the

@@ -50,8 +50,10 @@ def project(tmp_path, monkeypatch):
         state["calls"].append(args)
         output = args[args.index("--output") + 1]
         variant = args[args.index("--variant") + 1] if "--variant" in args else ""
+        # The lines of the DNP symbols: only with no --exclude-dnp.
+        dnp = "" if "--exclude-dnp" in args else state.get("dnp", "")
         with open(output, "w", encoding="utf-8") as file:
-            file.write(state["csv"][variant])
+            file.write(state["csv"][variant] + dnp)
         stdout = state.get("warning", "") + f"Wrote bill of materials to '{output}'."
         return subprocess.CompletedProcess(args, 0, stdout.encode(), b"")
 
@@ -74,18 +76,29 @@ class TestCheckSymbolFields:
         project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
         out = await check(project)
         calls = project["state"]["calls"]
-        # One BOM of each variant, with each field and no DNP symbols.
+        # One BOM of each variant, with each field and also the DNP symbols (datasheet-lens
+        # checks the fields of a DNP symbol too).
         assert [args[args.index("--fields") + 1] for args in calls] == ["Reference,Value,*"] * 2
-        assert all("--exclude-dnp" in args for args in calls)
+        assert not any("--exclude-dnp" in args for args in calls)
         assert "--variant" not in calls[0] and calls[1][calls[1].index("--variant") + 1] == "Lite"
         assert (
             "the lines of the default variant: 1, the variant 'Lite': 1. Symbols with a part: 1."
             in out
         )
         assert (
-            "✅ The fields Value, MPN and Value_Confirmed of all BOM lines (all symbols that "
-            "are not DNP, in each variant) follow the convention" in out
+            "✅ The fields Value, MPN and Value_Confirmed of all BOM lines (also the DNP "
+            "symbols, in each variant) follow the convention" in out
         )
+
+    async def test_a_dnp_symbol_gets_the_check_of_a_fitted_symbol(self, project):
+        # datasheet-lens checks the fields of a DNP symbol too (its commit 65168da): the
+        # user can fit it at any time.
+        line = '"Q1","2N7002 (2N7002LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
+        project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
+        project["state"]["dnp"] = '"D1","BAT54 (BAT54C)","","BAT54A","BAT54 (BAT54A)"\n'
+        out = await check(project)
+        assert "⚠️ change in the CAD project: D1:" in out, out
+        assert "✅" not in out
 
     async def test_messages_and_writes(self, project):
         project["state"]["csv"] = {
@@ -187,8 +200,9 @@ class TestCheckSymbolFields:
         assert "⚠️ no field Value_Confirmed: 1 symbols." in out
 
     async def test_no_check_mark_with_errors_or_warnings(self, project):
-        """No ✅ when the units of a symbol that is not in the BOM (DNP) have different
-        fields, or when kicad-cli gave a warning."""
+        """No ✅ when the units of a symbol that the BOM does not have (here the BOM of
+        the test has no line of U1; in KiCad: Exclude from BOM) have different fields,
+        or when kicad-cli gave a warning."""
         directory = project["directory"]
         line = '"Q1","2N7002 (2N7002LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
         project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}

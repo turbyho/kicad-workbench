@@ -458,8 +458,10 @@ def write_fields(filled: list[str], names: list[str], default: str) -> tuple[lis
 
 
 def bom_symbols(rows: list[list[str]], variant: str = "") -> list[CadSymbol]:
-    """Read the lines of a BOM of kicad-cli (one line for each reference, no DNP
-    symbols) as bom_parts of datasheet-lens reads them.
+    """Read the lines of a BOM of kicad-cli (one line for each reference, also the DNP
+    symbols) as bom_parts of datasheet-lens reads them. A DNP line gets the same check
+    as a fitted line (CadSymbol.fitted of datasheet-lens has no effect on the check of
+    the fields).
 
     The columns: Reference, each Value column, each MPN column (MPN_FIELDS, in
     their order: the first filled one is the field MPN, the others must hold the

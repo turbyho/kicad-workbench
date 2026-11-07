@@ -256,15 +256,15 @@ def test_the_sheet_paths_of_kicad_cli(tmp_path):
 def test_the_components_of_each_top_level_sheet_with_kicad_10_0_7(monkeypatch, tmp_path):
     _two_top_level_sheets(tmp_path)
     xml = (
-        '<export version="E"><design><tool>Eeschema 10.0.7</tool>'
-        '<sheet number="1" name="/board/" tstamps="/"><title_block><source>board.kicad_sch'
-        "</source></title_block></sheet>"
-        '<sheet number="2" name="/Extra/" tstamps="/"><title_block><source>extra.kicad_sch'
-        "</source></title_block></sheet></design><components>"
-        '<comp ref="R1"><value>1k</value><sheetpath names="/board/" tstamps="/"/></comp>'
-        '<comp ref="R2"><value>2k</value><sheetpath names="/Extra/" tstamps="/"/></comp>'
-        "</components><nets/></export>"
-    ).encode()
+        b'<export version="E"><design><tool>Eeschema 10.0.7</tool>'
+        b'<sheet number="1" name="/board/" tstamps="/"><title_block><source>board.kicad_sch'
+        b"</source></title_block></sheet>"
+        b'<sheet number="2" name="/Extra/" tstamps="/"><title_block><source>extra.kicad_sch'
+        b"</source></title_block></sheet></design><components>"
+        b'<comp ref="R1"><value>1k</value><sheetpath names="/board/" tstamps="/"/></comp>'
+        b'<comp ref="R2"><value>2k</value><sheetpath names="/Extra/" tstamps="/"/></comp>'
+        b"</components><nets/></export>"
+    )
     monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.7")
     monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(xml, []))
     for name, ref in (("board", "R1"), ("extra", "R2")):

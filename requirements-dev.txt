@@ -8,7 +8,9 @@ pytest-cov>=4.0.0
 
 # Code quality
 black>=23.0.0
-ruff>=0.1.0
+# One version of ruff for each check: a newer ruff can find new rules.
+# The CI workflows read this line. Keep pyproject.toml (extra dev) the same.
+ruff==0.17.4
 mypy>=1.0.0
 
 # Documentation

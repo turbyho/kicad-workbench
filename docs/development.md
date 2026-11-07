@@ -38,9 +38,12 @@ Python 3.12.
 
 ## Lint and format
 
+Use the version of ruff in `requirements-dev.txt`. A newer ruff can find new rules,
+and CI uses this version. The extra `dev` installs it, or run it with uvx:
+
 ```sh
-ruff check src tests
-ruff format --diff <changed files>
+uvx --from "$(grep -E '^ruff==' requirements-dev.txt)" ruff check src tests
+uvx --from "$(grep -E '^ruff==' requirements-dev.txt)" ruff format --diff <changed files>
 ```
 
 Format only the new and the changed lines.

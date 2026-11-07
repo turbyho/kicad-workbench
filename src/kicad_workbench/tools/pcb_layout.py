@@ -1,10 +1,11 @@
 """PCB layout and routing tools."""
 
+import asyncio
 import math
-import re
 import subprocess
 from pathlib import Path
 
+from ..errors import InputError
 from ..parsers.kicad_versions import (
     KicadFileError,
     header_version,
@@ -12,9 +13,16 @@ from ..parsers.kicad_versions import (
     release_of_schematic,
     schematic_text_version,
 )
+from ..parsers.sexpr import SExprError, parse
 from ..server import mcp
 from ..utils.kicad_cli import decode_output, run_kicad_cli
-from ..utils.kicad_lock import check_board_not_open, file_stamp, write_board, write_in_thread
+from ..utils.kicad_lock import (
+    FileStamp,
+    check_board_not_open,
+    file_stamp,
+    write_board,
+    write_with_warning,
+)
 from ..utils.kicad_python import KicadPythonError, board_text
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.tool_errors import error_answer
@@ -85,28 +93,6 @@ async def setup_pcb_layout(
         about the file version when there is one.
     """
     try:
-        sch_path = Path(schematic_path)
-        if not sch_path.exists():
-            return f"❌ Schematic file not found: {schematic_path}"
-
-        pcb_path = sch_path.with_suffix(".kicad_pcb")
-        try:
-            pcb_path.stat()
-            board_exists = True
-        except FileNotFoundError:
-            board_exists = False
-        if board_exists and not overwrite:
-            return (
-                f"❌ The board file {pcb_path} exists. This tool writes a new, "
-                "empty board, which removes all footprints, tracks and zones of the "
-                "existing board. Thus the tool did not write the file.\n\n"
-                "Ask the user if the existing board can be replaced. Only when the "
-                "user agrees, do this operation again with overwrite=True."
-            )
-        # The write refuses the new board when an other program changes the
-        # board file (or makes it) after this point.
-        stamp = file_stamp(pcb_path)
-
         # The outline goes to pcbnew in millimetres (issue #17: the old code
         # wrote nanometres as millimetres, a 100 km outline).
         if unit == "mil":
@@ -124,15 +110,12 @@ async def setup_pcb_layout(
                 f"{_MAX_SIZE_MM} mm, not {width} × {height} {unit}."
             )
 
-        # The version of the schematic tells if its KiCad can open the board.
-        try:
-            version = schematic_text_version(read_as_kicad(sch_path))
-        except (KicadFileError, KiCadEncodingError) as e:
-            return f"❌ {sch_path}: {e} The tool did not write the board."
-
-        # The guard of write_board() is also before pcbnew, which takes seconds.
-        if open_error := check_board_not_open(pcb_path):
-            return open_error
+        sch_path = Path(schematic_path)
+        pcb_path = sch_path.with_suffix(".kicad_pcb")
+        checked = await asyncio.to_thread(_check_files, sch_path, pcb_path, overwrite)
+        if isinstance(checked, str):
+            return checked
+        stamp, version = checked
 
         try:
             pcb_content, kicad = await board_text(pcb_path.name, sch_path.stem, (w, h))
@@ -145,13 +128,11 @@ async def setup_pcb_layout(
             return "❌ pcbnew wrote a board with no file version. The tool did not write the board."
         warning = _version_warning(board_version, kicad, version)
 
-        open_error, saved = await write_in_thread(write_board, pcb_path, pcb_content, stamp)
+        open_error, saved, report = await asyncio.to_thread(
+            _write_and_summarize, pcb_path, pcb_content, stamp
+        )
         if open_error:
             return open_error
-
-        # Report what is actually in the file, never features the write did
-        # not produce (issue #17).
-        report = _summarize_pcb(pcb_path)
         return f"""✅ PCB layout initialized.
 
 {warning}**Schematic:** {schematic_path}
@@ -170,38 +151,101 @@ Next steps:
         return error_answer(e, "Error setting up PCB layout")
 
 
-def _summarize_pcb(pcb_path: Path) -> str:
-    """Read a .kicad_pcb back and report its actual outline / layers / elements.
-
-    For a freshly-initialised board the only items carrying start/end coords
-    are the four Edge.Cuts gr_lines, so the min/max of those coords is the
-    exact board outline.
-    """
-    text = pcb_path.read_text(encoding="utf-8")
-
-    coords = [
-        (float(mx), float(my))
-        for mx, my in re.findall(
-            r"\((?:start|end)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\)", text
+def _check_files(sch_path: Path, pcb_path: Path, overwrite: bool) -> tuple[FileStamp, int] | str:
+    """Return the stamp of the board file and the file version of the schematic, or the
+    error. The function blocks (file reads): run it off the event loop."""
+    if not sch_path.exists():
+        return f"❌ Schematic file not found: {sch_path}"
+    try:
+        pcb_path.stat()
+        board_exists = True
+    except FileNotFoundError:
+        board_exists = False
+    if board_exists and not overwrite:
+        return (
+            f"❌ The board file {pcb_path} exists. This tool writes a new, "
+            "empty board, which removes all footprints, tracks and zones of the "
+            "existing board. Thus the tool did not write the file.\n\n"
+            "Ask the user if the existing board can be replaced. Only when the "
+            "user agrees, do this operation again with overwrite=True."
         )
+    # The write refuses the new board when an other program changes the
+    # board file (or makes it) after this point.
+    stamp = file_stamp(pcb_path)
+
+    # The version of the schematic tells if its KiCad can open the board.
+    try:
+        version = schematic_text_version(read_as_kicad(sch_path))
+    except (KicadFileError, KiCadEncodingError) as e:
+        return f"❌ {sch_path}: {e} The tool did not write the board."
+
+    # The guard of write_board() is also before pcbnew, which takes seconds.
+    if open_error := check_board_not_open(pcb_path):
+        return open_error
+    return stamp, version
+
+
+def _write_and_summarize(
+    pcb_path: Path, content: str, stamp: FileStamp
+) -> tuple[str | None, str, str]:
+    """Write the board, and return (the error of the write or None, the warning of the
+    write, the summary of the board). The function blocks: run it off the event loop."""
+    open_error, saved = write_with_warning(write_board, pcb_path, content, stamp)
+    if open_error:
+        return open_error, saved, ""
+    # Report what is in the file, never features the write did not produce
+    # (issue #17). The board is written: an error of the summary is a warning.
+    try:
+        report = _summarize_pcb(read_as_kicad(pcb_path))
+    except (OSError, KiCadEncodingError, SExprError, InputError) as e:
+        report = f"⚠️ The tool cannot read back the board that it wrote: {e}"
+    return None, saved, report
+
+
+def _summarize_pcb(text: str) -> str:
+    """Report the outline, the layers and the items of a board that pcbnew made.
+
+    The text is the board file that the tool wrote. The script of the tool gives a new
+    board the outline as four segments on Edge.Cuts (kicad_python._board_text_sync:
+    PCB_SHAPE with SHAPE_T_SEGMENT, gr_line in the file), thus the minimum and the
+    maximum of their points are the outline. An other item on Edge.Cuts gives an
+    outline that is not known.
+
+    Raises:
+        SExprError, InputError: The text is not a valid S-expression, or a point
+            is not a number.
+    """
+    board = parse(text)
+    edge = [
+        item
+        for item in board.children()
+        if (item.head or "").startswith("gr_")
+        and (layer := item.first("layer")) is not None
+        and layer.value(0) == "Edge.Cuts"
     ]
-    if coords:
-        xs = [c[0] for c in coords]
-        ys = [c[1] for c in coords]
+    points = [
+        (point.number(0), point.number(1)) if point is not None else (None, None)
+        for item in edge
+        for point in (item.first("start"), item.first("end"))
+    ]
+    complete = all(None not in point for point in points)
+    if edge and all(item.head == "gr_line" for item in edge) and complete:
+        xs = [x for x, _y in points]
+        ys = [y for _x, y in points]
         outline = f"{max(xs) - min(xs):.3f} × {max(ys) - min(ys):.3f} mm"
     else:
-        outline = "(could not parse Edge.Cuts outline)"
-
-    layer_count = len(re.findall(r'^\s*\(\d+\s+"', text, re.MULTILINE))
-    n_footprints = len(re.findall(r'\(footprint\s+"', text))
-    n_segments = len(re.findall(r'\(segment\s', text))
-    n_nets = len(re.findall(r'\(net\s+\d+\s+"', text))
+        outline = (
+            "(not known: the board has no outline of gr_line items with a start and an end "
+            "on Edge.Cuts)"
+        )
+    layers = board.first("layers")
+    counts = {head: len(board.children(head)) for head in ("footprint", "segment", "net")}
 
     return (
         f"**Dimensions (read back):** {outline}\n"
-        f"**Layers:** {layer_count}\n"
-        f"**Elements:** {n_footprints} footprint(s), "
-        f"{n_segments} track(s), {n_nets} net(s) declared"
+        f"**Layers:** {len(layers.children()) if layers is not None else 0}\n"
+        f"**Elements:** {counts['footprint']} footprint(s), "
+        f"{counts['segment']} track(s), {counts['net']} net(s) declared"
     )
 
 

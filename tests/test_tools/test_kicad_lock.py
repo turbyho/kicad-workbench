@@ -407,13 +407,13 @@ class TestWriteInThreads:
 
     def test_an_error_after_the_save_is_a_warning(self, tmp_path):
         from kicad_workbench.utils.file_save import AfterSaveError
-        from kicad_workbench.utils.kicad_lock import write_in_thread
+        from kicad_workbench.utils.kicad_lock import write_with_warning
 
         def write(path, content, stamp):
             raise AfterSaveError(f"The tool wrote {path}, but it could not flush")
 
         path = tmp_path / "a.kicad_sch"
-        assert asyncio.run(write_in_thread(write, path, "", None)) == (
+        assert write_with_warning(write, path, "", None) == (
             None,
             f"\n\n⚠️ The tool wrote {path}, but it could not flush",
         )

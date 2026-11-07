@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import itertools
 import math
+import threading
 import uuid
 from pathlib import Path
 
@@ -64,13 +65,13 @@ from ..parsers.sexpr import (
     quote,
 )
 from ..server import mcp
-from ..utils.kicad_cli import get_kicad_version
+from ..utils.kicad_cli import kicad_cli_version_sync
 from ..utils.kicad_lock import (
     FileStamp,
     read_for_write_stamped,
     writable_schematic_version,
-    write_in_thread,
     write_schematic,
+    write_with_warning,
 )
 from ..utils.library_lookup import LibraryLookupError, find_library_symbol
 from ..utils.sch_hierarchy import (
@@ -401,19 +402,12 @@ def _project_settings(path: Path) -> SchematicSettings | _NoGrid:
         )
 
 
-async def _settings_of(path: Path) -> SchematicSettings | _NoGrid:
-    """Return the settings of the project of a schematic, or the error (_project_settings)."""
-    return await asyncio.to_thread(_project_settings, path)
-
-
-async def _installed_off_grid(
-    settings: SchematicSettings, kicad: str | None, version: int
-) -> Severity:
+def _installed_off_grid(settings: SchematicSettings, kicad: str | None, version: int) -> Severity:
     """Return the severity of endpoint_off_grid in the KiCad that runs ERC.
 
     The key order of the installed KiCad applies when it can open the file.
     Get the severity before the write of the file: an error of kicad-cli then
-    changes no file.
+    changes no file. The function blocks (it can run kicad-cli).
 
     Args:
         kicad: The installed KiCad version, when the caller has it. Else the tool
@@ -426,7 +420,7 @@ async def _installed_off_grid(
         return severity  # The same in each order.
     if kicad is None:
         try:
-            kicad = await get_kicad_version()
+            kicad = kicad_cli_version_sync()
         except OSError as e:
             return off_grid_severity(settings, None, f"the installed KiCad (kicad-cli: {e})")
     release = kicad_release(kicad) if kicad else None
@@ -821,7 +815,7 @@ def _placed_symbol(
     return indent("\n".join(lines), 1)
 
 
-async def _label_position(
+def _label_position(
     path: Path, content: str, x: float, y: float, snap_to_grid: bool
 ) -> tuple[Point, str, str] | str:
     """Return the position (IU) of a label at x, y, the text that tells it and the
@@ -837,7 +831,7 @@ async def _label_position(
     requested = (iu(x), iu(y))
     if not snap_to_grid:
         return requested, f"at {_shown(requested)}", ""
-    settings = await _settings_of(path)
+    settings = _project_settings(path)
     if isinstance(settings, _NoGrid):
         return f"❌ Cannot add the label: {settings.reason}"
     grid = settings.connection_grid
@@ -866,7 +860,7 @@ class _LabelTarget:
     note: str  # about the project settings
 
 
-async def _resolve_label_target(
+def _resolve_label_target(
     path: Path,
     reference: str,
     pin: str,
@@ -880,7 +874,7 @@ async def _resolve_label_target(
     """
     content, stamp = read_for_write_stamped(path)
     if x is not None and y is not None:
-        found = await _label_position(path, content, x, y, snap_to_grid)
+        found = _label_position(path, content, x, y, snap_to_grid)
         if isinstance(found, str):
             return found
         return _LabelTarget(content, stamp, found[0], 0, found[1], found[2])
@@ -893,6 +887,78 @@ async def _resolve_label_target(
     point, angle = anchor
     where = f"anchored on {reference}.{pin} at {_shown(point)}"
     return _LabelTarget(content, stamp, point, angle, where, "")
+
+
+async def _run_edit(work, *args) -> str:
+    """Run the work of an edit tool off the event loop (file reads, the parse, kicad-cli,
+    the save).
+
+    A cancel of the tool does not stop the thread. A cancel before the save stops the
+    work at the save (_save): the file does not change, as with the awaits of the
+    tool before the work went into one thread. A cancel during the save cannot stop
+    it.
+    """
+    cancelled = threading.Event()
+    try:
+        return await asyncio.to_thread(work, cancelled, *args)
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
+
+
+def _save(
+    cancelled: threading.Event, path: Path, content: str, stamp: FileStamp
+) -> tuple[str | None, str]:
+    """write_with_warning(write_schematic), but not after a cancel of the tool (_run_edit)."""
+    if cancelled.is_set():
+        return "❌ The tool call was cancelled: the tool did not change the file.", ""
+    return write_with_warning(write_schematic, path, content, stamp)
+
+
+def _add_pin_label_sync(
+    cancelled: threading.Event,
+    kind: str,
+    file_path: str,
+    reference: str,
+    pin: str,
+    name: str,
+    shape: str,
+    x: float | None,
+    y: float | None,
+    snap_to_grid: bool,
+) -> str:
+    """The work of add_hierarchical_label and add_global_label (kind: "hierarchical_label"
+    or "global_label"). The function blocks: the tool runs it with _run_edit."""
+    path = Path(file_path)
+    if not path.exists():
+        return f"❌ The file {file_path} does not exist."
+    target = _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
+    if isinstance(target, str):
+        return target
+    content, stamp, point = target.content, target.stamp, target.point
+    angle, where, note = target.angle, target.where, target.note
+
+    justify = _JUSTIFY.get(angle, "left")
+    # A global label has the field of the references to the other sheets.
+    references = (
+        '\t\t(property "Intersheetrefs" "${INTERSHEET_REFS}" (at 0 0 0)\n'
+        "\t\t\t(effects (font (size 1.27 1.27)) hide)\n"
+        "\t\t)\n"
+        if kind == "global_label"
+        else ""
+    )
+    entry = (
+        f"\t({kind} {quote(name)} (shape {shape}) (at {_xy(point)} {angle})\n"
+        f"\t\t(effects (font (size 1.27 1.27)) (justify {justify}))\n"
+        f'\t\t(uuid "{uuid.uuid4()}")\n'
+        f"{references}"
+        f"\t)\n"
+    )
+    open_error, saved = _save(cancelled, path, _append_top_level(content, entry), stamp)
+    if open_error:
+        return open_error
+    word = "Global label" if kind == "global_label" else "Hierarchical label"
+    return f"✅ {word} '{name}' ({shape}) {where} angle {angle}°{note}{saved}"
 
 
 @mcp.tool()
@@ -939,28 +1005,18 @@ async def add_hierarchical_label(
     if error := _multiline_label_error(name):
         return error
     try:
-        path = Path(file_path)
-        if not path.exists():
-            return f"❌ The file {file_path} does not exist."
-        target = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
-        if isinstance(target, str):
-            return target
-        content, stamp, point = target.content, target.stamp, target.point
-        angle, where, note = target.angle, target.where, target.note
-
-        justify = _JUSTIFY.get(angle, "left")
-        entry = (
-            f"\t(hierarchical_label {quote(name)} (shape {shape}) (at {_xy(point)} {angle})\n"
-            f"\t\t(effects (font (size 1.27 1.27)) (justify {justify}))\n"
-            f'\t\t(uuid "{uuid.uuid4()}")\n'
-            f"\t)\n"
+        return await _run_edit(
+            _add_pin_label_sync,
+            "hierarchical_label",
+            file_path,
+            reference,
+            pin,
+            name,
+            shape,
+            x,
+            y,
+            snap_to_grid,
         )
-        open_error, saved = await write_in_thread(
-            write_schematic, path, _append_top_level(content, entry), stamp
-        )
-        if open_error:
-            return open_error
-        return f"✅ Hierarchical label '{name}' ({shape}) {where} angle {angle}°{note}{saved}"
     except Exception as e:
         return error_answer(e, "Error adding hierarchical label")
 
@@ -1003,33 +1059,210 @@ async def add_global_label(
     if error := _multiline_label_error(label_name):
         return error
     try:
-        path = Path(file_path)
-        if not path.exists():
-            return f"❌ The file {file_path} does not exist."
-        target = await _resolve_label_target(path, reference, pin, x, y, snap_to_grid)
-        if isinstance(target, str):
-            return target
-        content, stamp, point = target.content, target.stamp, target.point
-        angle, where, note = target.angle, target.where, target.note
-
-        justify = _JUSTIFY.get(angle, "left")
-        entry = (
-            f"\t(global_label {quote(label_name)} (shape {shape}) (at {_xy(point)} {angle})\n"
-            f"\t\t(effects (font (size 1.27 1.27)) (justify {justify}))\n"
-            f'\t\t(uuid "{uuid.uuid4()}")\n'
-            f'\t\t(property "Intersheetrefs" "${{INTERSHEET_REFS}}" (at 0 0 0)\n'
-            f"\t\t\t(effects (font (size 1.27 1.27)) hide)\n"
-            f"\t\t)\n"
-            f"\t)\n"
+        return await _run_edit(
+            _add_pin_label_sync,
+            "global_label",
+            file_path,
+            reference,
+            pin,
+            label_name,
+            shape,
+            x,
+            y,
+            snap_to_grid,
         )
-        open_error, saved = await write_in_thread(
-            write_schematic, path, _append_top_level(content, entry), stamp
-        )
-        if open_error:
-            return open_error
-        return f"✅ Global label '{label_name}' ({shape}) {where} angle {angle}°{note}{saved}"
     except Exception as e:
         return error_answer(e, "Error adding global label")
+
+
+def _add_component_from_library_sync(
+    cancelled: threading.Event,
+    file_path: str,
+    library_name: str,
+    symbol_name: str,
+    reference: str,
+    value: str,
+    footprint: str,
+    x: float,
+    y: float,
+    unit: int,
+    sheet_path: str,
+    snap_to_grid: bool,
+) -> str:
+    """The work of add_component_from_library. The function blocks (file reads, the parse, the
+    save): the tool runs it with _run_edit."""
+    path = Path(file_path)
+    if not path.exists():
+        return f"❌ The file {file_path} does not exist."
+    content, stamp = read_for_write_stamped(path)
+    version = writable_schematic_version(path, content)
+    if isinstance(version, str):
+        return version
+    lib_id = f"{library_name}:{symbol_name}"
+    try:
+        project = schematic_project_file(path)
+    except AmbiguousRootError as e:
+        return f"❌ Cannot add component {lib_id}: {e}"
+
+    # A definition in lib_symbols is in the format of the schematic: use it.
+    symbol_block = _symbol_def_block(_lib_symbols_block(content), lib_id)
+    kicad = None
+    if symbol_block is not None:
+        definition = "already in lib_symbols"
+    else:
+        kicad = kicad_cli_version_sync()
+        if kicad is None:
+            return (
+                f"❌ Cannot add component {lib_id}: kicad-cli was not found, thus the KiCad "
+                "version and its library tables are not known."
+            )
+        found = _library_definition(project, library_name, symbol_name, kicad, version)
+        if isinstance(found, str):
+            return found
+        symbol_block, library_path, problems = found
+        content = _insert_symbol_into_lib_symbols(content, symbol_block)
+        definition = f"inserted into lib_symbols from {library_path}"
+        if problems:
+            # KiCad uses no row of these tables, as the tool, and shows the problems.
+            definition += "\n**Library table problems (KiCad shows them too):** " + " ".join(
+                problems
+            )
+
+    definition_node = parse(symbol_block)
+    units = unit_count(definition_node)
+    if not 1 <= unit <= units:
+        return (
+            f"❌ Cannot add component {lib_id}: the symbol has {units} "
+            f"unit{'s' if units > 1 else ''}, thus the unit must be from 1 to {units}, "
+            f"not {unit}."
+        )
+    placed = _sheet_path(path, project, sheet_path)
+    if isinstance(placed, str):
+        return f"❌ Cannot add component {lib_id}: {placed}"
+    sheet, sheet_count = placed
+    settings = schematic_settings(project)
+    grid = settings.connection_grid
+    try:
+        items = read_sheet(parse(content), settings.wire_widths)
+    except InputError as e:
+        return (
+            f"❌ Cannot add component {lib_id}: the sheet has an item that KiCad cannot read: {e}."
+        )
+    try:
+        pins = symbol_pins(definition_node)
+        unit_pins = library_pins(definition_node, 1, {unit})
+        requested = Placement(iu(x), iu(y))
+        where = requested
+        touches = False
+        connects = []
+        if snap_to_grid:
+            existing = items.connection_points()
+            candidate = _symbol_position(requested, unit_pins, grid)
+            # A pin on a connection point of the sheet must stay connected there.
+            touches = any(
+                not _keeps(requested.sheet_position(pin), candidate.sheet_position(pin), existing)
+                for pin in unit_pins
+            )
+            if not touches:
+                where = candidate
+                connects = [
+                    f"pin {pin.number} at {_shown(where.sheet_position(pin))}"
+                    for pin in unit_pins
+                    if _new_connections(
+                        [(requested.sheet_position(pin), where.sheet_position(pin))], existing
+                    )
+                ]
+        fields = placed_fields(definition_node, rules_for_version(version).kicad)
+        component_entry = _placed_symbol(
+            definition_node,
+            fields,
+            lib_id,
+            {"Reference": reference, "Value": value, "Footprint": footprint or None},
+            to_mm(where.x),
+            to_mm(where.y),
+            unit,
+            pins,
+            (project.stem, sheet.path),
+        )
+    except (KicadFileError, InputError) as e:
+        return f"❌ Cannot add component {lib_id}: {e}"
+    try:
+        new_pins = junction_symbol(parse(component_entry), definition_node)
+    except InputError as e:
+        return f"❌ Cannot add component {lib_id}: the library symbol: {e}."
+    try:
+        place_symbol(items, new_pins, _junction_rules(version), is_bus_label)
+    except UnknownJunctionError as e:
+        return f"❌ Cannot add component {lib_id}: {e}"
+    content = _apply_sheet(content, items)
+    content = _append_top_level(content, "\n" + component_entry)
+
+    off_grid, off_grid_nc = [], []
+    for pin in unit_pins:
+        position = where.sheet_position(pin)
+        if not on_grid(position, grid):
+            group = off_grid_nc if pin.type == "no_connect" else off_grid
+            group.append(f"pin {pin.number} at {_shown(position)}")
+    position = _shown((where.x, where.y))
+    if where != requested:
+        position += (
+            f", moved to the connection grid of {_mm(to_mm(grid))} mm from "
+            f"{_shown((requested.x, requested.y))}"
+        )
+    if touches:
+        position += (
+            ", not moved: the move to the connection grid takes a pin away from a "
+            "connection point of the sheet"
+        )
+    elif snap_to_grid and off_grid:
+        position += ", the pins of the symbol cannot all be on the connection grid"
+    if connects:
+        position += (
+            "\n**Note:** after the move to the connection grid these pins are on a "
+            f"connection point of the sheet, thus they connect there: {', '.join(connects)}."
+        )
+
+    off_grid_text = ""
+    if off_grid:
+        installed = _installed_off_grid(settings, kicad, version)
+        off_grid_text = _off_grid_text(off_grid, settings, installed)
+    off_grid_text += _no_connect_text(off_grid_nc, settings, version)
+
+    open_error, saved = _save(cancelled, path, content, stamp)
+    if open_error:
+        return open_error
+
+    shared = ""
+    if not project.is_file():
+        # sch_hierarchy cannot find a project outside the directory tree.
+        shared = (
+            f"\n**Note:** The project file {project.name} does not exist. The reference is "
+            f"for the sheet {sheet.shown} of {project.with_suffix('.kicad_sch').name} as the "
+            "schematic editor opens it with no project. If the schematic is a sub-sheet of a "
+            "project in an other directory tree, KiCad shows the Reference field there "
+            "until the user annotates the schematic.\n"
+        )
+    if sheet_count > 1:
+        # SCH_SYMBOL::GetRef uses the Reference field for a path with no instance.
+        shared += (
+            f"\n**Note:** The hierarchy uses this schematic {sheet_count} times. Only "
+            f"{sheet.shown} has the reference {reference}. KiCad shows the Reference field, "
+            f"{reference}, also for the other sheets until the user annotates the schematic.\n"
+        )
+    return f"""✅ Component added successfully!
+
+**File:** {file_path}
+**Library:** {library_name}
+**Symbol:** {symbol_name}
+**Reference:** {reference}
+**Value:** {value}
+**Position:** {position}
+**Lib ID:** {lib_id}
+**Sheet:** {sheet.shown}
+**Symbol definition:** {definition}
+**Pins:** {len(pins)} pins detected
+{_junction_report(items)}{off_grid_text}{_grid_note(settings)}{shared}{saved}
+"""
 
 
 @mcp.tool()
@@ -1093,186 +1326,169 @@ async def add_component_from_library(
     if not (math.isfinite(x) and math.isfinite(y)):
         return f"❌ The position ({x}, {y}) is not a position in mm."
     try:
-        path = Path(file_path)
-        if not path.exists():
-            return f"❌ The file {file_path} does not exist."
-        content, stamp = read_for_write_stamped(path)
-        version = writable_schematic_version(path, content)
-        if isinstance(version, str):
-            return version
-        lib_id = f"{library_name}:{symbol_name}"
-        try:
-            project = await asyncio.to_thread(schematic_project_file, path)
-        except AmbiguousRootError as e:
-            return f"❌ Cannot add component {lib_id}: {e}"
-
-        # A definition in lib_symbols is in the format of the schematic: use it.
-        symbol_block = _symbol_def_block(_lib_symbols_block(content), lib_id)
-        kicad = None
-        if symbol_block is not None:
-            definition = "already in lib_symbols"
-        else:
-            kicad = await get_kicad_version()
-            if kicad is None:
-                return (
-                    f"❌ Cannot add component {lib_id}: kicad-cli was not found, thus the KiCad "
-                    "version and its library tables are not known."
-                )
-            found = await asyncio.to_thread(
-                _library_definition, project, library_name, symbol_name, kicad, version
-            )
-            if isinstance(found, str):
-                return found
-            symbol_block, library_path, problems = found
-            content = _insert_symbol_into_lib_symbols(content, symbol_block)
-            definition = f"inserted into lib_symbols from {library_path}"
-            if problems:
-                # KiCad uses no row of these tables, as the tool, and shows the problems.
-                definition += "\n**Library table problems (KiCad shows them too):** " + " ".join(
-                    problems
-                )
-
-        definition_node = parse(symbol_block)
-        units = unit_count(definition_node)
-        if not 1 <= unit <= units:
-            return (
-                f"❌ Cannot add component {lib_id}: the symbol has {units} "
-                f"unit{'s' if units > 1 else ''}, thus the unit must be from 1 to {units}, "
-                f"not {unit}."
-            )
-        placed = await asyncio.to_thread(_sheet_path, path, project, sheet_path)
-        if isinstance(placed, str):
-            return f"❌ Cannot add component {lib_id}: {placed}"
-        sheet, sheet_count = placed
-        settings = await asyncio.to_thread(schematic_settings, project)
-        grid = settings.connection_grid
-        try:
-            items = read_sheet(parse(content), settings.wire_widths)
-        except InputError as e:
-            return (
-                f"❌ Cannot add component {lib_id}: the sheet has an item that KiCad cannot "
-                f"read: {e}."
-            )
-        try:
-            pins = symbol_pins(definition_node)
-            unit_pins = library_pins(definition_node, 1, {unit})
-            requested = Placement(iu(x), iu(y))
-            where = requested
-            touches = False
-            connects = []
-            if snap_to_grid:
-                existing = items.connection_points()
-                candidate = _symbol_position(requested, unit_pins, grid)
-                # A pin on a connection point of the sheet must stay connected there.
-                touches = any(
-                    not _keeps(
-                        requested.sheet_position(pin), candidate.sheet_position(pin), existing
-                    )
-                    for pin in unit_pins
-                )
-                if not touches:
-                    where = candidate
-                    connects = [
-                        f"pin {pin.number} at {_shown(where.sheet_position(pin))}"
-                        for pin in unit_pins
-                        if _new_connections(
-                            [(requested.sheet_position(pin), where.sheet_position(pin))], existing
-                        )
-                    ]
-            fields = placed_fields(definition_node, rules_for_version(version).kicad)
-            component_entry = _placed_symbol(
-                definition_node,
-                fields,
-                lib_id,
-                {"Reference": reference, "Value": value, "Footprint": footprint or None},
-                to_mm(where.x),
-                to_mm(where.y),
-                unit,
-                pins,
-                (project.stem, sheet.path),
-            )
-        except (KicadFileError, InputError) as e:
-            return f"❌ Cannot add component {lib_id}: {e}"
-        try:
-            new_pins = junction_symbol(parse(component_entry), definition_node)
-        except InputError as e:
-            return f"❌ Cannot add component {lib_id}: the library symbol: {e}."
-        try:
-            place_symbol(items, new_pins, _junction_rules(version), is_bus_label)
-        except UnknownJunctionError as e:
-            return f"❌ Cannot add component {lib_id}: {e}"
-        content = _apply_sheet(content, items)
-        content = _append_top_level(content, "\n" + component_entry)
-
-        off_grid, off_grid_nc = [], []
-        for pin in unit_pins:
-            position = where.sheet_position(pin)
-            if not on_grid(position, grid):
-                group = off_grid_nc if pin.type == "no_connect" else off_grid
-                group.append(f"pin {pin.number} at {_shown(position)}")
-        position = _shown((where.x, where.y))
-        if where != requested:
-            position += (
-                f", moved to the connection grid of {_mm(to_mm(grid))} mm from "
-                f"{_shown((requested.x, requested.y))}"
-            )
-        if touches:
-            position += (
-                ", not moved: the move to the connection grid takes a pin away from a "
-                "connection point of the sheet"
-            )
-        elif snap_to_grid and off_grid:
-            position += ", the pins of the symbol cannot all be on the connection grid"
-        if connects:
-            position += (
-                "\n**Note:** after the move to the connection grid these pins are on a "
-                f"connection point of the sheet, thus they connect there: {', '.join(connects)}."
-            )
-
-        off_grid_text = ""
-        if off_grid:
-            installed = await _installed_off_grid(settings, kicad, version)
-            off_grid_text = _off_grid_text(off_grid, settings, installed)
-        off_grid_text += _no_connect_text(off_grid_nc, settings, version)
-
-        open_error, saved = await write_in_thread(write_schematic, path, content, stamp)
-        if open_error:
-            return open_error
-
-        shared = ""
-        if not project.is_file():
-            # sch_hierarchy cannot find a project outside the directory tree.
-            shared = (
-                f"\n**Note:** The project file {project.name} does not exist. The reference is "
-                f"for the sheet {sheet.shown} of {project.with_suffix('.kicad_sch').name} as the "
-                "schematic editor opens it with no project. If the schematic is a sub-sheet of a "
-                "project in an other directory tree, KiCad shows the Reference field there "
-                "until the user annotates the schematic.\n"
-            )
-        if sheet_count > 1:
-            # SCH_SYMBOL::GetRef uses the Reference field for a path with no instance.
-            shared += (
-                f"\n**Note:** The hierarchy uses this schematic {sheet_count} times. Only "
-                f"{sheet.shown} has the reference {reference}. KiCad shows the Reference field, "
-                f"{reference}, also for the other sheets until the user annotates the schematic.\n"
-            )
-        return f"""✅ Component added successfully!
-
-**File:** {file_path}
-**Library:** {library_name}
-**Symbol:** {symbol_name}
-**Reference:** {reference}
-**Value:** {value}
-**Position:** {position}
-**Lib ID:** {lib_id}
-**Sheet:** {sheet.shown}
-**Symbol definition:** {definition}
-**Pins:** {len(pins)} pins detected
-{_junction_report(items)}{off_grid_text}{_grid_note(settings)}{shared}{saved}
-"""
-
+        return await _run_edit(
+            _add_component_from_library_sync,
+            file_path,
+            library_name,
+            symbol_name,
+            reference,
+            value,
+            footprint,
+            x,
+            y,
+            unit,
+            sheet_path,
+            snap_to_grid,
+        )
     except Exception as e:
         return error_answer(e, "Error adding component")
+
+
+def _add_wire_sync(
+    cancelled: threading.Event,
+    file_path: str,
+    points: list[tuple[float, float]],
+    snap_to_grid: bool,
+) -> str:
+    """The work of add_wire. The function blocks (file reads, the parse, the
+    save): the tool runs it with _run_edit."""
+    if len(points) < 2:
+        return "❌ A wire needs two or more points."
+    for point in points:
+        if not all(math.isfinite(value) for value in point):
+            return f"❌ The point {tuple(point)} is not a position in mm."
+    requested = [(iu(x), iu(y)) for x, y in points]
+    if error := _zero_segment(requested, ""):
+        return error
+
+    path = Path(file_path)
+    if not path.exists():
+        return f"❌ The file {file_path} does not exist."
+    content, stamp = read_for_write_stamped(path)
+    version = writable_schematic_version(path, content)
+    if isinstance(version, str):
+        return version
+    settings = _project_settings(path)
+    if isinstance(settings, _NoGrid) and snap_to_grid:
+        return f"❌ Cannot add the wire: {settings.reason}"
+    try:
+        root = parse(content)
+        sheet = read_sheet(root, settings.wire_widths)
+    except InputError as e:
+        return f"❌ Cannot add the wire: the sheet has an item that KiCad cannot read: {e}."
+    final = requested
+    if snap_to_grid:
+        existing = sheet.connection_points()
+        final = _snapped_wire(requested, settings.connection_grid, existing)
+        if error := _zero_segment(final, " after the move to the connection grid"):
+            return error
+
+    segments = [
+        Line(start, end, False, (0, "solid", (0.0, 0.0, 0.0, 0.0)), str(uuid.uuid4()), new=True)
+        for start, end in itertools.pairwise(final)
+    ]
+    junctions_before = list(sheet.junctions)
+    try:
+        finish_wire(sheet, segments, _junction_rules(version), is_bus_label)
+    except UnknownJunctionError as e:
+        return f"❌ Cannot add the wire: {e}"
+    added = [line for line in sheet.lines if line.new and line.node is None]
+    # A wire of the file that the new wire extends (a wire inside it: no change), or
+    # that a new wire takes in (CleanUp keeps the first line of the pair).
+    merged = [line for line in sheet.lines if line.new and line.node is not None and line.moved]
+    merged += [
+        line
+        for line in added
+        if any(
+            on_segment(old.original[0], (line.start, line.end))
+            and on_segment(old.original[1], (line.start, line.end))
+            and old.bus == line.bus
+            for old in sheet.removed
+        )
+    ]
+    file_changes = [line for line in sheet.lines if line.edited_in_file]
+    if not (
+        added or file_changes or sheet.removed or sheet.added_junctions or sheet.removed_junctions
+    ):
+        return (
+            "✅ No change: the sheet has this wire already (KiCad: CleanUp removes a "
+            "wire with the ends of an other wire)."
+        )
+    content = _apply_sheet(content, sheet)
+    off_grid_text = ""
+    if not isinstance(settings, _NoGrid):
+        off_grid = [
+            _shown(point)
+            for point in dict.fromkeys(final)
+            if not on_grid(point, settings.connection_grid)
+        ]
+        if off_grid:
+            installed = _installed_off_grid(settings, None, version)
+            off_grid_text = _off_grid_text(off_grid, settings, installed)
+    open_error, saved = _save(cancelled, path, content, stamp)
+    if open_error:
+        return open_error
+
+    lines = "".join(f"\n- {_shown(line.start)} to {_shown(line.end)}" for line in added)
+    text = (
+        f"✅ Wire added: {len(added)} segment{'s' if len(added) != 1 else ''}{lines}\n"
+        if added
+        else "✅ Wire added.\n"
+    )
+    if merged:
+        text += (
+            "\nThe wire is merged with a wire of the sheet on the same straight line "
+            "(KiCad: CleanUp): "
+            + ", ".join(f"{_shown(line.start)} to {_shown(line.end)}" for line in merged)
+            + ".\n"
+        )
+    text += _junction_report(sheet)
+    if isinstance(settings, _NoGrid):
+        return text + _grid_note(settings) + saved
+    grid = settings.connection_grid
+    moves = [
+        f"{_shown(old)} to {_shown(new)}"
+        for old, new in zip(requested, final, strict=True)
+        if old != new
+    ]
+    if moves:
+        text += (
+            f"\nPoints moved to the connection grid of {_mm(to_mm(grid))} mm: {', '.join(moves)}.\n"
+        )
+    connects = []
+    if snap_to_grid:
+        connects = _new_connections(list(zip(requested, final, strict=True)), existing)
+        # A label connects anywhere on a wire, also without a junction.
+        # A label or a junction connects in the middle of a wire, also without a new
+        # junction.
+        written = [(line.start, line.end) for line in sheet.lines if line.new]
+        old_parts = [
+            line.original
+            for line in [*sheet.lines, *sheet.removed]
+            if line.original and (line.new or line in sheet.removed)
+        ]
+        middles = [label.position for label in sheet.labels] + [
+            point
+            for point in junctions_before
+            if point in sheet.junctions and point not in sheet.added_junctions
+        ]
+        for point in dict.fromkeys(middles):
+            after = any(on_segment(point, segment) for segment in written)
+            # Not new: on the requested wire, or on the part of the file of a wire
+            # that the new wire extends.
+            before = any(
+                on_segment(point, segment)
+                for segment in [*itertools.pairwise(requested), *old_parts]
+            )
+            if after and not before and point not in connects:
+                connects.append(point)
+    if connects:
+        text += (
+            "\n**Note:** after the move to the connection grid these points are on a "
+            "connection point of the sheet, thus the wire connects there: "
+            f"{', '.join(_shown(point) for point in connects)}.\n"
+        )
+    return text + off_grid_text + _grid_note(settings) + saved
 
 
 @mcp.tool()
@@ -1307,150 +1523,42 @@ async def add_wire(
             they are. The output tells the points off the grid.
     """
     try:
-        if len(points) < 2:
-            return "❌ A wire needs two or more points."
-        for point in points:
-            if not all(math.isfinite(value) for value in point):
-                return f"❌ The point {tuple(point)} is not a position in mm."
-        requested = [(iu(x), iu(y)) for x, y in points]
-        if error := _zero_segment(requested, ""):
-            return error
-
-        path = Path(file_path)
-        if not path.exists():
-            return f"❌ The file {file_path} does not exist."
-        content, stamp = read_for_write_stamped(path)
-        version = writable_schematic_version(path, content)
-        if isinstance(version, str):
-            return version
-        settings = await _settings_of(path)
-        if isinstance(settings, _NoGrid) and snap_to_grid:
-            return f"❌ Cannot add the wire: {settings.reason}"
-        try:
-            root = parse(content)
-            sheet = read_sheet(root, settings.wire_widths)
-        except InputError as e:
-            return f"❌ Cannot add the wire: the sheet has an item that KiCad cannot read: {e}."
-        final = requested
-        if snap_to_grid:
-            existing = sheet.connection_points()
-            final = _snapped_wire(requested, settings.connection_grid, existing)
-            if error := _zero_segment(final, " after the move to the connection grid"):
-                return error
-
-        segments = [
-            Line(start, end, False, (0, "solid", (0.0, 0.0, 0.0, 0.0)), str(uuid.uuid4()), new=True)
-            for start, end in itertools.pairwise(final)
-        ]
-        junctions_before = list(sheet.junctions)
-        try:
-            finish_wire(sheet, segments, _junction_rules(version), is_bus_label)
-        except UnknownJunctionError as e:
-            return f"❌ Cannot add the wire: {e}"
-        added = [line for line in sheet.lines if line.new and line.node is None]
-        # A wire of the file that the new wire extends (a wire inside it: no change), or
-        # that a new wire takes in (CleanUp keeps the first line of the pair).
-        merged = [line for line in sheet.lines if line.new and line.node is not None and line.moved]
-        merged += [
-            line
-            for line in added
-            if any(
-                on_segment(old.original[0], (line.start, line.end))
-                and on_segment(old.original[1], (line.start, line.end))
-                and old.bus == line.bus
-                for old in sheet.removed
-            )
-        ]
-        file_changes = [line for line in sheet.lines if line.edited_in_file]
-        if not (
-            added
-            or file_changes
-            or sheet.removed
-            or sheet.added_junctions
-            or sheet.removed_junctions
-        ):
-            return (
-                "✅ No change: the sheet has this wire already (KiCad: CleanUp removes a "
-                "wire with the ends of an other wire)."
-            )
-        content = _apply_sheet(content, sheet)
-        off_grid_text = ""
-        if not isinstance(settings, _NoGrid):
-            off_grid = [
-                _shown(point)
-                for point in dict.fromkeys(final)
-                if not on_grid(point, settings.connection_grid)
-            ]
-            if off_grid:
-                installed = await _installed_off_grid(settings, None, version)
-                off_grid_text = _off_grid_text(off_grid, settings, installed)
-        open_error, saved = await write_in_thread(write_schematic, path, content, stamp)
-        if open_error:
-            return open_error
-
-        lines = "".join(f"\n- {_shown(line.start)} to {_shown(line.end)}" for line in added)
-        text = (
-            f"✅ Wire added: {len(added)} segment{'s' if len(added) != 1 else ''}{lines}\n"
-            if added
-            else "✅ Wire added.\n"
-        )
-        if merged:
-            text += (
-                "\nThe wire is merged with a wire of the sheet on the same straight line "
-                "(KiCad: CleanUp): "
-                + ", ".join(f"{_shown(line.start)} to {_shown(line.end)}" for line in merged)
-                + ".\n"
-            )
-        text += _junction_report(sheet)
-        if isinstance(settings, _NoGrid):
-            return text + _grid_note(settings) + saved
-        grid = settings.connection_grid
-        moves = [
-            f"{_shown(old)} to {_shown(new)}"
-            for old, new in zip(requested, final, strict=True)
-            if old != new
-        ]
-        if moves:
-            text += (
-                f"\nPoints moved to the connection grid of {_mm(to_mm(grid))} mm: "
-                f"{', '.join(moves)}.\n"
-            )
-        connects = []
-        if snap_to_grid:
-            connects = _new_connections(list(zip(requested, final, strict=True)), existing)
-            # A label connects anywhere on a wire, also without a junction.
-            # A label or a junction connects in the middle of a wire, also without a new
-            # junction.
-            written = [(line.start, line.end) for line in sheet.lines if line.new]
-            old_parts = [
-                line.original
-                for line in [*sheet.lines, *sheet.removed]
-                if line.original and (line.new or line in sheet.removed)
-            ]
-            middles = [label.position for label in sheet.labels] + [
-                point
-                for point in junctions_before
-                if point in sheet.junctions and point not in sheet.added_junctions
-            ]
-            for point in dict.fromkeys(middles):
-                after = any(on_segment(point, segment) for segment in written)
-                # Not new: on the requested wire, or on the part of the file of a wire
-                # that the new wire extends.
-                before = any(
-                    on_segment(point, segment)
-                    for segment in [*itertools.pairwise(requested), *old_parts]
-                )
-                if after and not before and point not in connects:
-                    connects.append(point)
-        if connects:
-            text += (
-                "\n**Note:** after the move to the connection grid these points are on a "
-                "connection point of the sheet, thus the wire connects there: "
-                f"{', '.join(_shown(point) for point in connects)}.\n"
-            )
-        return text + off_grid_text + _grid_note(settings) + saved
+        return await _run_edit(_add_wire_sync, file_path, points, snap_to_grid)
     except Exception as e:
         return error_answer(e, "Error adding wire")
+
+
+def _add_label_sync(
+    cancelled: threading.Event,
+    file_path: str,
+    text: str,
+    x: float,
+    y: float,
+    orientation: float,
+    snap_to_grid: bool,
+) -> str:
+    """The work of add_label. The function blocks (file reads, the parse, the
+    save): the tool runs it with _run_edit."""
+    path = Path(file_path)
+    if not path.exists():
+        return f"❌ The file {file_path} does not exist."
+    content, stamp = read_for_write_stamped(path)
+    found = _label_position(path, content, x, y, snap_to_grid)
+    if isinstance(found, str):
+        return found
+    point, where, note = found
+    label_entry = (
+        f"\t(label {quote(text)} (at {_xy(point)} {orientation})\n"
+        "\t\t(effects (font (size 1.27 1.27)) (justify left))\n"
+        f'\t\t(uuid "{uuid.uuid4()}")\n'
+        "\t)\n"
+    )
+    content = _append_top_level(content, label_entry)
+
+    open_error, saved = _save(cancelled, path, content, stamp)
+    if open_error:
+        return open_error
+    return f"✅ Label '{text}' added {where}{note}{saved}"
 
 
 @mcp.tool()
@@ -1476,25 +1584,6 @@ async def add_label(
     if error := _multiline_label_error(text):
         return error
     try:
-        path = Path(file_path)
-        if not path.exists():
-            return f"❌ The file {file_path} does not exist."
-        content, stamp = read_for_write_stamped(path)
-        found = await _label_position(path, content, x, y, snap_to_grid)
-        if isinstance(found, str):
-            return found
-        point, where, note = found
-        label_entry = (
-            f"\t(label {quote(text)} (at {_xy(point)} {orientation})\n"
-            "\t\t(effects (font (size 1.27 1.27)) (justify left))\n"
-            f'\t\t(uuid "{uuid.uuid4()}")\n'
-            "\t)\n"
-        )
-        content = _append_top_level(content, label_entry)
-
-        open_error, saved = await write_in_thread(write_schematic, path, content, stamp)
-        if open_error:
-            return open_error
-        return f"✅ Label '{text}' added {where}{note}{saved}"
+        return await _run_edit(_add_label_sync, file_path, text, x, y, orientation, snap_to_grid)
     except Exception as e:
         return error_answer(e, "Error adding label")

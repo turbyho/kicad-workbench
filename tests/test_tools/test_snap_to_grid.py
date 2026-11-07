@@ -312,20 +312,20 @@ class TestWire:
     def test_severity_in_the_order_of_kicad(self, sch, monkeypatch):
         # KiCad 10.0.6 reads bus_entry_needed before endpoint_off_grid: a value that is
         # not a text stops the read, thus endpoint_off_grid keeps its default.
-        async def kicad_version():
+        def kicad_version():
             return "10.0.6"
 
-        monkeypatch.setattr(schematic_editor, "get_kicad_version", kicad_version)
+        monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", kicad_version)
         severities = {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}
         set_project(sch, {"erc": {"rule_severities": severities}})
         result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
         assert "ERC of the project gives endpoint_off_grid (warning)." in result, result
 
     def test_kicad_cli_error(self, sch, monkeypatch):
-        async def broken():
+        def broken():
             raise PermissionError("kicad-cli")
 
-        monkeypatch.setattr(schematic_editor, "get_kicad_version", broken)
+        monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", broken)
         # The severity is the same in each order: the tool does not run kicad-cli.
         assert wire(sch, [(10, 10), (20, 10)], snap_to_grid=False).startswith("✅")
         # The order changes the result: the error of kicad-cli is in the reason, and
@@ -342,10 +342,10 @@ class TestWire:
 
     def test_installed_kicad_that_cannot_open_the_file(self, sch, monkeypatch):
         # KiCad 9 does not open a file of KiCad 10: its key order does not apply.
-        async def kicad9():
+        def kicad9():
             return "9.0.9"
 
-        monkeypatch.setattr(schematic_editor, "get_kicad_version", kicad9)
+        monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", kicad9)
         severities = {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}
         set_project(sch, {"erc": {"rule_severities": severities}})
         result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
@@ -356,7 +356,7 @@ class TestWire:
         ), result
 
     def test_severity_that_is_not_known(self, sch, monkeypatch):
-        monkeypatch.setattr(schematic_editor, "get_kicad_version", no_version)
+        monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", no_version)
         severities = {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}
         set_project(sch, {"erc": {"rule_severities": severities}})
         result = wire(sch, [(10, 10), (20, 10)], snap_to_grid=False)
@@ -492,7 +492,7 @@ def test_projects_with_the_same_settings(sch, monkeypatch):
     assert "Points moved to the connection grid of 2.54 mm" in result, result
 
 
-async def no_version():
+def no_version():
     return None
 
 
@@ -523,7 +523,7 @@ def test_projects_with_different_severities(sch, monkeypatch):
     # A severity that is not known in one project: the reason is in the text.
     unknown = {"erc": {"rule_severities": {"bus_entry_needed": 5, "endpoint_off_grid": "ignore"}}}
     shared_sheet(sch, monkeypatch, json.dumps(ignore), json.dumps(unknown))
-    monkeypatch.setattr(schematic_editor, "get_kicad_version", no_version)
+    monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", no_version)
     result = wire(sch, [(50, 10), (60, 10)], snap_to_grid=False)
     assert (
         "can give endpoint_off_grid (warning, or no violation; its severity is not known: the "

@@ -111,7 +111,7 @@ class TestGlobalLabel:
         m = re.search(r"\(global_label \"VRAIL\".*?\n\t\)", content, re.S)
         assert m, "global_label block missing"
         assert "(shape input)" in m.group(0)
-        assert "Intersheetrefs" in m.group(0)
+        assert '(property "Intersheetrefs" "${INTERSHEET_REFS}"' in m.group(0)
 
     def test_requires_name(self, built):
         # a global label without a name would be meaningless

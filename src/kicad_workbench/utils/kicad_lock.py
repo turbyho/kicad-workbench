@@ -16,7 +16,6 @@ KiCad still runs, thus it also refuses the write for such a lock file. The
 error message tells how to remove it.
 """
 
-import asyncio
 import hashlib
 import json
 import os
@@ -254,11 +253,11 @@ def _guarded_write(
     return None
 
 
-async def write_in_thread(
+def write_with_warning(
     write: Callable[[Path, str, FileStamp], str | None], path: Path, content: str, stamp: FileStamp
 ) -> tuple[str | None, str]:
-    """Run write_schematic() or write_board() off the event loop: the save flushes
-    the file to the disk, which can take long.
+    """Run write_schematic() or write_board(). The function blocks (the save flushes
+    the file to the disk): run it off the event loop.
 
     Returns:
         (the error of the write or None, a warning). The warning is "" or a
@@ -268,7 +267,7 @@ async def write_in_thread(
         other call would make it two times.
     """
     try:
-        return await asyncio.to_thread(write, path, content, stamp), ""
+        return write(path, content, stamp), ""
     except AfterSaveError as e:
         return None, f"\n\n⚠️ {e}"
 

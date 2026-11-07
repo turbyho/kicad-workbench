@@ -175,10 +175,10 @@ class TestRefusal:
         )
 
     def test_no_kicad_cli(self, libs, monkeypatch):
-        async def no_version():
+        def no_version():
             return None
 
-        monkeypatch.setattr(schematic_editor, "get_kicad_version", no_version)
+        monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", no_version)
         result = add(write_schematic(libs["board"], 20260306))
         assert result.startswith("❌ Cannot add component Device:R: kicad-cli was not found")
 

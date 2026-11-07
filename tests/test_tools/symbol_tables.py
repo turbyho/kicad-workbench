@@ -42,10 +42,10 @@ def use_global_table(tmp_path: Path, monkeypatch, *rows: str) -> Path:
     monkeypatch.setenv("KICAD_DOCUMENTS_HOME", str(tmp_path / "kicad-documents"))
     monkeypatch.setattr(library_tables, "_stock_dir", lambda: tmp_path / "kicad-stock")
 
-    async def kicad_version():
+    def kicad_version():
         return "10.0.6"
 
-    monkeypatch.setattr(schematic_editor, "get_kicad_version", kicad_version)
+    monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", kicad_version)
     path = config / "10.0" / "sym-lib-table"
     path.write_text(table(*rows), encoding="utf-8")
     return path

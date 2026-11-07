@@ -515,7 +515,7 @@ def make_tables(tmp_path, monkeypatch) -> dict:
     (config / "10.0").mkdir(parents=True)
     monkeypatch.setenv("KICAD_CONFIG_HOME", str(config))
     monkeypatch.setenv("KICAD_DOCUMENTS_HOME", str(tmp_path / "documents"))
-    monkeypatch.setattr(library_tables, "_stock_dir", lambda version_dir: tmp_path / "stock")
+    monkeypatch.setattr(library_tables, "_stock_dir", lambda: tmp_path / "stock")
 
     async def version():
         return "10.0.6"

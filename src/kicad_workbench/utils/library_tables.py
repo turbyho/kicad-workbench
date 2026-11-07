@@ -27,7 +27,7 @@ from ..errors import InputError
 from ..parsers.kicad_versions import version_numbers
 from ..parsers.sexpr import SExprError, parse
 from .kicad_text import KiCadEncodingError, read_as_kicad, read_kicad_json
-from .kicad_version import get_kicad_share_dir
+from .kicad_version import stock_library_dir, system_data_dir
 
 # The file name of each table kind, and the head of its S-expression.
 TABLE_FILES = {
@@ -62,6 +62,8 @@ _ALIASES = (
     (re.compile(r"KICAD\d+_3RD_PARTY"), "3RD_PARTY"),
 )
 _VARIABLE_CHARS = re.compile(r"[A-Za-z0-9_:]*")
+# The names of the variables in a URI: ${NAME}, $(NAME), %NAME% and $NAME.
+_URI_VARIABLE = re.compile(r"\$\{([\w:]+)\}|\$\(([\w:]+)\)|%([\w:]+)%|\$([\w:]+)")
 
 
 class LibraryTableError(InputError):
@@ -76,6 +78,8 @@ class KicadEnvironment:
     minor: int
     config_dir: Path
     variables: dict[str, str]
+    # The stock library folder of the installation, or None when it is not known.
+    stock_dir: Path | None = None
 
     @property
     def version_dir(self) -> str:
@@ -155,27 +159,36 @@ def kicad_settings_dir(version: str) -> Path:
     return (Path(config_home) if config_home else _config_base() / "kicad") / f"{major}.{minor}"
 
 
-def _stock_dir(version_dir: str) -> Path | None:
-    """The "share/kicad" directory of the KiCad installation of the version.
-
-    On Windows each version has its own directory, "KiCad/<major.minor>". On
-    Linux and macOS KiCad has its data directory built in, thus the first
-    installation that find_kicad_install() finds is used. With more than one
-    installed version, the environment or kicad_common.json must set the
-    variables (for example KICAD10_SYMBOL_DIR), as in KiCad.
+def _stock_dir() -> Path | None:
+    """The stock library folder of the KiCad installation of the kicad-cli that
+    the server uses (find_kicad_cli and stock_library_dir), or None when it is
+    not known. The server uses one KiCad installation: the kicad-cli of
+    KICAD_CLI or of PATH gives the version, and its installation gives the
+    libraries. With an unknown folder (Linux: a second installation), the
+    environment or kicad_common.json must set the variables (for example
+    KICAD10_SYMBOL_DIR), as in KiCad.
     """
-    if sys.platform == "win32":
-        path = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "KiCad" / version_dir
-        stock = path / "share" / "kicad"
-        return stock if stock.is_dir() else None
-    return get_kicad_share_dir()
+    # kicad_cli imports this module, thus the import is here.
+    from .kicad_cli import find_kicad_cli
+
+    return stock_library_dir(find_kicad_cli())
 
 
-def kicad_stock_dir(version: str) -> Path | None:
-    """Return the "share/kicad" folder of the installation of a KiCad version (see
-    _stock_dir), or None."""
-    major, minor = _parse_version(version)
-    return _stock_dir(f"{major}.{minor}")
+def kicad_stock_dir() -> Path | None:
+    """Return the stock library folder of the KiCad installation that the server
+    uses (see _stock_dir), or None."""
+    return _stock_dir()
+
+
+def kicad_system_data_dir() -> Path | None:
+    """Return the data folder of the KiCad installation that the server uses, in
+    the system folders that KiCad searches (kicad_version.system_data_dir), or
+    None. Linux and macOS: the stock library folder (_stock_dir)."""
+    if sys.platform != "win32":
+        return _stock_dir()
+    from .kicad_cli import find_kicad_cli  # kicad_cli imports this module
+
+    return system_data_dir(find_kicad_cli())
 
 
 def kicad_documents_dir(version: str) -> Path:
@@ -200,7 +213,6 @@ def kicad_environment(version: str) -> KicadEnvironment:
     of the installation, in this order (COMMON_SETTINGS of KiCad).
     """
     major, minor = _parse_version(version)
-    version_dir = f"{major}.{minor}"
     config_dir = kicad_settings_dir(version)
 
     documents = kicad_documents_dir(version)
@@ -209,7 +221,7 @@ def kicad_environment(version: str) -> KicadEnvironment:
         f"KICAD{major}_3RD_PARTY": str(documents / "3rdparty"),
         "KICAD_USER_TEMPLATE_DIR": str(documents / "template"),
     }
-    stock = _stock_dir(version_dir)
+    stock = _stock_dir()
     if stock is not None:
         for name, subdir in _STOCK_DIRS.items():
             defaults[f"KICAD{major}_{name}"] = str(stock / subdir)
@@ -221,12 +233,15 @@ def kicad_environment(version: str) -> KicadEnvironment:
         settings = {str(k).strip(): str(v).strip() for k, v in values.items() if v is not None}
 
     # An environment variable with a value replaces the setting (an empty
-    # value does not, InitializeEnvironment of KiCad).
+    # value does not, InitializeEnvironment of KiCad). KiCad defines each
+    # variable of the stock folder, thus a value in the environment applies
+    # also when the stock folder is not known.
     variables = {**defaults, **settings}
-    for name in list(variables):
-        if os.environ.get(name):
-            variables[name] = os.environ[name]
-    return KicadEnvironment(major, minor, config_dir, variables)
+    stock_names = [f"KICAD{major}_{name}" for name in _STOCK_DIRS]
+    for key in set(variables) | set(stock_names):
+        if os.environ.get(key):
+            variables[key] = os.environ[key]
+    return KicadEnvironment(major, minor, config_dir, variables, stock)
 
 
 def project_variables(project_file: Path) -> dict[str, str]:
@@ -402,7 +417,58 @@ def library_rows(
                 problems.append(f"The global library table {table} does not exist.")
             continue
         _add_rows(kind, scope, table, False, env, project, rows, problems, set())
+    if env.stock_dir is None and any(
+        row.path is None and _uses_stock_variable(row.uri, env) for row in rows
+    ):
+        problems.append(_unknown_stock_problem(env))
     return rows, problems
+
+
+def _uses_stock_variable(uri: str, env: KicadEnvironment) -> bool:
+    """True when the URI has a variable of the stock library folder of the KiCad
+    version (KICAD<major>_SYMBOL_DIR and the others), or an alias that gets the
+    value of one of them (_ALIASES)."""
+    names = {f"KICAD{env.major}_{name}" for name in _STOCK_DIRS}
+    for match in _URI_VARIABLE.finditer(uri):
+        name = next(group for group in match.groups() if group)
+        if name in names:
+            return True
+        if any(pattern.fullmatch(name) and base in _STOCK_DIRS for pattern, base in _ALIASES):
+            return True
+    return False
+
+
+def _unknown_stock_problem(env: KicadEnvironment) -> str:
+    """The problem of a stock library folder that the server does not know: why,
+    and what to set."""
+    # kicad_cli imports this module, thus the import is here.
+    from .kicad_cli import find_kicad_cli
+
+    text = (
+        "The server does not know the stock library folder of the KiCad installation of "
+        f"the kicad-cli {find_kicad_cli()} (KICAD_CLI or PATH), thus its path variables "
+        f"(for example KICAD{env.major}_SYMBOL_DIR) have no value."
+    )
+    if sys.platform == "win32":
+        override = os.environ.get("KICAD_STOCK_DATA_HOME")
+        if override:
+            text += f" The folder of KICAD_STOCK_DATA_HOME does not exist: {override}."
+        else:
+            text += (
+                " The folder share\\kicad above the folder of kicad-cli does not exist: set "
+                "KICAD_CLI to kicad-cli.exe in the folder bin of the KiCad installation."
+            )
+    elif sys.platform == "darwin":
+        text += (
+            " The application bundle of kicad-cli has no folder Contents/SharedSupport: set "
+            "KICAD_CLI to kicad-cli in KiCad.app/Contents/MacOS."
+        )
+    else:
+        text += " On Linux the build of KiCad sets this folder, and kicad-cli does not give it."
+    return text + (
+        " Or set the variables in the environment of the server or in kicad_common.json "
+        '(docs/installation.md, "More than one KiCad").'
+    )
 
 
 def _add_rows(kind, scope, table, hidden, env, project, rows, problems, seen) -> None:

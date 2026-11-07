@@ -40,7 +40,7 @@ def use_global_table(tmp_path: Path, monkeypatch, *rows: str) -> Path:
     (config / "10.0").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("KICAD_CONFIG_HOME", str(config))
     monkeypatch.setenv("KICAD_DOCUMENTS_HOME", str(tmp_path / "kicad-documents"))
-    monkeypatch.setattr(library_tables, "_stock_dir", lambda version_dir: tmp_path / "kicad-stock")
+    monkeypatch.setattr(library_tables, "_stock_dir", lambda: tmp_path / "kicad-stock")
 
     async def kicad_version():
         return "10.0.6"

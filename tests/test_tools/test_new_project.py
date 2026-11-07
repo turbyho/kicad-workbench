@@ -27,7 +27,7 @@ def kicad_home(tmp_path, monkeypatch):
     monkeypatch.setenv("KICAD_DOCUMENTS_HOME", str(tmp_path / "docs"))
     stock = tmp_path / "share" / "kicad"
     (stock / "template").mkdir(parents=True)
-    monkeypatch.setattr(library_tables, "_stock_dir", lambda version_dir: stock)
+    monkeypatch.setattr(library_tables, "_stock_dir", lambda: stock)
     return tmp_path
 
 
@@ -248,7 +248,7 @@ class TestSearch:
         user = kicad_home / "user"
         monkeypatch.setenv("KICAD_USER_TEMPLATE_DIR", str(user))
         env = kicad_environment("9.0.9")
-        stock = library_tables._stock_dir("9.0")
+        stock = library_tables._stock_dir()
         paths = np.project_file_search_path(rule, env, stock)
         assert paths[0] == user
         assert paths[1] == kicad_documents_dir("9.0.9") / "template"
@@ -280,7 +280,7 @@ class TestSearch:
 
     def test_find_template(self, kicad_home, monkeypatch):
         rule = np.rules("9.0.9")
-        stock = library_tables._stock_dir("9.0")
+        stock = library_tables._stock_dir()
         write(stock / "template" / "Uno" / "Uno.kicad_pro")
         user = kicad_home / "user"
         monkeypatch.setenv("KICAD_USER_TEMPLATE_DIR", str(user))
@@ -352,7 +352,7 @@ class TestVersionDetails:
         )
 
     def test_templates_need_meta_from_10_0_1(self, kicad_home):
-        stock = library_tables._stock_dir("10.0")
+        stock = library_tables._stock_dir()
         write(stock / "template" / "Plain" / "Plain.kicad_pro")
         write(stock / "template" / "Real" / "meta" / "info.html")
         for version, names in (
@@ -377,7 +377,7 @@ class TestVersionDetails:
     ):
         """No KICAD9_TEMPLATE_DIR: KiCad 9 takes the first name that matches
         "KICAD*_TEMPLATE_DIR", KiCad 10 only a name with digits."""
-        monkeypatch.setattr(library_tables, "_stock_dir", lambda version_dir: None)
+        monkeypatch.setattr(library_tables, "_stock_dir", lambda: None)
         monkeypatch.setenv("KICAD_USER_TEMPLATE_DIR", str(kicad_home / "user"))
         env = kicad_environment("9.0.9")
         assert np.system_template_dir(np.rules("9.0.9"), env) == kicad_home / "user"

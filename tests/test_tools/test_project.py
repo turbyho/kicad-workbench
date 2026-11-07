@@ -36,7 +36,7 @@ def kicad(tmp_path, monkeypatch):
     stock = tmp_path / "share" / "kicad"
     (stock / "template").mkdir(parents=True)
     (stock / "template" / "kicad.kicad_pro").write_text(KICAD_PRO, encoding="utf-8")
-    monkeypatch.setattr(library_tables, "_stock_dir", lambda version_dir: stock)
+    monkeypatch.setattr(library_tables, "_stock_dir", lambda: stock)
 
     def install(version):
         async def fake_version():

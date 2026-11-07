@@ -22,7 +22,7 @@ from ..utils.kicad_lock import (
     check_schematic_not_open,
 )
 from ..utils.kicad_text import read_for_write, write_kicad_text
-from ..utils.library_tables import LibraryTableError, kicad_environment, kicad_stock_dir
+from ..utils.library_tables import LibraryTableError, kicad_environment, kicad_system_data_dir
 from ..utils.new_project import (
     EMPTY_PROJECT_FILE,
     NewProjectError,
@@ -197,7 +197,7 @@ def _make_project(
     else:
         template_dir = _template_dir(rule, env, template, default_dir)
         description = f"{template_dir.name} ({template_dir})"
-    plan = plan_project(rule, env, kicad_stock_dir(version), path, project_name, template_dir)
+    plan = plan_project(rule, env, kicad_system_data_dir(), path, project_name, template_dir)
     if plan.conflicts:
         if not overwrite:
             raise _RefusedError(_conflict_error(plan, template_dir is not None))

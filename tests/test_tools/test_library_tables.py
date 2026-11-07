@@ -48,7 +48,7 @@ def kicad(tmp_path, monkeypatch):
     (stock / "template").mkdir(parents=True)
     monkeypatch.setenv("KICAD_CONFIG_HOME", str(config))
     monkeypatch.setenv("KICAD_DOCUMENTS_HOME", str(tmp_path / "documents"))
-    monkeypatch.setattr(library_tables, "_stock_dir", lambda version_dir: stock)
+    monkeypatch.setattr(library_tables, "_stock_dir", lambda: stock)
     # The default global table of KiCad 10: one nested table, the table of
     # the installation.
     stock_table = stock / "template" / "sym-lib-table"
@@ -201,8 +201,67 @@ class TestTables:
         (kicad["config"] / "sym-lib-table").write_text(
             table("symbol", lib("X", "${MYLIBS}/X.kicad_sym")), encoding="utf-8"
         )
-        (row,), _ = library_rows("symbol", "10.0")
+        (row,), problems = library_rows("symbol", "10.0")
         assert row.path is None and "${MYLIBS}" in row.problems[0]
+        assert problems == []
+
+    def test_stock_folder_that_is_not_known(self, kicad, monkeypatch):
+        # Linux with a second installation: the variables of the stock folder
+        # have no value, and the problems tell what to set.
+        monkeypatch.setattr(library_tables, "_stock_dir", lambda: None)
+        monkeypatch.setattr(library_tables.sys, "platform", "linux")
+        rows, problems = library_rows("symbol", "10.0")
+        assert all(row.path is None for row in rows)
+        (problem,) = problems
+        assert "does not know the stock library folder" in problem
+        assert "KICAD10_SYMBOL_DIR" in problem and "On Linux the build" in problem
+        assert kicad_environment("10.0").stock_dir is None
+
+        # The variable in the environment gives the folder, as in KiCad. The alias
+        # KICAD8_SYMBOL_DIR gets the value of KICAD10_SYMBOL_DIR.
+        monkeypatch.setenv("KICAD10_SYMBOL_DIR", str(kicad["stock"] / "symbols"))
+        rows, problems = library_rows("symbol", "10.0")
+        assert [row.path for row in rows] == [
+            kicad["stock"] / "symbols" / "Device.kicad_sym",
+            kicad["stock"] / "symbols" / "Old.kicad_sym",
+        ]
+        assert problems == []
+
+    def test_stock_folder_of_the_installation(self, kicad):
+        assert kicad_environment("10.0").stock_dir == kicad["stock"]
+
+    @pytest.mark.parametrize(
+        "uri, stock",
+        [
+            ("${KICAD10_SYMBOL_DIR}/a.kicad_sym", True),
+            ("$(KICAD10_DESIGN_BLOCK_DIR)/a.kicad_blocks", True),
+            ("${KICAD8_FOOTPRINT_DIR}/a.pretty", True),  # an alias of KICAD10_FOOTPRINT_DIR
+            ("${KICAD_SYMBOL_DIR}/a.kicad_sym", True),  # an alias of KICAD10_SYMBOL_DIR
+            ("${KISYS3DMOD}/a.step", True),
+            ("${KICAD_FOOTPRINT_DIR}/a.pretty", False),  # not a variable of KiCad
+            ("${KICAD9_TEMPLATE_DIR}/a", False),  # KiCad has no alias for it
+            ("${KICAD10_3RD_PARTY}/a.kicad_sym", False),
+            ("${MYLIBS}/a.kicad_sym", False),
+        ],
+    )
+    def test_variables_of_the_stock_folder(self, kicad, uri, stock):
+        env = kicad_environment("10.0")
+        assert library_tables._uses_stock_variable(uri, env) is stock
+
+    def test_stock_folder_that_is_not_known_on_windows(self, kicad, monkeypatch, tmp_path):
+        monkeypatch.setattr(library_tables, "_stock_dir", lambda: None)
+        monkeypatch.setattr(library_tables.sys, "platform", "win32")
+        env = kicad_environment("10.0")
+        assert "set KICAD_CLI to kicad-cli.exe" in library_tables._unknown_stock_problem(env)
+        monkeypatch.setenv("KICAD_STOCK_DATA_HOME", str(tmp_path / "missing"))
+        problem = library_tables._unknown_stock_problem(env)
+        assert f"KICAD_STOCK_DATA_HOME does not exist: {tmp_path / 'missing'}" in problem
+
+    def test_stock_folder_that_is_not_known_on_macos(self, kicad, monkeypatch):
+        monkeypatch.setattr(library_tables, "_stock_dir", lambda: None)
+        monkeypatch.setattr(library_tables.sys, "platform", "darwin")
+        problem = library_tables._unknown_stock_problem(kicad_environment("10.0"))
+        assert "KiCad.app/Contents/MacOS" in problem
 
     @pytest.mark.parametrize(
         "text",
@@ -335,7 +394,7 @@ def test_libraries_of_the_installation_exist():
     # The libraries of the table of the installation (share/kicad/template),
     # through the global table of the user. The own libraries of the user do
     # not count.
-    share = library_tables.get_kicad_share_dir()
+    share = library_tables.kicad_stock_dir()
     for kind in ("symbol", "footprint"):
         rows, problems = library_rows(kind, INSTALLED_VERSION)
         if any("does not exist" in problem for problem in problems):

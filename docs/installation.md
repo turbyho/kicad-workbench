@@ -148,7 +148,8 @@ of Claude Desktop).
 
 | Variable | Effect |
 |---|---|
-| `KICAD_CLI` | The path of kicad-cli, when the server does not find it |
+| `KICAD_CLI` | The path of kicad-cli, when the server does not find it, or to select one of more KiCad installations (see "More than one KiCad") |
+| `KICAD_STOCK_DATA_HOME` | Windows: the folder of the stock libraries, as for KiCad |
 | `KICAD_PYTHON` | The Python with `pcbnew` for the tools that run it in a different process |
 | `KICAD_WORKBENCH_NO_UPDATE_CHECK` | A value other than empty and `0` stops the request to PyPI (see "Release notices") |
 | `PARTS_REGISTRY_URL` | The API of the parts registry (default `https://partreel.com/api/v1`) |
@@ -158,6 +159,47 @@ of Claude Desktop).
 The server reads the KiCad settings (library tables, path variables) from the
 settings folder of the installed KiCad. `KICAD_CONFIG_HOME` changes that folder, as
 for KiCad.
+
+## More than one KiCad
+
+The server uses one KiCad installation: the kicad-cli of `KICAD_CLI`, else the
+kicad-cli of `PATH`. The version of this kicad-cli gives the settings folder (for
+example `~/.config/kicad/10.0`) and the format of the files that the server writes.
+Its installation gives the stock libraries, that is the default value of
+`KICAD<major>_SYMBOL_DIR`, `KICAD<major>_FOOTPRINT_DIR`, `KICAD<major>_3DMODEL_DIR`,
+`KICAD<major>_TEMPLATE_DIR` and `KICAD<major>_DESIGN_BLOCK_DIR`. The server finds
+the folder of the stock libraries as KiCad finds it:
+
+| System | Folder of the stock libraries |
+|---|---|
+| Windows | `KICAD_STOCK_DATA_HOME`, else `share\kicad` in the folder above the folder of kicad-cli (`C:\Program Files\KiCad\<version>\share\kicad`) |
+| macOS | `Contents/SharedSupport` of the application bundle of kicad-cli |
+| Linux | The build of KiCad sets this folder, and kicad-cli does not give it. For a kicad-cli with the name `kicad-cli` in a folder `bin`, the server uses the folder `share/kicad` next to `bin` (the default of the build) when it has the folder `template`. For an other kicad-cli the folder is not known |
+
+Thus on Windows and macOS, `KICAD_CLI` alone selects the installation. On Linux, a
+second installation (for example the package `kicad-nightly`, with the start script
+`/usr/bin/kicad-cli-nightly` and the data in `/usr/share/kicad-nightly`) also needs
+the path variables of its stock libraries, as KiCad accepts them from the
+environment:
+
+```json
+"env": {
+  "KICAD_CLI": "/usr/bin/kicad-cli-nightly",
+  "KICAD10_SYMBOL_DIR": "/usr/share/kicad-nightly/symbols",
+  "KICAD10_FOOTPRINT_DIR": "/usr/share/kicad-nightly/footprints",
+  "KICAD10_3DMODEL_DIR": "/usr/share/kicad-nightly/3dmodels",
+  "KICAD10_TEMPLATE_DIR": "/usr/share/kicad-nightly/template",
+  "KICAD10_DESIGN_BLOCK_DIR": "/usr/share/kicad-nightly/blocks"
+}
+```
+
+When the folder is not known and a variable has no value, the library tools tell
+it. Use the KiCad installation that you open the files with: a newer KiCad converts
+the files of an older version when it saves them, and an older KiCad does not open
+the files of a newer version.
+
+`KICAD_PYTHON` and the Python of the server select the `pcbnew` of the board tools
+(see "pcbnew not found"). Set them to the same installation as kicad-cli.
 
 ## Release notices
 

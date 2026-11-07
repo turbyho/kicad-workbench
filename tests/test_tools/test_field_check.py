@@ -106,6 +106,7 @@ class TestCheckSymbolFields:
             + '"R5","10k (RC0603FR-0710KL)","","RC0603FR-0710KL","10k (RC0603FR-0710KL)",""\n'
             + '"C5","220nF","","GRM1","100nF","GRM1"\n'
             + '"R7","10k","","","10k","A1"\n'
+            + '"R8","10k","","A1","10k (A1)",""\n'
         )
         project["state"]["csv"] = {
             "": HEADER + lines + '"R1","10k","","","",""\n',
@@ -135,7 +136,7 @@ class TestCheckSymbolFields:
             "confirmed, and the parts do not change. Tell the user (a text in parentheses that is "
             "a part of the general value stays), and when the user agrees: Write "
             '`{"reference": "R5", "fields": {"Value": "10k", "MPN": "RC0603FR-0710KL", '
-            '"MPN_Confirmed": "RC0603FR-0710KL", "Value_Confirmed": "10k"}}`.'
+            '"MPN_Confirmed": "RC0603FR-0710KL", "Value_Confirmed": "10k"}}`. Then run check_symbol_fields again'
         ) in out
         # A change with no new MPN gives no step for a datasheet.
         assert (
@@ -145,7 +146,15 @@ class TestCheckSymbolFields:
         # The variant gives only its own messages: "no part selected" one time for R1, as
         # check_parts of datasheet-lens.
         assert "no part selected (a general value and no MPN): R1. A part" in out
-        for reference in ("Q1", "R5", "C5", "R7"):
+        # The old convention only in Value_Confirmed (decision 32): the confirmed copies.
+        assert (
+            "- the old convention: R8: Value_Confirmed has the MPNs in parentheses, and Value "
+            "and the field MPN follow the new convention. Write the confirmed copies by the new "
+            "convention: the confirmed part stays, and the parts do not change. Tell the user, "
+            'and when the user agrees: Write `{"reference": "R8", "fields": {"MPN_Confirmed": '
+            '"A1", "Value_Confirmed": "10k"}}`. Then run check_symbol_fields again'
+        ) in out
+        for reference in ("Q1", "R5", "C5", "R7", "R8"):
             assert out.count(f'"reference": "{reference}"') == 1
         assert "Give all changes in one call" in out
         assert "✅" not in out
@@ -259,7 +268,7 @@ class TestCheckSymbolFields:
         assert (
             "the old convention: U1: the MPNs are in the parentheses of Value." in out
             and 'Write `{"reference": "U1", "fields": {"Value": "LM358", "Manufacturer Part '
-            'Number": "LM358DR", "MPN_Confirmed": ""}}`.'
+            'Number": "LM358DR", "MPN_Confirmed": ""}}`. Then run check_symbol_fields again'
             in out
         )
         assert (

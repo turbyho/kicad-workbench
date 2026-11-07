@@ -186,15 +186,28 @@ def _messages(result: FieldCheck, own: dict[str, list[str]]) -> list[str]:
         lines.append("")
     if result.move:
         lines += ["## The old convention", ""]
-        lines += [
-            f"- the old convention: {_target(m)}: the MPNs are in the parentheses of Value. Move "
-            "them into the field MPN (Value holds the general value, MPN the MPNs, the hidden "
-            "fields Value_Confirmed and MPN_Confirmed the confirmed copies). A confirmed symbol "
-            "stays confirmed, and the parts do not change. Tell the user (a text in parentheses "
-            f"that is a part of the general value stays), and when the user agrees: Write "
-            f"{_code(m)}." + _choices(m) + _missing(m, own)
-            for m in result.move
-        ]
+        for m in result.move:
+            if m.old == "Value_Confirmed":  # decision 32: only the confirmed copies change
+                text = (
+                    "Value_Confirmed has the MPNs in parentheses, and Value and the field MPN "
+                    "follow the new convention. Write the confirmed copies by the new convention: "
+                    "the confirmed part stays, and the parts do not change. Tell the user, and when "
+                    "the user agrees"
+                )
+            else:
+                text = (
+                    "the MPNs are in the parentheses of Value. Move them into the field MPN (Value "
+                    "holds the general value, MPN the MPNs, the hidden fields Value_Confirmed and "
+                    "MPN_Confirmed the confirmed copies). A confirmed symbol stays confirmed, and "
+                    "the parts do not change. Tell the user (a text in parentheses that is a part "
+                    "of the general value stays), and when the user agrees"
+                )
+            lines.append(
+                f"- the old convention: {_target(m)}: {text}: Write {_code(m)}."
+                + _choices(m)
+                + _missing(m, own)
+                + " Then run check_symbol_fields again: it compares the fields again."
+            )
         lines.append("")
     for count, name, what in (
         (result.no_value_confirmed, "Value_Confirmed", "of a general value (100nF to 220nF)"),

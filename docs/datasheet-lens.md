@@ -27,7 +27,8 @@ one function:
 A difference between a field and its confirmed copy is a change that the user must
 confirm. Until the user confirms it, the confirmed MPNs are the parts of the design.
 A new general value with the confirmed MPN (`100nF` to `220nF`) can need a new part:
-the user selects a new part, or confirms that the part stays.
+the user selects a new part, or confirms that the part stays. A new general value
+with an MPN that the user never confirmed is a change of its own.
 
 A general value with no MPN (`10k`) has no selected part. `MPN` = `-` tells that the
 symbol needs no part (for example a test point). The units of one package (`U1A` and
@@ -37,7 +38,11 @@ symbol needs no part (for example a test point). The units of one package (`U1A`
 The old convention put the MPNs in the parentheses of `Value`
 (`2N7002 (2N7002LT1G)`). For a symbol of the old convention (no `MPN_Confirmed`),
 the check proposes the move into the four fields. The move keeps the state of the
-confirmation: a confirmed symbol stays confirmed.
+confirmation: a confirmed symbol stays confirmed. When only `Value_Confirmed` has the
+parentheses (the MPNs were removed from `Value` in KiCad), the move writes only the
+confirmed copies. The move writes a new field `MPN` as KiCad adds a new field:
+hidden in a file of KiCad 9 and 10 (show it in KiCad, for example in the Symbol Fields
+Table), visible in a file of KiCad 8.
 
 ## The procedure
 

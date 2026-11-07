@@ -302,8 +302,9 @@ class SymbolState:
     # part, or confirms that the part stays.
     select: bool = False
     unconfirmed: bool = False  # MPN_Confirmed or Value_Confirmed is not written yet
-    # The old convention (decision 30): the fields of the move into the four fields,
-    # {"value", "mpn", "mpn_confirmed", "value_confirmed"}; empty: no move.
+    # The old convention (decisions 30 and 32): the fields of the move into the four
+    # fields, {"value", "mpn", "mpn_confirmed", "value_confirmed", "old"}; empty: no
+    # move. "old": the field with the parentheses (Value or Value_Confirmed).
     move: dict = field(default_factory=dict)
     no_part: bool = False  # the symbol needs no part (a NO_PART text)
     extra: list[str] = field(default_factory=list)  # the parts of a conflict of more columns
@@ -354,10 +355,16 @@ def _old_convention(
     does not guess: a field MPN with other MPNs tells the new convention ("10k (1%)"
     and MPN RC0603FR-0710KL), and its parentheses are text of the general value. The
     move keeps the confirmed copies: MPN_Confirmed is the old field MPN, Value_Confirmed
-    the general value of the old Value_Confirmed. A confirmed symbol stays confirmed."""
+    the general value of the old Value_Confirmed. A confirmed symbol stays confirmed.
+
+    The old convention only in Value_Confirmed (decision 32): the user removed the
+    parentheses from Value, and the field MPN holds the list of the parentheses of
+    Value_Confirmed. The move writes only the confirmed copies (value and mpn are
+    None: Value and MPN keep their texts); "old" tells which field has the
+    parentheses."""
     split = _old_list(symbol.value, symbol, m_items, confirmed_items)
     if split is None:
-        return {}, []
+        return _old_confirmed_value(symbol, m_items, confirmed_items), []
     old_confirmed = (
         None if symbol.value_confirmed is None else split_value(symbol.value_confirmed).general
     )
@@ -366,13 +373,43 @@ def _old_convention(
         "mpn": format_mpns(split.mpns) if split.mpns else "",
         "mpn_confirmed": _filled(symbol.mpn),
         "value_confirmed": old_confirmed,
+        "old": "Value",
     }
     return move, _unique(_mpns(split.mpns or []))
 
 
+def _old_confirmed_value(symbol: CadSymbol, m_items: list[str], confirmed_items: list[str]) -> dict:
+    """The move of a symbol with the old convention only in Value_Confirmed (decision
+    32), or {}: no MPN_Confirmed, a Value with no parentheses (not empty: the removal of
+    Value is a change), a Value_Confirmed with a
+    valid list of MPNs in parentheses, and a field MPN that holds the same list (the
+    old field MPN was the confirmed copy of the parentheses)."""
+    if confirmed_items or symbol.value_confirmed is None:
+        return {}
+    split = split_value(symbol.value)
+    old = split_value(symbol.value_confirmed)
+    if (
+        not split.general
+        or split.error
+        or split.mpns is not None
+        or old.error
+        or old.mpns is None
+        or m_items != old.mpns
+        or _list_conflicts("Value_Confirmed", symbol.value_confirmed, old.mpns, "")
+    ):
+        return {}
+    return {
+        "value": None,
+        "mpn": None,
+        "mpn_confirmed": _filled(symbol.mpn),
+        "value_confirmed": old.general,
+        "old": "Value_Confirmed",
+    }
+
+
 def symbol_state(symbol: CadSymbol) -> SymbolState:
     """The parts of one CAD symbol by the model of plans/confirmed-mpns.md
-    (decisions 26 to 30).
+    (decisions 26 to 30, 32 and 33).
 
     Value is the general value, the field MPN holds the MPNs of the designer (the
     fitted part first), Value_Confirmed and MPN_Confirmed are the Value and the MPN
@@ -381,11 +418,13 @@ def symbol_state(symbol: CadSymbol) -> SymbolState:
     - Value is not Value_Confirmed, or MPN is not MPN_Confirmed: a change. The
       confirmed MPNs stay the parts until the user confirms the change. A new
       general value with the confirmed MPN: the user selects a new part, or confirms
-      that the part stays (select).
+      that the part stays (select). A new general value with an MPN that the user
+      never confirmed is a change, not select (decision 33).
     - An empty Value_Confirmed or MPN_Confirmed (and no change): not confirmed, the
       MPNs of the field MPN are the parts.
     - The old convention (MPNs in the parentheses of Value, no MPN_Confirmed): the
-      tool proposes the move into the four fields (move).
+      tool proposes the move into the four fields (move). Also when only
+      Value_Confirmed has the parentheses (decision 32).
     - A NO_PART text (-) tells that the symbol needs no part. A general value with
       no part: no part is selected.
     - More MPN columns with other texts, a list error, a NO_PART text and an MPN in
@@ -425,7 +464,10 @@ def symbol_state(symbol: CadSymbol) -> SymbolState:
     for text in symbol.other_values:
         if _words(text) == _words(value):
             continue
-        split = split_value(text) if move else _old_list(text, symbol, m_items, c_items)
+        # Decision 32: Value has no parentheses, thus an other Value column must show the
+        # old convention itself.
+        old_value = move.get("old") == "Value"
+        split = split_value(text) if old_value else _old_list(text, symbol, m_items, c_items)
         if split is not None and not split.error:
             other_mpns += _mpns(split.mpns or [])
     state = SymbolState(
@@ -469,8 +511,14 @@ def symbol_state(symbol: CadSymbol) -> SymbolState:
                     "confirmed MPN"
                 )
             else:
-                state.select = bool(mpns)  # not for a no-part text: it keeps the text
-                if mpns:
+                # Not for a no-part text (it keeps the text), and not for an MPN that the
+                # user never confirmed (decision 33): that is a change of its own. With no
+                # field MPN_Confirmed, the tool cannot know it.
+                unconfirmed_mpn = has_mc and not confirmed_mpns
+                state.select = bool(mpns) and not unconfirmed_mpn
+                if mpns and unconfirmed_mpn:
+                    now = f"the MPN {_filled(symbol.mpn)!r} is not confirmed"
+                elif mpns:
                     now = f"the MPN {_filled(symbol.mpn)!r} can be wrong now"
                 elif state.no_part:
                     now = (
@@ -649,6 +697,7 @@ class FieldWrite:
     # The fields that are not known (CadSymbol.mpn_known, confirmed_known,
     # mpn_confirmed_known): (the role, the text, the names to select from).
     choices: list[tuple[str, str, list[str]]] = field(default_factory=list)
+    old: str = ""  # a move: the field with the parentheses (Value or Value_Confirmed)
 
 
 @dataclass
@@ -673,10 +722,12 @@ def _write(
     confirmed: str | None,
     value: str | None = None,
     mpn: str | None = None,
+    old: str = "",
 ) -> FieldWrite:
     """The fields that a confirmation or a move writes into a symbol: Value and the MPN
     fields (only a move), MPN_Confirmed and Value_Confirmed (None: the BOM has no such
-    field and a confirmation does not write it; a move writes the new fields)."""
+    field and a confirmation does not write it; a move writes the new fields). old: for
+    a move, the field with the parentheses (FieldWrite.old)."""
     fields = {"Value": value} if value is not None else {}
     choices = []
     roles = []
@@ -708,6 +759,7 @@ def _write(
         list(state.new),
         state.select,
         choices,
+        old,
     )
 
 
@@ -784,7 +836,9 @@ def check_symbols(symbols: list[CadSymbol]) -> FieldCheck:
             symbol.mpn_confirmed_known,
         )
         if state.change:
-            new = f" New: {', '.join(state.new)}." if state.new else ""
+            # A new general value with the confirmed MPN has no new MPN to tell (as
+            # check_parts of datasheet-lens).
+            new = f" New: {', '.join(state.new)}." if state.new and not state.select else ""
             removed = f" Not in MPN now: {', '.join(state.removed)}." if state.removed else ""
             item = _write(symbol, state, f"{state.change}.{new}{removed}", mpn_confirmed, confirmed)
             add("changes", symbol, (state.change, target), item)
@@ -794,6 +848,7 @@ def check_symbols(symbols: list[CadSymbol]) -> FieldCheck:
             add("unconfirmed", symbol, (state.write_mpn, value, target), item)
         elif state.move:
             move = state.move
+            # A move of decision 32 has no Value and no MPN to write (None).
             item = _write(
                 symbol,
                 state,
@@ -802,9 +857,11 @@ def check_symbols(symbols: list[CadSymbol]) -> FieldCheck:
                 move["value_confirmed"],
                 move["value"],
                 move["mpn"],
+                move["old"],
             )
-            # Each field of the move: a variant line with other confirmed copies is no
-            # duplicate.
+            # Each field that the move writes (None: not written): a variant line with
+            # other confirmed copies is no duplicate, and a variant line that writes the
+            # same fields is one.
             key = (move["value"], move["mpn"], move["mpn_confirmed"], move["value_confirmed"])
             add("move", symbol, (key, target), item)
         if state.no_mpn:

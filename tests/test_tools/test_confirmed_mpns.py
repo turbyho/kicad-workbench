@@ -178,6 +178,7 @@ class TestSymbolState:
             "mpn": both,
             "mpn_confirmed": "2N7002LT1G",
             "value_confirmed": "2N7002",
+            "old": "Value",
         }
         assert (s.parts, s.change, s.unconfirmed) == (["2N7002LT1G"], "", False)
         assert state("LM358 (LM358DR)").move == {
@@ -185,6 +186,7 @@ class TestSymbolState:
             "mpn": "LM358DR",
             "mpn_confirmed": "",
             "value_confirmed": None,
+            "old": "Value",
         }
         assert state('J ("A(1)")', "A(1)", "", "").move["mpn"] == "A(1)"
         assert not state("10k (1%)", "", "10k (1%)", "-").move  # MPN_Confirmed: new convention
@@ -199,6 +201,7 @@ class TestSymbolState:
             "mpn": "",
             "mpn_confirmed": "",
             "value_confirmed": None,
+            "old": "Value",
         }
         assert not state("10k (A) (B)").move and not state("10k (GRM1, -)").move  # no list
         # A symbol with an MPN_Confirmed: no move, the parentheses are text.
@@ -287,6 +290,79 @@ class TestSymbolState:
         # A change that removes the MPNs names them.
         s = state("100nF", "", "100nF", "2N7002LT1G")
         assert s.removed == ["2N7002LT1G"]
+
+    def test_decisions_32_and_33(self):
+        """Decision 32: the old convention only in Value_Confirmed (the user removed the
+        parentheses from Value) gets a move of the confirmed copies. Decision 33: a new
+        general value with an MPN that the user never confirmed is a change, not select
+        (test_decisions_32_and_33 of datasheet-lens)."""
+        move = {
+            "value": None,
+            "mpn": None,
+            "mpn_confirmed": "A1",
+            "value_confirmed": "x",
+            "old": "Value_Confirmed",
+        }
+        for mpn_confirmed in (None, ""):
+            s = state("x", "A1", "x (A1)", mpn_confirmed)
+            assert (s.move, s.parts, s.change, s.select) == (move, ["A1"], "", False)
+        # A new value: a change after the move.
+        assert state("y", "A1", "x (A1)").move["value_confirmed"] == "x"
+        assert state("x", "A1, B1", "x (A1; B1)").move["mpn_confirmed"] == "A1, B1"
+        s = state("x", "B1", "x (A1)")  # an other MPN: no move, a change of the value
+        assert (s.move, bool(s.change)) == ({}, True)
+        assert not state("x", "A1", "x (A1) (B)").move  # no valid list
+        assert not state("x", "A1", "x (A1)", "A1").move  # MPN_Confirmed: the new convention
+        assert not state("x (A1)", "A1", "x (A1)", "A1").move
+        # An other Value column shows the old convention itself (decision 32: Value has no
+        # parentheses).
+        s = symbol_state(
+            CadSymbol(value="x", mpn="A1", value_confirmed="x (A1)", other_values=["x (-, B1)"])
+        )
+        assert (s.move["old"], s.extra) == ("Value_Confirmed", [])
+        # An empty Value is a removal: a change, no move (review of 2026-11-07).
+        s = state("", "A1", "x (A1)", "")
+        assert (s.move, bool(s.change)) == ({}, True)
+        # A variant line with an other Value writes the same confirmed copies: one move.
+        result = check_symbols(
+            [
+                CadSymbol(reference="Q1", value="x", mpn="A1", value_confirmed="x (A1)"),
+                CadSymbol(
+                    reference="Q1", value="y", mpn="A1", value_confirmed="x (A1)", variant="b"
+                ),
+            ]
+        )
+        assert [(m.reference, m.variant) for m in result.move] == [("Q1", "")]
+        s = state("220nF", "D1", "100nF", "")
+        assert (s.select, s.new, s.parts) == (False, ["D1"], ["D1"])
+        assert s.change == "Value '220nF', Value_Confirmed '100nF': the MPN 'D1' is not confirmed"
+        assert state("220nF", "D1", "100nF").select  # no field MPN_Confirmed: not known
+        # The move writes only the confirmed copies; the change has the new MPN.
+        result = check_symbols(
+            [
+                CadSymbol(
+                    reference="Q1", value="x", mpn="A1", value_confirmed="x (A1)", mpn_confirmed=""
+                ),
+                CadSymbol(
+                    reference="C1",
+                    value="220nF",
+                    mpn="D1",
+                    value_confirmed="100nF",
+                    mpn_confirmed="",
+                ),
+            ]
+        )
+        (q1,) = result.move
+        assert (q1.fields, q1.old) == (
+            {"MPN_Confirmed": "A1", "Value_Confirmed": "x"},
+            "Value_Confirmed",
+        )
+        (c1,) = result.changes
+        assert (c1.select, c1.new, c1.text) == (
+            False,
+            ["D1"],
+            "Value '220nF', Value_Confirmed '100nF': the MPN 'D1' is not confirmed. New: D1.",
+        )
 
 
 class TestBomSymbols:

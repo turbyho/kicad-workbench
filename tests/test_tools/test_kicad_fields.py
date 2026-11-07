@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 
+from kicad_workbench.errors import KicadParseError
 from kicad_workbench.parsers.kicad_fields import (
     FieldRules,
     record_field_rules,
@@ -133,13 +134,15 @@ class TestSheetFields:
         # Two user fields: SetFields sorts them and reads the first two.
         sheet = item("sheet", '"X" "Power"', '"Y" "p.kicad_sch"')
         assert sheet_fields(sheet, KICAD_9) == {"Sheetname": "Power", "Sheetfile": "p.kicad_sch"}
-        with pytest.raises(KicadFileError, match="no sheet name property"):
+        # KiCad 10: a parse error (SCH_IO_KICAD_SEXPR_PARSER::parseSheet).
+        with pytest.raises(KicadParseError, match="Missing sheet name property"):
             sheet_fields(sheet, KICAD_10)
 
     def test_kicad_10_missing_sheet_file(self):
+        # SCH_SHEET::SetFields adds an empty file field: no sub-sheet, no error
+        # (measured with kicad-cli 10.0.6 and 10.0.7).
         sheet = item("sheet", '"Sheetname" "Power"', '"Note" "x"')
-        with pytest.raises(KicadFileError, match="no sheet file property"):
-            sheet_fields(sheet, KICAD_10)
+        assert sheet_fields(sheet, KICAD_10) == {"Sheetname": "Power", "Sheetfile": ""}
 
     def test_kicad_9_needs_two_fields(self):
         sheet = item("sheet", '"Sheetname" "Power"')
@@ -276,7 +279,8 @@ async def test_each_sheet_uses_the_rules_of_its_file(tmp_path):
 
     @with_field_rules_note
     async def tool():
-        components = SchematicParser(path).get_components(recursive=True)
+        sub = str(tmp_path / "sub.kicad_sch")
+        components = SchematicParser(path).get_components() + SchematicParser(sub).get_components()
         return str({c.reference: c.value for c in components})
 
     assert await tool() == (
@@ -287,8 +291,8 @@ async def test_each_sheet_uses_the_rules_of_its_file(tmp_path):
 
 
 def test_sub_sheet_of_an_old_version_is_an_error(tmp_path):
-    path = write_hierarchy(tmp_path, SUB_SCH.replace("20260306", "20230121"))
+    write_hierarchy(tmp_path, SUB_SCH.replace("20260306", "20230121"))
     with pytest.raises(
         KicadFileError, match=r"sub\.kicad_sch: .*older than the version of KiCad 8\.0"
     ):
-        SchematicParser(path).get_components(recursive=True)
+        SchematicParser(str(tmp_path / "sub.kicad_sch")).get_components()

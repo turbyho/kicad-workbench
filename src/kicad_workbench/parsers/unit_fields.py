@@ -159,6 +159,7 @@ def _units(project: Path, version: str) -> tuple[dict[str, list[_Unit]], list[st
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
+        KicadParseError: The parser of KiCad stops in a sub-sheet (build_sheet_list).
         InputError: A unit is not a number, KiCad has no verified rules for the
             installed version, or KiCad cannot load the root schematic.
     """
@@ -225,6 +226,7 @@ def variant_unit_conflicts(
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
+        KicadParseError: The parser of KiCad stops in a sub-sheet (build_sheet_list).
         InputError: A unit is not a number, KiCad has no verified rules for the
             installed version, or KiCad cannot load the root schematic.
     """
@@ -281,6 +283,7 @@ def unit_conflicts(
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
+        KicadParseError: The parser of KiCad stops in a sub-sheet (build_sheet_list).
         InputError: A unit is not a number, KiCad has no verified rules for the
             installed version, or KiCad cannot load the root schematic.
     """

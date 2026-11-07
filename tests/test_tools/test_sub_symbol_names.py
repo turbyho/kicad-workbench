@@ -102,10 +102,10 @@ def test_the_errors_are_parse_errors():
         sub_symbol_unit("S", "S_2__1")
 
 
-def test_a_sub_sheet_that_kicad_cannot_read_is_an_empty_sheet(tmp_path):
-    # Measured with kicad-cli 8.0.9 to 10.0.7: a sub-sheet with a sub-symbol name that
-    # KiCad cannot read (also in a definition that no symbol uses) is an empty sheet,
-    # the other sheets load.
+def test_a_sub_sheet_that_kicad_cannot_read_is_an_error(tmp_path):
+    # Measured with kicad-cli 10.0.6 and 10.0.7: KiCad keeps the items of a sub-sheet
+    # before a parse error. The server does not model the part of a file: an error
+    # (user decision, 2026-11-07).
     from kicad_workbench.tools.schematic import placed_components
 
     from .test_symbol_fields import symbol, write_project
@@ -120,11 +120,8 @@ def test_a_sub_sheet_that_kicad_cannot_read_is_an_empty_sheet(tmp_path):
         sub.read_text(encoding="utf-8").replace('"LM358_2_1"', '"LM358_x_1"'),
         encoding="utf-8",
     )
-    placed, problems = placed_components(path, "10.0.7", project_wide=True)
-    assert [p.component.reference for p in placed] == ["U1"]
-    assert len(problems) == 2, problems
-    assert "cannot be read: Invalid symbol unit number x_1" in problems[0]
-    assert "KiCad shows an empty sheet." in problems[0]
+    with pytest.raises(KicadParseError, match="keeps only the items of the file before the error"):
+        placed_components(path, "10.0.7", project_wide=True)
 
 
 def test_a_library_with_a_name_that_kicad_cannot_read(tmp_path):

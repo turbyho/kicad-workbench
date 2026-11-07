@@ -66,7 +66,12 @@ class TestSheetFields:
         a = write(tmp_path / "a.kicad_sch")
         assert sheet_files(root) == [root, a]
 
-    def test_sheet_that_kicad_cannot_read_keeps_the_other_sheets(self, tmp_path):
+    def test_the_file_tree_keeps_the_other_sheets(self, tmp_path):
+        # KiCad 10 does not load a root with a sheet with no name (a parse error,
+        # spike/kicad-versions/sheet_fields_check.py; build_sheet_list gives an
+        # error). The file tree of sch_hierarchy is for the lock check and the
+        # project of a file: it keeps the other sheets (more files, never fewer) and
+        # gives the problem.
         root = project(tmp_path, "board", "a.kicad_sch")
         text = root.read_text(encoding="utf-8").replace("20250114", "20260306")
         bad = '\t(sheet (at 1 1) (size 2 2) (uuid "u9"))\n'
@@ -74,7 +79,7 @@ class TestSheetFields:
         a = write(tmp_path / "a.kicad_sch")
         assert sheet_files(root) == [root, a]
         _, problems = sheet_paths(tmp_path / "board.kicad_pro")
-        assert len(problems) == 1 and "no sheet name" in problems[0]
+        assert len(problems) == 1 and "Missing sheet name property" in problems[0]
 
     def test_loop_of_symbolic_links(self, tmp_path):
         root = project(tmp_path, "board", "loop.kicad_sch", "a.kicad_sch")

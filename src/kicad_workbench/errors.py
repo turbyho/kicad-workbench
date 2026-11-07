@@ -28,9 +28,17 @@ class KicadFileError(WorkbenchError):
 class KicadParseError(KicadFileError):
     """The parser of KiCad refuses the text of a file (THROW_PARSE_ERROR).
 
-    KiCad then does not load the file: a sub-sheet is an empty sheet, a
-    top-level sheet stops the load.
+    KiCad then does not load a top-level sheet, and keeps the items of a sub-sheet
+    before the error (measured with kicad-cli; the server does not model this).
     """
+
+
+def with_file(error: KicadFileError, file: object) -> KicadFileError:
+    """Return an error of the same class with the file at the start of its message.
+
+    The KicadFileError classes take only the message.
+    """
+    return type(error)(f"{file}: {error}")
 
 
 class LocaleNumberError(KicadFileError):

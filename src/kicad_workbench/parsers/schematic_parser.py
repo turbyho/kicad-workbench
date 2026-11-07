@@ -7,11 +7,10 @@ from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
-from ..errors import InputError
+from ..errors import InputError, with_file
 from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import read_as_kicad
 from ..utils.pin_pad_mapping import expand_stacked
-from ..utils.sch_hierarchy import sheet_files
 from .kicad_fields import (
     FieldRules,
     record_field_rules,
@@ -625,7 +624,7 @@ class SchematicParser:
             try:
                 self._rules = rules_for_file(tree)
             except KicadFileError as e:
-                raise KicadFileError(f"{self.file_path}: {e}") from e
+                raise with_file(e, self.file_path) from e
             self._tree = tree
             for item in tree.children():
                 self._items.setdefault(item.head, []).append(item)
@@ -655,7 +654,7 @@ class SchematicParser:
         try:
             return sheet_fields(sheet, self._rules_for_fields())
         except KicadFileError as e:
-            raise KicadFileError(f"{self.file_path}: {e}") from e
+            raise with_file(e, self.file_path) from e
 
     def _top(self, head: str) -> list[Node]:
         """Return the top-level items of the sheet with the head."""
@@ -710,8 +709,7 @@ class SchematicParser:
                         definition, Path(self.file_path), self.field_rules.file_version
                     )
                 except KicadFileError as e:
-                    # The same class: KicadParseError and LocaleNumberError stay.
-                    raise type(e)(f"{self.file_path}: {e}") from e
+                    raise with_file(e, self.file_path) from e
                 self._lib_pins[key] = pins
                 if definition.first("power") is not None:
                     self._power_keys.add(key)
@@ -867,36 +865,17 @@ class SchematicParser:
                 sheets.append({"name": name, "file": file})
         return sheets
 
-    def get_components(self, recursive: bool = False) -> list[SchematicComponent]:
-        """Get all components from schematic.
+    def get_components(self) -> list[SchematicComponent]:
+        """Get the components of this schematic file, with the fields of the file.
 
-        Args:
-            recursive: Also include components from hierarchical sub-sheets,
-                following Sheetfile references (each file one time, cycle-safe).
-                Real designs keep most components in sub-sheets, so callers
-                that cross-reference a full-hierarchy netlist must pass True.
+        The components of a project, with the references and units that KiCad gives
+        each sheet path, come from schematic.placed_components.
 
         Returns:
             List of components
         """
         data = self._parse_file()
-        components = [SchematicComponent.from_dict(c) for c in data["components"]]
-        if recursive:
-            # sheet_files() resolves the sheet files as KiCad does. A missing
-            # or unparsable sub-sheet is skipped: a broken reference must not
-            # wipe out the components of the parent. Each sheet is read with
-            # the rules of its own file version. A sheet that this server cannot
-            # read (KicadFileError) is an error: the list would not be complete.
-            for sheet in sheet_files(self.file_path)[1:]:
-                try:
-                    sub_data = SchematicParser(str(sheet), self.kicad)._parse_file()
-                except (InputError, OSError):
-                    continue
-                components.extend(
-                    SchematicComponent.from_dict(c) for c in sub_data["components"]
-                )
-            components = merge_units(components)
-        return components
+        return [SchematicComponent.from_dict(c) for c in data["components"]]
 
     def placed_component(
         self, start: int, reference: str, unit: int, value: str

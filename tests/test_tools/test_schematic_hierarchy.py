@@ -1,8 +1,7 @@
-"""Regression tests for hierarchical (multi-sheet) schematic parsing.
+"""Tests of the parser of one schematic file of a hierarchy, and of merge_units.
 
-Real designs keep most components in sub-sheets while the netlist is exported
-from the root with full hierarchy — the parser must offer a recursive view
-that matches, otherwise netlist-cross-referencing tools see zero components.
+The components of a full hierarchy come from schematic.placed_components (the
+references of each sheet path), not from the parser of one file.
 """
 
 from pathlib import Path
@@ -25,18 +24,11 @@ class TestHierarchicalParsing:
         refs = [c.reference for c in make_root_parser().get_components()]
         assert refs == ["R1"]
 
-    def test_recursive_includes_subsheet_components(self):
-        refs = {c.reference for c in make_root_parser().get_components(recursive=True)}
-        assert refs == {"R1", "C9"}
-
-    def test_missing_subsheet_is_tolerated(self):
-        # root.kicad_sch also references missing.kicad_sch; the parse must
-        # still return the real components, not raise or return nothing.
-        refs = {c.reference for c in make_root_parser().get_components(recursive=True)}
-        assert "R1" in refs and "C9" in refs
-
     def test_subsheet_component_metadata_is_preserved(self):
-        comps = {c.reference: c for c in make_root_parser().get_components(recursive=True)}
+        comps = {
+            c.reference: c
+            for c in SchematicParser(str(FIXTURES / "child.kicad_sch")).get_components()
+        }
         assert comps["C9"].value == "100nF"
         assert comps["C9"].footprint == "Capacitor_SMD:C_0603_1608Metric"
 

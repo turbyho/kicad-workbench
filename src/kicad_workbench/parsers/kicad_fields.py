@@ -26,6 +26,7 @@ import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..errors import KicadParseError
 from .kicad_versions import KICAD9, KicadFileError, schematic_version
 from .sexpr import Node, property_field
 
@@ -168,10 +169,21 @@ def _sheet_field_id_v9(name: str, id_in_file: int | None) -> int:
 def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
     """Return the fields "Sheetname" and "Sheetfile" of a sheet that KiCad uses.
 
+    KiCad 10: a sheet with no file field gets an empty file name, thus no
+    sub-sheet (SCH_SHEET::SetFields adds the field: the check "Missing sheet file
+    property" of SCH_IO_KICAD_SEXPR_PARSER::parseSheet never fails). Branch master
+    of 2026-11-06 has the same code (the rules of the nightly builds).
+
     Raises:
-        KicadFileError: The sheet has no name field or no file field. KiCad 10
-            stops with a parse error. KiCad 8 and 9 read the name and the file
-            by their index in the list of fields, past its end.
+        KicadParseError: KiCad 10 and the sheet has no name field: the parser
+            stops ("Missing sheet name property"). KiCad does not load the
+            top-level sheet, and loads only the items before the sheet of a
+            sub-sheet (measured with kicad-cli 10.0.6 and 10.0.7).
+        KicadFileError: KiCad 8 or 9 and the sheet has less than two fields:
+            KiCad reads the name and the file by their index in the list of
+            fields, past its end. That is undefined behavior of C++: kicad-cli 8.0.9
+            stops with a segmentation fault, kicad-cli 9.0.9 loaded no sub-sheet of
+            the sheet in the measurement, but no rule of KiCad gives that result.
     """
     properties = _properties(sheet)
     if rules.kicad == 10:
@@ -182,9 +194,9 @@ def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
                 field_id = _name_id(name, ("Sheet name", "Sheet file"), no_case=True)
             if field_id is not None:
                 result.setdefault(_SHEET_NAMES[field_id], value)
-        for field_name, text in zip(_SHEET_NAMES, ("name", "file"), strict=True):
-            if field_name not in result:
-                raise KicadFileError(f"A sheet has no sheet {text} property.")
+        if _SHEET_NAMES[0] not in result:
+            raise KicadParseError("Missing sheet name property: a sheet has no name field.")
+        result.setdefault(_SHEET_NAMES[1], "")
         return result
     fields: list[tuple[int, str]] = []
     used: set[int] = set()

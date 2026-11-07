@@ -1021,6 +1021,7 @@ def _load(project_file: Path, version: str, view: str) -> _Loaded:
         InputError: KiCad has no verified rules for the version, or KiCad cannot load
             the root schematic. A unit is not a number.
         KicadFileError: A file has a version that the server does not know.
+        KicadParseError: The parser of KiCad stops in a sub-sheet (build_sheet_list).
     """
     kicad = kicad_major(version)
     project_file = Path(project_file).absolute()

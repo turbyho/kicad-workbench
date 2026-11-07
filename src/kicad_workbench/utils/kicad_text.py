@@ -63,7 +63,7 @@ def decode_as_kicad(data: bytes, path: Path) -> str:
             offset = _byte_offset(text, match.start() + invalid.start())
             raise KiCadEncodingError(
                 f"The file {path} is not valid UTF-8: byte 0x{data[offset]:02x} at "
-                f"offset {offset} is outside a string, thus KiCad cannot load the file."
+                f"offset {offset} is outside a string, and the parser of KiCad stops there."
             )
         parts.append(text[end : match.start()])
         parts.append('""')

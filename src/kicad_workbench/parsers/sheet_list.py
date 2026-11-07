@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from functools import cmp_to_key
 from pathlib import Path
 
-from ..errors import InputError, KicadParseError
+from ..errors import InputError, KicadFileError, KicadParseError, with_file
 from ..utils.kicad_lock import FileStamp, read_stamped
 from ..utils.kicad_text import KiCadEncodingError, decode_as_kicad
 from ..utils.sch_hierarchy import TopLevelSheet, expand_text_variables
@@ -401,10 +401,13 @@ def _read_screen(file: Path, kicad: int) -> tuple[Screen, str | None]:
     its (sheet_instances (path "/" ...)), or None.
 
     Raises:
-        OSError, KiCadEncodingError, SExprError: The file cannot be read.
-        KicadParseError: KiCad cannot read the name of a sub-symbol.
-        KicadFileError: The file has a version that the server does not know,
-            or KiCad cannot read a sheet field.
+        OSError: The file cannot be read.
+        KiCadEncodingError, SExprError: The parser of KiCad stops (a byte that is
+            not UTF-8, unbalanced parentheses).
+        KicadParseError: The parser of KiCad stops: a sub-symbol name, or KiCad 10
+            and a sheet with no name field.
+        KicadFileError: The file has a version that the server does not know, or
+            KiCad 8 or 9 and a sheet with less than two fields.
         LocaleNumberError: A number of the file depends on the locale of KiCad.
     """
     data, stamp = read_stamped(file)
@@ -499,8 +502,11 @@ def build_sheet_list(
         kicad: The major version of the KiCad that loads the files (parsed_kiids).
 
     Raises:
+        InputError: KiCad cannot load a top-level sheet.
+        KicadParseError: The parser of KiCad stops in a sub-sheet: KiCad then loads
+            only a part of it, which the server does not model.
         KicadFileError: A file has a version that the server does not know, or
-            KiCad cannot read a sheet field of a file.
+            KiCad 8 or 9 cannot read a sheet field of a file.
     """
     screens: dict[Path, Screen] = {}
     pages: dict[object, str] = {}
@@ -511,11 +517,28 @@ def build_sheet_list(
             screen, _root_page = _read_screen(file, kicad)
         except FileNotFoundError:
             return None  # KiCad shows an empty sheet.
-        except (OSError, KiCadEncodingError, SExprError, KicadParseError) as e:
-            # A parse error of KiCad (measured with a sub-symbol name that KiCad
-            # cannot read: kicad-cli 8.0.9 to 10.0.7 export the other sheets).
+        except OSError as e:
+            # KiCad cannot open the file: nothing of it.
             problems.append(f"{file} cannot be read: {e}. KiCad shows an empty sheet.")
             return None
+        except (KiCadEncodingError, SExprError, KicadParseError) as e:
+            # A parse error: KiCad keeps the items of the file before the error, and
+            # loads the other sheets (measured with kicad-cli 8.0.9, 9.0.9, 10.0.6 and
+            # 10.0.7: unbalanced parentheses, a byte that is not UTF-8, a sheet with no
+            # name, a sub-symbol name). The server does not model the part of a file
+            # (user decision, 2026-11-07).
+            reason = str(e).strip()
+            if str(file) not in reason:
+                reason = f"{file}: {reason}"
+            if not reason.endswith("."):
+                reason += "."
+            raise KicadParseError(
+                f"The parser of KiCad stops in a sub-sheet: {reason} KiCad then keeps "
+                "only the items of the file before the error, and loads the other "
+                "sheets. The server does not model this: repair the file."
+            ) from e
+        except KicadFileError as e:
+            raise with_file(e, file) from e
         screens[file] = screen
         return screen
 
@@ -552,6 +575,8 @@ def build_sheet_list(
             screen, root_page = _read_screen(file, kicad)
         except (OSError, KiCadEncodingError, SExprError, KicadParseError) as e:
             raise InputError(f"KiCad cannot load the top-level sheet {file}: {e}") from e
+        except KicadFileError as e:
+            raise with_file(e, file) from e
         screens[file] = screen
         top_screens.append(screen)
         if root_page is not None:

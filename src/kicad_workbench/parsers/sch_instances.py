@@ -43,6 +43,7 @@ def placed_instances(
     Raises:
         KiCadEncodingError, SExprError, OSError: A file cannot be read.
         KicadFileError: A file has a version that the server does not know.
+        KicadParseError: The parser of KiCad stops in a sub-sheet (build_sheet_list).
         InputError: A unit is not a number, KiCad has no verified rules for the
             version, or KiCad cannot load the root schematic.
     """

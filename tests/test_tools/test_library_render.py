@@ -453,6 +453,38 @@ class TestRenderLibraryItem:
         assert (target / "Two_unit1_tile2.png").read_bytes() == out[4].data
         assert (target / "Two_unit2.png").read_bytes() == out[6].data
 
+    async def test_output_dir_with_a_disk_error_changes_no_file(
+        self, render, tmp_path, monkeypatch
+    ):
+        # Before, the tool wrote the files one at a time: an error left a part of
+        # the images and a part of the last file.
+        from kicad_workbench.utils import file_save
+
+        target = tmp_path / "out"
+        target.mkdir()
+        (target / "Two_unit1.svg").write_text("old", encoding="utf-8")
+        render["state"]["files"] = {
+            "Two_unit1.svg": svg(body=text(1.27, 2)),
+            "Two_unit2.svg": svg(8, 4),
+        }
+        calls = []
+        real = file_save._write_all
+
+        def failing(fd, data):
+            calls.append(fd)
+            if len(calls) == 3:
+                raise OSError(28, "No space left on device")
+            real(fd, data)
+
+        monkeypatch.setattr(file_save, "_write_all", failing)
+        out = await render_item("Device:Two", "symbol", 100, 100, output_dir=str(target))
+        assert out == (
+            f"❌ The tool wrote no file. {target / 'Two_unit1_tile2.png'}: "
+            "[Errno 28] No space left on device."
+        )
+        assert sorted(p.name for p in target.iterdir()) == ["Two_unit1.svg"]
+        assert (target / "Two_unit1.svg").read_text(encoding="utf-8") == "old"
+
     async def test_missing_footprint(self, render):
         out = await render_item("Lib:Nope", "footprint")
         assert out == (

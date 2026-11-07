@@ -502,26 +502,70 @@ class TestAllVariants:
         assert project["state"]["calls"] == []
 
     async def test_write_failure_changes_no_file(self, project, monkeypatch):
+        # The temporary file of the second BOM file cannot be written.
+        from kicad_workbench.utils import file_save
+
         directory = project["directory"]
         self.write_variants(directory, ["Lite"])
         (directory / "bom.csv").write_text("old", encoding="utf-8")
         calls = []
-        fdopen = os.fdopen
+        real = file_save._write_all
 
-        def failing(handle, mode):
-            calls.append(handle)
+        def failing(fd, data):
+            calls.append(fd)
             if len(calls) == 2:
-                os.close(handle)
-                raise OSError("disk full")
-            return fdopen(handle, mode)
+                raise OSError(28, "No space left on device")
+            real(fd, data)
 
-        monkeypatch.setattr(bom.os, "fdopen", failing)
+        monkeypatch.setattr(file_save, "_write_all", failing)
         out = await bom.export_bom(
             str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
         )
-        assert out == "❌ The BOM files cannot be written: disk full. The tool changed no file."
+        lite = directory / "bom-Lite.csv"
+        assert out == f"❌ The tool wrote no file. {lite}: [Errno 28] No space left on device."
         assert (directory / "bom.csv").read_text(encoding="utf-8") == "old"
         assert sorted(p.name for p in directory.glob("*bom*")) == ["bom.csv"]
+
+    async def test_a_failed_rename_restores_the_set(self, project, monkeypatch):
+        # The rename of the second file fails: the first file gets its old content,
+        # and a new file goes.
+        from kicad_workbench.utils import file_save
+
+        directory = project["directory"]
+        self.write_variants(directory, ["Lite", "Pro"])
+        (directory / "bom.csv").write_text("old", encoding="utf-8")
+        calls = []
+        real = file_save._rename
+
+        def failing(temp, target):
+            calls.append(target.name)
+            if len(calls) == 3:
+                raise OSError(5, "Input/output error")
+            return real(temp, target)
+
+        monkeypatch.setattr(file_save, "_rename", failing)
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert out.startswith(f"❌ The tool could not write {directory / 'bom-Pro.csv'}: "), out
+        assert out.endswith(
+            "(it gave bom.csv the old content again, and it removed the new file bom-Lite.csv)."
+        ), out
+        assert (directory / "bom.csv").read_text(encoding="utf-8") == "old"
+        assert sorted(p.name for p in directory.glob("*bom*")) == ["bom.csv"]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+    async def test_a_replaced_file_keeps_its_permissions(self, project):
+        # mkstemp made each file with 0600: the other users could not read the BOM.
+        directory = project["directory"]
+        self.write_variants(directory, ["Lite"])
+        (directory / "bom.csv").write_text("old", encoding="utf-8")
+        (directory / "bom.csv").chmod(0o644)
+        out = await bom.export_bom(
+            str(directory / "board.kicad_sch"), output_path="bom.csv", all_variants=True
+        )
+        assert "The CSV file is replaced" in out, out
+        assert (directory / "bom.csv").stat().st_mode & 0o777 == 0o644
 
     async def test_kicad9(self, project):
         project["state"]["version"] = "9.0.9"

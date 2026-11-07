@@ -26,6 +26,7 @@ from ..parsers.check_report_parser import (
 )
 from ..parsers.sch_geometry import IU_PER_MM
 from ..server import mcp
+from ..utils.file_save import save_files
 from ..utils.kicad_cli import KicadCliError, decode_output, get_kicad_version, run_kicad_cli
 from ..utils.sch_hierarchy import (
     PRO_SUFFIX,
@@ -269,6 +270,18 @@ async def _erc_result(report_path: Path, root: Path) -> _ErcResult:
         check.unannotated,
         report.units,
     )
+
+
+def _save_report(report: Path, output: Path) -> list[str]:
+    """Save the report of kicad-cli into the output file: all of it or nothing.
+
+    Returns:
+        The warnings of the save (AfterSaveError).
+
+    Raises:
+        SaveFilesError: The output file cannot be written. It did not change.
+    """
+    return save_files([(output, report.read_bytes())])
 
 
 def _notes_text(notes: list[str]) -> str:
@@ -895,11 +908,11 @@ async def export_erc_report(
             output_path = str(sch_path.parent / (sch_path.stem + "_erc_report.json"))
 
         output = Path(output_path)
-
-        # Copy report to output location
-        import shutil
-
-        shutil.copy(erc_report_path, output)
+        if output.is_dir():
+            return f"❌ The output path {output} is a directory. Give a .json file."
+        # The save of KiCad 10.0.7 (file_save.save_files): after an error, the old
+        # report stays, not a part of the new one.
+        saved = await asyncio.to_thread(_save_report, erc_report_path, output)
         result = results[0] if results else await _erc_result(erc_report_path, root)
         notes = list(result.notes)
         if result.units.pcb_scale:
@@ -927,6 +940,7 @@ async def export_erc_report(
                 f"⚠️ {len(result.unannotated)} symbol(s) are not annotated: run_erc and "
                 "get_erc_violations list them."
             )
+        notes += [f"⚠️ {warning}" for warning in saved]
 
         return f"""✅ **ERC Report Exported**
 
@@ -974,18 +988,17 @@ async def export_drc_report(
             output_path = str(pcb.parent / (pcb.stem + "_drc_report.json"))
 
         output = Path(output_path)
-
-        # Copy report to output location
-        import shutil
-
-        shutil.copy(drc_report_path, output)
+        if output.is_dir():
+            return f"❌ The output path {output} is a directory. Give a .json file."
+        saved = await asyncio.to_thread(_save_report, drc_report_path, output)
+        notes = [f"⚠️ {warning}" for warning in saved]
 
         return f"""✅ **DRC Report Exported**
 
 **PCB:** {pcb_path}
 **Output:** {output}
 
-The DRC report has been successfully exported to the specified location."""
+The DRC report has been successfully exported to the specified location.{_notes_text(notes)}"""
 
     except Exception as e:
         return error_answer(e, f"Export of the DRC report of {pcb_path} failed")

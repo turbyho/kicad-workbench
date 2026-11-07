@@ -17,16 +17,20 @@ error message tells how to remove it.
 """
 
 import asyncio
-import contextlib
 import json
 import os
-import threading
 from collections.abc import Callable
 from pathlib import Path
 
 from ..errors import WorkbenchError
 from ..parsers.kicad_versions import KicadFileError, schematic_text_version
-from .file_save import AfterSaveError, PendingSave, save_file
+from .file_save import (
+    AfterSaveError,
+    SaveFilesError,
+    check_one_name_each,
+    file_locks,
+    save_files,
+)
 from .kicad_text import kicad_text_bytes, write_kicad_text
 from .sch_hierarchy import (
     PRO_SUFFIX,
@@ -153,24 +157,10 @@ def check_project_not_open(file_path: str | Path) -> str | None:
 
 FileStamp = tuple[int, int] | None
 
-# The tools write in threads (the save flushes the file to the disk). A lock for
-# each file keeps the check of the stamp and the write together: of two tools that
-# read the same stamp, the second gets the refusal, and no change is lost. The
-# writes of different files do not wait for each other.
-_WRITE_LOCKS: dict[str, threading.Lock] = {}
-_WRITE_LOCKS_GUARD = threading.Lock()
-
-
-def _lock_key(path: Path) -> str:
-    """The key of the lock of a file (also through a symbolic link: the save writes
-    the file that the link points to)."""
-    return os.path.normcase(os.path.realpath(path))
-
-
-def _write_lock(path: Path) -> threading.Lock:
-    """The lock of the file."""
-    with _WRITE_LOCKS_GUARD:
-        return _WRITE_LOCKS.setdefault(_lock_key(path), threading.Lock())
+# The tools write in threads (the save flushes the file to the disk). The lock of
+# each file (file_save.file_locks) keeps the check of the stamp and the write
+# together: of two tools that read the same stamp, the second gets the refusal,
+# and no change is lost. The writes of different files do not wait for each other.
 
 
 def file_stamp(path: Path) -> FileStamp:
@@ -201,7 +191,7 @@ def _guarded_write(
 ) -> str | None:
     if open_error:
         return open_error
-    with _write_lock(path):
+    with file_locks([path]):
         if file_stamp(path) != stamp:
             return _changed_error(path)
         # KiCad reads and writes its files as UTF-8 on each platform. The locale
@@ -270,11 +260,6 @@ def _schematic_error(path: Path, content: str) -> str | None:
     return version if isinstance(version, str) else check_schematic_not_open(path)
 
 
-def _sentence(error: BaseException) -> str:
-    text = str(error).rstrip()
-    return text if text.endswith((".", "!", "?")) else f"{text}."
-
-
 def write_schematics(
     texts: dict[Path, str], stamps: dict[Path, FileStamp]
 ) -> tuple[list[Path], list[str]] | str:
@@ -286,11 +271,10 @@ def write_schematics(
 
     1. The checks of write_schematic() for each file (the file version, a file
        that KiCad has open, the stamp), and the bytes of each new text.
-    2. A temporary file with the new content next to each file (PendingSave),
-       flushed to the disk. An error of the disk (a full disk, a file that is
-       read only) then stops the change before it changes a file.
-    3. The renames. When a rename fails, the files that have the new content get
-       their old content again (the bytes that the function read in step 1).
+    2. file_save.save_files: a temporary file with the new content next to each
+       file, flushed to the disk (an error of the disk then stops the change
+       before it changes a file), then the renames. When a rename fails, the
+       files that have the new content get their old bytes again.
 
     Args:
         texts: The new text of each file.
@@ -302,95 +286,27 @@ def write_schematics(
         save failed (AfterSaveError).
     """
     files = list(texts)
-    keys: dict[str, Path] = {}
-    for path in files:
-        same = keys.setdefault(_lock_key(path), path)
-        if same != path:
-            # A symbolic link, or a name with an other case on a file system that
-            # ignores the case: two texts for one file would lose one change.
-            return (
-                f"❌ The tool wrote no file: {same} and {path} are one file (a symbolic "
-                "link, or the same name with an other case). Give each sheet file one name."
-            )
-    with contextlib.ExitStack() as locks:
-        # One order of the locks for all callers: no deadlock.
-        for key in sorted(keys):
-            locks.enter_context(_write_lock(keys[key]))
+    try:
+        check_one_name_each(files)
+    except SaveFilesError as e:
+        return f"❌ {e} Give each sheet file one name."
+    with file_locks(files):
         for path in files:
             error = _schematic_error(path, texts[path])
             if not error and file_stamp(path) != stamps[path]:
                 error = _changed_error(path)
             if error:
                 return f"❌ The tool wrote no file: {error.removeprefix('❌ ')}"
-        pending: list[PendingSave] = []
-        old: dict[Path, bytes] = {}
-        path = files[0] if files else None
-        try:
-            for path in files:
-                old[path] = path.read_bytes()
-                pending.append(PendingSave(path, kicad_text_bytes(path, texts[path])))
-        except (OSError, WorkbenchError) as e:
-            return f"❌ The tool wrote no file. {path}: {_sentence(e)}{_discard(pending)}"
-        except BaseException:
-            _discard(pending)
-            raise
-        written: list[Path] = []
-        warnings: list[str] = []
-        for index, save in enumerate(pending):
+        data = []
+        for path in files:
             try:
-                save.commit()
-            except AfterSaveError as e:
-                warnings.append(str(e))
-            except Exception as e:
-                # commit() removed the temporary file of this save, or its error
-                # names it.
-                return (
-                    f"❌ The tool could not write {files[index]}: {_sentence(e)}"
-                    f"{_discard(pending[index + 1 :])}{_restore(written, old)}"
-                )
-            except BaseException:
-                _discard(pending[index + 1 :])
-                _restore(written, old)
-                raise
-            written.append(files[index])
-        return written, warnings
-
-
-def _discard(pending: list[PendingSave]) -> str:
-    """Remove the temporary files of the saves that did not run. Return the text for
-    the files that stay."""
-    kept = []
-    for save in pending:
+                data.append((path, kicad_text_bytes(path, texts[path])))
+            except WorkbenchError as e:
+                return f"❌ The tool wrote no file. {path}: {e}"
         try:
-            save.discard()
-        except OSError as e:
-            kept.append(f"{save.temp} ({e})")
-    if not kept:
-        return ""
-    return f" The tool could not remove these temporary files: {'; '.join(kept)}."
-
-
-def _restore(written: list[Path], old: dict[Path, bytes]) -> str:
-    """Save the old content into the files that have the new content. Return the
-    text for the answer."""
-    if not written:
-        return " The tool wrote no file."
-    failed, notes = [], []
-    for path in written:
-        try:
-            save_file(path, old[path])
-        except AfterSaveError as e:
-            notes.append(str(e))
-        except OSError as e:
-            failed.append(f"{path.name} ({e})")
-    if failed:
-        return (
-            f" The tool could not write the old content into these files again: "
-            f"{'; '.join(failed)}. These files have the new content, the other files do not."
-        )
-    names = ", ".join(path.name for path in written)
-    note = f" {' '.join(notes)}" if notes else ""
-    return f" The tool wrote no file (it wrote the old content into {names} again).{note}"
+            return files, save_files(data)
+        except SaveFilesError as e:
+            return f"❌ {e}"
 
 
 def write_board(path: Path, content: str, stamp: FileStamp) -> str | None:

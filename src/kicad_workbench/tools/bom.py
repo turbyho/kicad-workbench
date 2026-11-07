@@ -31,7 +31,6 @@ import asyncio
 import json
 import os
 import re
-import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +39,7 @@ from ..errors import InputError, WorkbenchError
 from ..parsers.sexpr import SExprError
 from ..parsers.unit_fields import unit_conflicts
 from ..server import mcp
+from ..utils.file_save import SaveFilesError, save_files
 from ..utils.kicad_bom import (
     bom_args,
     bom_rules,
@@ -289,6 +289,7 @@ def _bom_text(
     variant: str,
     grouped: bool,
     units: list[str],
+    saved: list[str],
 ) -> str:
     header, lines = rows[0], rows[1:]
     lines_out = [f"# BOM of {root.name}", "", *units]
@@ -299,6 +300,7 @@ def _bom_text(
     if output is not None:
         state = "replaced" if replaced else "written"
         lines_out.append(f"The CSV file of kicad-cli is {state}: `{output}`")
+        lines_out += [f"⚠️ {warning}" for warning in saved]
     else:
         lines_out.append("No CSV file is kept. Give output_path to keep the CSV file of kicad-cli.")
     lines_out += _file_warnings(export, rows, fields)
@@ -356,33 +358,29 @@ def variant_outputs(output: Path, variants: list[str]) -> list[tuple[str, Path]]
     return targets
 
 
-def _write_set(files: list[tuple[Path, bytes]]) -> list[bool]:
-    """Write the files of one set, and return for each file if it was there before.
+def _save_set(files: list[tuple[Path, bytes]]) -> tuple[list[bool], list[str]]:
+    """Save the BOM files of one export: all files or no file (file_save.save_files).
 
-    The function writes each file into a temporary file next to it first. Only
-    when all temporary files are complete, it replaces the files (os.replace in
-    one directory). Thus a failure of a write changes no file of the set.
+    Returns:
+        For each file, True when it was there before; and the warnings of the save.
 
     Raises:
-        OSError: A file cannot be written. No file of the set is changed.
+        OSError: A folder cannot be made. No file changed (a folder that the
+            function made before the error stays).
+        SaveFilesError: The save failed. The message tells the state of the files.
     """
-    temporary: list[Path] = []
-    try:
-        for path, data in files:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handle, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-            temporary.append(Path(name))
-            with os.fdopen(handle, "wb") as file:
-                file.write(data)
-    except OSError:
-        for name in temporary:
-            name.unlink(missing_ok=True)
-        raise
-    replaced = []
-    for (path, _data), name in zip(files, temporary, strict=True):
-        replaced.append(path.exists())
-        os.replace(name, path)
-    return replaced
+    for path, _data in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    # os.path.exists gives no error (Path.exists does on Python 3.10 and 3.11).
+    replaced = [os.path.exists(path) for path, _data in files]
+    return replaced, save_files(files)
+
+
+def _save_error(error: OSError) -> str:
+    if isinstance(error, SaveFilesError):
+        return f"❌ {error}"
+    # Only mkdir gives an other OSError. A folder that it made before the error stays.
+    return f"❌ The folder of the BOM cannot be made: {error}. The tool wrote no file."
 
 
 async def _export_all_variants(
@@ -401,7 +399,7 @@ async def _export_all_variants(
     kicad-cli exports the default variant only with no --variant
     (EESCHEMA_JOBS_HANDLER::JobExportBom), thus the tool runs kicad-cli one time
     for each variant, one after the other. It writes the files only after all
-    exports, and a failure changes no file of the set (_write_set).
+    exports, and a failure changes no file of the set (_save_set).
     """
     # The same checks as for the file of the default variant (also a symbolic link
     # to a KiCad file).
@@ -423,11 +421,11 @@ async def _export_all_variants(
     # Before the write: an error of the tool in the check then changes no file.
     units = await asyncio.to_thread(_unit_check, project, kicad, variants)
     try:
-        replaced = await asyncio.to_thread(
-            _write_set, [(target, export.data) for _variant, target, export, _rows in results]
+        replaced, saved = await asyncio.to_thread(
+            _save_set, [(target, export.data) for _variant, target, export, _rows in results]
         )
     except OSError as e:
-        return f"❌ The BOM files cannot be written: {e}. The tool changed no file."
+        return _save_error(e)
     count = len(variants)
     lines_out = [
         f"# BOM of {root.name}, all variants",
@@ -439,6 +437,7 @@ async def _export_all_variants(
             if count
             else "variant: the project has no variants, thus one BOM file."
         ),
+        *(f"⚠️ {warning}" for warning in saved),
     ]
     for (variant, target, export, rows), was in zip(results, replaced, strict=True):
         name = f"Variant {variant!r}" if variant else "Default variant"
@@ -522,17 +521,14 @@ async def _export_bom(
         return f"❌ kicad-cli did not write the BOM of {root}: {e}"
     # Before the write: an error of the tool in the check then changes no file.
     units = await asyncio.to_thread(_unit_check, project, kicad, [variant] if variant else [])
-    replaced = False
+    replaced, saved = False, []
     if output is not None:
-        replaced = output.exists()
-
-        def write() -> None:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(export.data)
-
-        await asyncio.to_thread(write)
+        try:
+            (replaced,), saved = await asyncio.to_thread(_save_set, [(output, export.data)])
+        except OSError as e:
+            return _save_error(e)
     return _bom_text(
-        root, kicad, export, rows, columns, output, replaced, variant, bool(group_by), units
+        root, kicad, export, rows, columns, output, replaced, variant, bool(group_by), units, saved
     )
 
 

@@ -300,7 +300,7 @@ class TestReviewCases:
         before, out = await _write_with(tmp_path, monkeypatch, fail_commit=2)
         assert out.startswith("❌ The tool could not write "), out
         assert out.endswith("again)."), out
-        assert "The tool wrote no file (it wrote the old content into " in out
+        assert "The tool wrote no file (it gave board.kicad_sch the old content again)." in out
         assert _texts(tmp_path) == before
         assert not list(tmp_path.glob("*.kicad-save-*"))
 
@@ -332,8 +332,8 @@ class TestReviewCases:
         real = file_save.PendingSave.commit
         calls = []
 
-        def commit(save):
-            real(save)
+        def commit(save, flush_folder=True):
+            real(save, flush_folder)
             calls.append(save.target)
             if len(calls) == 1:
                 raise file_save.AfterSaveError(f"The tool wrote {save.target}, but no flush")
@@ -348,14 +348,14 @@ class TestReviewCases:
             assert '"MPN" "X"' in (tmp_path / name).read_text(encoding="utf-8")
 
     async def test_a_failed_restore_names_the_file(self, tmp_path, monkeypatch):
-        from kicad_workbench.utils import kicad_lock
+        from kicad_workbench.utils import file_save
 
         def save_file(path, data):
             raise OSError(5, "Input/output error")
 
-        monkeypatch.setattr(kicad_lock, "save_file", save_file)
+        monkeypatch.setattr(file_save, "save_file", save_file)
         _, out = await _write_with(tmp_path, monkeypatch, fail_commit=2)
-        assert "could not write the old content into these files again: " in out, out
+        assert "could not give these files their old content again: " in out, out
         assert out.endswith("These files have the new content, the other files do not."), out
 
     async def test_instances_of_an_other_project(self, tmp_path):

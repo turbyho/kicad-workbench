@@ -36,6 +36,7 @@ from ..parsers.sch_geometry import mm_text
 from ..parsers.sexpr import SExprError, parse
 from ..parsers.symbol_info import SymbolInfo, SymbolPin, symbol_info
 from ..server import mcp
+from ..utils.file_save import SaveFilesError, save_files
 from ..utils.kicad_cli import (
     KicadCliError,
     decode_output,
@@ -2061,6 +2062,7 @@ class _Drawn:
     skipped: list[tuple[str, SvgPage]]  # pages that the region is not on
     warning: str | None
     files: list[str]  # the files written to output_dir
+    saved: list[str]  # the warnings of the save of the files (AfterSaveError)
 
 
 async def _render(
@@ -2183,19 +2185,23 @@ async def _render(
                 drawn.append((svg, page, plan, pngs))
         except SvgImageError as e:
             return f"❌ Cannot draw the {item_type} {lib_id}: {svg.name}: {e}"
-        files = []
+        outputs: list[tuple[Path, bytes]] = []
+        saved: list[str] = []
         if target is not None:
-            target.mkdir(parents=True, exist_ok=True)
             for svg, _page, _plan, pngs in drawn:
                 # The SVG as kicad-cli wrote it, byte for byte.
-                shutil.copyfile(svg, target / svg.name)
-                files.append(svg.name)
+                outputs.append((target / svg.name, svg.read_bytes()))
                 for index, png in enumerate(pngs):
                     name = svg.stem if len(pngs) == 1 else f"{svg.stem}_tile{index + 1}"
-                    (target / f"{name}.png").write_bytes(png)
-                    files.append(f"{name}.png")
+                    outputs.append((target / f"{name}.png", png))
+            target.mkdir(parents=True, exist_ok=True)
+            # All files or no file: the images of one render belong together.
+            try:
+                saved = save_files(outputs)
+            except SaveFilesError as e:
+                return f"❌ {e}"
         named = [(svg.stem, page, plan, pngs) for svg, page, plan, pngs in drawn]
-        return _Drawn(named, skipped, warning, files)
+        return _Drawn(named, skipped, warning, [path.name for path, _data in outputs], saved)
 
     def run() -> str | _Drawn:
         # The thread owns the temporary directory. A cancelled tool call does
@@ -2250,6 +2256,7 @@ async def _render(
             )
     if target is not None:
         lines.append(f"**Files** in {target}: {', '.join(outcome.files)}")
+        lines += [f"⚠️ {warning}" for warning in outcome.saved]
     if item_type == "symbol" and not include_hidden:
         lines.append("_Hidden pins and hidden fields are not shown (include_hidden)._")
     content: list[str | Image] = ["\n".join(lines + problem_lines(problems))]

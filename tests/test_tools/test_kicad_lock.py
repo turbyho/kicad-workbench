@@ -422,4 +422,5 @@ class TestWriteInThreads:
         stamps = {a: file_stamp(a), link: file_stamp(link)}
         result = write_schematics({a: text + " ", link: text + "  "}, stamps)
         assert result.startswith(f"❌ The tool wrote no file: {a} and {link} are one file"), result
+        assert result.endswith("Give each sheet file one name."), result
         assert a.read_text(encoding="utf-8") == text

@@ -504,6 +504,33 @@ class TestKicadCliIntegration:
         exported = tmp_path / "dangling_label_erc_report.json"
         assert json.loads(exported.read_text(encoding="utf-8"))["sheets"]
 
+    async def test_export_into_a_directory_is_refused(self, tmp_path):
+        sch = tmp_path / "dangling_label.kicad_sch"
+        shutil.copy(LABEL_SCH, sch)
+        out = await validation.export_erc_report(str(sch), output_path=str(tmp_path))
+        assert out == f"❌ The output path {tmp_path} is a directory. Give a .json file."
+
+    async def test_export_with_a_disk_error_keeps_the_old_report(self, tmp_path, monkeypatch):
+        # shutil.copy wrote the report in place: an error left a part of it.
+        from kicad_workbench.utils import file_save
+
+        sch = tmp_path / "dangling_label.kicad_sch"
+        shutil.copy(LABEL_SCH, sch)
+        exported = tmp_path / "dangling_label_erc_report.json"
+        exported.write_text("old", encoding="utf-8")
+
+        def full_disk(fd, data):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(file_save, "_write_all", full_disk)
+        out = await validation.export_erc_report(str(sch))
+        assert out == f"❌ The tool wrote no file. {exported}: [Errno 28] No space left on device."
+        assert exported.read_text(encoding="utf-8") == "old"
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "dangling_label.kicad_sch",
+            exported.name,
+        ]
+
     @pytest.mark.parametrize("utf8_mode", [False, True])
     def test_run_erc_in_a_locale_that_is_not_utf8(self, tmp_path, utf8_mode):
         # The server runs in a locale that is not UTF-8, and the project path

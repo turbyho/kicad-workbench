@@ -364,3 +364,150 @@ def test_a_backup_file_that_stays_is_an_error_after_the_save(monkeypatch, sch):
     monkeypatch.undo()
     assert sch.read_bytes() == NEW
     assert (sch.parent / "backup").read_bytes() == OLD
+
+
+@posix
+def test_save_files_refuses_two_names_of_one_file(tmp_path, sch):
+    link = tmp_path / "link.kicad_sch"
+    link.symlink_to(sch.name)
+    with pytest.raises(file_save.SaveFilesError, match="are one file"):
+        file_save.save_files([(sch, NEW), (link, NEW + b" ")])
+    assert sch.read_bytes() == OLD
+    assert _files(tmp_path) == ["a.kicad_sch", "link.kicad_sch"]
+
+
+def test_save_files_removes_a_new_file_after_a_failed_rename(monkeypatch, tmp_path, sch):
+    new = tmp_path / "b.kicad_sch"
+    real, calls = file_save._rename, []
+
+    def rename(temp, target):
+        calls.append(target)
+        if len(calls) == 2:
+            raise OSError(errno.EIO, "Input/output error")
+        return real(temp, target)
+
+    monkeypatch.setattr(file_save, "_rename", rename)
+    with pytest.raises(
+        file_save.SaveFilesError, match=r"wrote no file \(it removed the new file b.kicad_sch\)"
+    ):
+        file_save.save_files([(new, NEW), (sch, NEW)])
+    assert _files(tmp_path) == ["a.kicad_sch"]
+    assert sch.read_bytes() == OLD
+
+
+@pytest.mark.parametrize("same_object", [True, False])
+def test_save_files_refuses_one_name_two_times(tmp_path, sch, same_object):
+    other = sch if same_object else tmp_path / "a.kicad_sch"
+    with pytest.raises(file_save.SaveFilesError, match="are one file"):
+        file_save.save_files([(sch, NEW), (other, NEW + b" ")])
+    assert sch.read_bytes() == OLD
+
+
+@posix
+def test_save_files_replaces_a_link_loop_as_save_file(tmp_path, sch):
+    # realpath fails for a link to itself: the save goes to the name of the link,
+    # as KiCad saves it (KIPLATFORM::IO::ResolveSymlinkTarget), also in a set.
+    loop = tmp_path / "loop.kicad_sch"
+    loop.symlink_to(loop.name)
+    file_save.save_files([(sch, NEW), (loop, NEW)])
+    assert not loop.is_symlink() and loop.read_bytes() == NEW
+
+
+def test_the_table_of_the_locks_stays_empty(tmp_path, sch):
+    file_save.save_files([(sch, NEW), (tmp_path / "b.kicad_sch", NEW)])
+    file_save.save_file(sch, OLD)
+    assert file_save._LOCKS == {}
+
+
+@posix
+def test_save_files_gives_a_link_to_no_file_back(monkeypatch, tmp_path, sch):
+    # The save replaces a link to no file with a file (as KiCad). After a failed
+    # rename of the next file, the link comes back.
+    link = tmp_path / "link.kicad_sch"
+    link.symlink_to(tmp_path / "missing.kicad_sch")
+    real, calls = file_save._rename, []
+
+    def rename(temp, target):
+        calls.append(target)
+        if len(calls) == 2:
+            raise OSError(errno.EIO, "Input/output error")
+        return real(temp, target)
+
+    monkeypatch.setattr(file_save, "_rename", rename)
+    with pytest.raises(file_save.SaveFilesError, match=r"gave link.kicad_sch the old content"):
+        file_save.save_files([(link, NEW), (sch, NEW)])
+    assert link.is_symlink() and os.readlink(link) == str(tmp_path / "missing.kicad_sch")
+    assert sch.read_bytes() == OLD
+
+
+@posix
+def test_save_files_flushes_each_folder_one_time(monkeypatch, tmp_path, sch):
+    flushed = []
+    monkeypatch.setattr(file_save, "_flush_folder", lambda folder, written: flushed.append(folder))
+    file_save.save_files([(sch, NEW), (tmp_path / "b.kicad_sch", NEW)])
+    assert flushed == [tmp_path]
+
+
+def test_save_files_reads_no_old_content_of_one_file(monkeypatch, sch):
+    # Only a file before a failed rename gets its old content again: the last file
+    # never. A file that the tool can write but not read is then no error.
+    monkeypatch.setattr(file_save, "_old_state", lambda path: pytest.fail("read"))
+    assert file_save.save_files([(sch, NEW)]) == []
+    assert sch.read_bytes() == NEW
+
+
+def test_save_files_gives_a_defect_as_it_is(monkeypatch, tmp_path, sch):
+    # A defect of the code is no SaveFilesError (an expected error with no
+    # traceback): it goes up after the restore.
+    real, calls = file_save._rename, []
+
+    def rename(temp, target):
+        calls.append(target)
+        if len(calls) == 2:
+            raise TypeError("a defect")
+        return real(temp, target)
+
+    monkeypatch.setattr(file_save, "_rename", rename)
+    with pytest.raises(TypeError, match="a defect"):
+        file_save.save_files([(tmp_path / "b.kicad_sch", NEW), (sch, NEW)])
+    assert _files(tmp_path) == ["a.kicad_sch"]
+
+
+def test_a_failed_restore_tells_also_the_restored_files(monkeypatch, tmp_path, sch):
+    real_rename, calls = file_save._rename, []
+
+    def rename(temp, target):
+        calls.append(target)
+        if len(calls) == 3:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_rename(temp, target)
+
+    def save_file(path, data):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(file_save, "_rename", rename)
+    monkeypatch.setattr(file_save, "save_file", save_file)
+    new = tmp_path / "b.kicad_sch"
+    with pytest.raises(file_save.SaveFilesError) as error:
+        file_save.save_files([(sch, NEW), (new, NEW), (tmp_path / "c.kicad_sch", NEW)])
+    text = str(error.value)
+    assert "could not give these files their old content again: " in text
+    assert text.endswith(
+        "These files have the new content, the other files do not (it removed the new file "
+        "b.kicad_sch)."
+    ), text
+
+
+def test_two_new_names_that_the_folder_reads_as_one(monkeypatch, tmp_path):
+    # A folder that does not compare the case (Windows, macOS, FAT): the temporary
+    # file of X.png is there also under the spelling x.png.
+    monkeypatch.setattr(file_save.os.path, "samefile", lambda a, b: True)
+    with pytest.raises(file_save.SaveFilesError, match="X.png and .*x.png are one file"):
+        file_save.save_files([(tmp_path / "X.png", NEW), (tmp_path / "x.png", NEW)])
+    assert _files(tmp_path) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="a file system that compares the case")
+def test_two_new_names_that_the_folder_reads_as_two(tmp_path):
+    file_save.save_files([(tmp_path / "X.png", NEW), (tmp_path / "x.png", OLD)])
+    assert (tmp_path / "X.png").read_bytes() == NEW and (tmp_path / "x.png").read_bytes() == OLD

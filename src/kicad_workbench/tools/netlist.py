@@ -362,15 +362,19 @@ async def trace_netlist_connection(
                 "",
             ]
 
-            for net_name, net_info in result['nets'].items():
+            # trace_connection gives a list for each net: a component can have more
+            # than one pin on a net. The other components of the net are the same
+            # for each of these pins.
+            for net_name, pins in result["nets"].items():
                 lines.append(f"### Net: {net_name}")
-                lines.append(f"**Pin:** {net_info['pin']}")
+                label = "Pins" if len(pins) > 1 else "Pin"
+                lines.append(f"**{label}:** {', '.join(pin['pin'] for pin in pins)}")
                 lines.append("")
 
-                if net_info['connected_to']:
+                if pins[0]["connected_to"]:
                     lines.append("| Reference | Pin |")
                     lines.append("|-----------|-----|")
-                    for ref, pin in net_info['connected_to']:
+                    for ref, pin in pins[0]["connected_to"]:
                         lines.append(f"| {ref} | {pin} |")
                 else:
                     lines.append("No other components on this net.")

@@ -94,8 +94,8 @@ there. Make sure that a new connection is in the netlist: `generate_netlist` and
 - The tool writes each field into each unit of the reference: one package has one
   `Value` and one `MPN`.
 - A field that the symbol does not have becomes a new field, hidden as KiCad 9 and 10
-  make it. In a file of KiCad 8 a new field is visible. `Value_Confirmed` is always
-  hidden.
+  make it. In a file of KiCad 8 a new field is visible. `Value_Confirmed` and
+  `MPN_Confirmed` are always hidden.
 - With a variant (KiCad 10), the tool writes the fields of that variant into each
   unit. A value equal to the field of the symbol removes the field from the variant.
 - The tool checks all changes and all files first, and writes no file when a check

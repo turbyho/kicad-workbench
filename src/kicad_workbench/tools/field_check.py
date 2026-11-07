@@ -3,7 +3,7 @@
 The tool reads the BOM of kicad-cli (one line for each reference, also the DNP
 symbols, the default variant and each variant of KiCad 10), as project_check of
 datasheet-lens reads the BOM that export_bom writes. Then it checks the fields
-Value, MPN and Value_Confirmed of each line by the model of
+Value, MPN, Value_Confirmed and MPN_Confirmed of each line by the model of
 parsers/confirmed_mpns.py. Thus the two tools give the same messages.
 
 A DNP symbol gets the same check as a fitted symbol (datasheet-lens, commit 65168da
@@ -33,6 +33,7 @@ from ..parsers.confirmed_mpns import (
 from ..parsers.unit_fields import (
     distinct_conflicts,
     is_confirmed_field,
+    is_mpn_confirmed_field,
     mpn_order,
     variant_unit_conflicts,
 )
@@ -51,7 +52,8 @@ from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
 from .library import NO_KICAD_CLI
 
-# The fields of the BOM: "*" adds each field of the symbols (MPN, Value_Confirmed).
+# The fields of the BOM: "*" adds each field of the symbols (MPN, Value_Confirmed,
+# MPN_Confirmed).
 _FIELDS = ["Reference", "Value", "*"]
 
 
@@ -97,6 +99,10 @@ def _own_fields(symbol: CadSymbol, names: list[str]) -> None:
         own = [n for n in names if is_confirmed_field(n)]
         if own:
             symbol.confirmed_fields, symbol.confirmed_known = own, len(own) == 1
+    if symbol.mpn_confirmed == "":  # None: the BOM has no field MPN_Confirmed
+        own = [n for n in names if is_mpn_confirmed_field(n)]
+        if own:
+            symbol.mpn_confirmed_fields, symbol.mpn_confirmed_known = own, len(own) == 1
 
 
 def _choices(item: FieldWrite) -> str:
@@ -118,9 +124,10 @@ def _missing(item: FieldWrite, own: dict[str, list[str]]) -> str:
     ]
     if not item.variant or not missing:
         return ""
+    what = "it" if len(missing) == 1 else "them"
     return (
-        f" The symbol has no field {', '.join(missing)}: first write it into the symbol (a "
-        "change with no variant)."
+        f" The symbol has no field {', '.join(missing)}: first write {what} into the symbol "
+        "(a change with no variant)."
     )
 
 
@@ -145,16 +152,27 @@ def _messages(result: FieldCheck, own: dict[str, list[str]]) -> list[str]:
     if result.changes:
         lines += ["## Changes", ""]
         for c in result.changes:
-            first = (
-                " First select the new part with the user, and write its MPN into Value in "
-                "parentheses ('100nF 10V (GRM155R71A104KA01D)')."
-                if c.select
+            if c.select:
+                lines.append(
+                    f"- ⚠️ change in the CAD project: {_target(c)}: {c.text} Ask the user: a new "
+                    "part for the new value, or the same part. A new part: select it with the user, "
+                    "write its MPN into the field MPN, then run check_symbol_fields again. The same "
+                    f"part: Write {_code(c)}.{_choices(c)}{_missing(c, own)} Else the Value must "
+                    "change back."
+                )
+                continue
+            # The datasheet of a new MPN: the agent finds it at once, before it asks the
+            # user (decision 28). This tool runs with no datasheet-lens.
+            new = (
+                " Find the datasheet of each new MPN now (this changes no project), and give "
+                "it to the user with the change."
+                if c.new
                 else ""
             )
             lines.append(
-                f"- ⚠️ change in the CAD project: {_target(c)}: {c.text} Tell the user. When the "
-                f"user confirms the change:{first} Write {_code(c)}.{_choices(c)}{_missing(c, own)} Else the Value "
-                "must change back."
+                f"- ⚠️ change in the CAD project: {_target(c)}: {c.text}{new} Tell the user. When "
+                f"the user confirms the change: Write {_code(c)}.{_choices(c)}{_missing(c, own)} "
+                "Else the Value and the MPN must change back."
             )
         lines.append("")
     if result.unconfirmed:
@@ -166,30 +184,35 @@ def _messages(result: FieldCheck, own: dict[str, list[str]]) -> list[str]:
             for u in result.unconfirmed
         ]
         lines.append("")
-    if result.complete:
-        lines += ["## Complete the fields", ""]
+    if result.move:
+        lines += ["## The old convention", ""]
         lines += [
-            f"- complete the fields: {_target(c)}: the MPN is not in Value (the convention: the "
-            f"MPNs in parentheses in Value). The parts do not change. Write {_code(c)}."
-            + _choices(c)
-            + _missing(c, own)
-            for c in result.complete
+            f"- the old convention: {_target(m)}: the MPNs are in the parentheses of Value. Move "
+            "them into the field MPN (Value holds the general value, MPN the MPNs, the hidden "
+            "fields Value_Confirmed and MPN_Confirmed the confirmed copies). A confirmed symbol "
+            "stays confirmed, and the parts do not change. Tell the user (a text in parentheses "
+            f"that is a part of the general value stays), and when the user agrees: Write "
+            f"{_code(m)}." + _choices(m) + _missing(m, own)
+            for m in result.move
         ]
         lines.append("")
-    if result.no_value_confirmed:
-        lines.append(
-            f"⚠️ no field Value_Confirmed: {result.no_value_confirmed} symbols. A change of a "
-            "general value (100nF to 220nF) is not found. Tell the user. When the user agrees, "
-            "write the hidden field Value_Confirmed with the text of Value into each symbol "
-            "whose fields are confirmed (set_symbol_fields), then run check_symbol_fields again."
-        )
+    for count, name, what in (
+        (result.no_value_confirmed, "Value_Confirmed", "of a general value (100nF to 220nF)"),
+        (result.no_mpn_confirmed, "MPN_Confirmed", "of a part (an other MPN)"),
+    ):
+        if count:
+            lines.append(
+                f"⚠️ no field {name}: {count} symbols. A change {what} is not found. Tell the "
+                f"user. When the user agrees, write the hidden field {name} into each symbol (the "
+                "text of the field that it copies, for a symbol whose fields are confirmed), with "
+                "set_symbol_fields, then run check_symbol_fields again."
+            )
     if result.no_mpn:
         lines.append(
             f"no part selected (a general value and no MPN): {', '.join(result.no_mpn)}. A part "
-            "that needs a datasheet: select it with the user, then write its MPN into Value in "
-            "parentheses ('10k (RC0603FR-0710KL)'), into the MPN field of the symbol, and the new "
-            "Value into its field Value_Confirmed. A symbol that needs no part (a test point, a "
-            "generic resistor): MPN = '-'."
+            "that needs a datasheet: select it with the user, then write its MPN into the field "
+            "MPN of the symbol, and run check_symbol_fields again. A symbol that needs no part (a "
+            "test point, a generic resistor): MPN = '-'."
         )
     return lines
 
@@ -280,39 +303,40 @@ async def _check(schematic_path: str) -> str:
         )
     else:
         out.append(
-            "✅ The fields Value, MPN and Value_Confirmed of all BOM lines (also the DNP "
-            "symbols, in each variant) follow the convention, and the user confirmed them."
+            "✅ The fields Value, MPN, Value_Confirmed and MPN_Confirmed of all BOM lines (also "
+            "the DNP symbols, in each variant) follow the convention, and the user confirmed them."
         )
     out += [
         "",
-        "The convention: Value holds the general value and the MPNs in one text in "
-        "parentheses, the fitted part first: '2N7002 (2N7002LT1G, BSS138LT1G)'. MPN is the "
-        "confirmed copy of these MPNs, and the hidden field Value_Confirmed is the Value of "
-        "the last confirmation.",
+        "The convention: Value holds the general value ('2N7002', '100nF 10V'), MPN the MPNs, "
+        "the fitted part first ('2N7002LT1G, BSS138LT1G'), and the hidden fields "
+        "Value_Confirmed and MPN_Confirmed the copies of the last confirmation.",
     ]
     return "\n".join(out)
 
 
 @mcp.tool()
 async def check_symbol_fields(schematic_path: str) -> str:
-    """Check the MPNs of the symbols: the fields Value, MPN and Value_Confirmed.
+    """Check the MPNs of the symbols: the fields Value, MPN, Value_Confirmed and MPN_Confirmed.
 
     Use this tool only when the MCP server datasheet-lens is not available: its
     tool project_check does the same check, and also checks the datasheets. The
-    two tools give the same messages (a datasheet-lens of 2026-11-07 or later:
-    an older one does not check the DNP symbols).
+    two tools give the same messages (a datasheet-lens with the model of the four
+    fields, of 2026-11-07 or later: an older one reads the MPNs from the
+    parentheses of Value).
 
-    The convention: Value holds the general value and the MPNs in one text in
-    parentheses, the fitted part first: "2N7002 (2N7002LT1G, BSS138LT1G)". The
-    separators are "," and ";". An MPN with ",", ";" or a parenthesis is in
-    quotes, as in CSV. The field MPN is the confirmed copy of these MPNs. The
-    hidden field Value_Confirmed is the Value of the last confirmation.
+    The convention: Value holds the general value ("2N7002", "100nF 10V"), the
+    field MPN the MPNs, the fitted part first ("2N7002LT1G, BSS138LT1G"; the
+    separators are "," and ";", an MPN with "," or ";" is in quotes, as in CSV),
+    and the hidden fields Value_Confirmed and MPN_Confirmed the copies of the last
+    confirmation. A symbol with the MPNs in the parentheses of Value (the old
+    convention) gets the move into the field MPN.
 
     The tool reads the BOM of kicad-cli (also the DNP symbols: the user can fit
     them at any time) of the default variant and of each variant (KiCad 10).
     For each symbol it gives the conflicts, the changes that the user must
-    confirm, the symbols that are not confirmed, the fields that complete a
-    symbol by the convention, and the symbols with no part. Each message gives
+    confirm, the symbols that are not confirmed, the moves of the old convention,
+    and the symbols with no part. Each message gives
     the change for set_symbol_fields. Write the fields only after the user
     confirmed them.
 

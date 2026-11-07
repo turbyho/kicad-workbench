@@ -14,18 +14,30 @@ With the two servers, the agent can:
 
 ## The convention of the MPN fields
 
-The two servers use the same convention for the fields of a symbol:
+The two servers use the same convention for the fields of a symbol. Each field has
+one function:
 
 | Field | Content |
 |---|---|
-| `Value` | The general value and the orderable MPNs in one text in parentheses, the fitted part first: `2N7002 (2N7002LT1G, BSS138LT1G)`. The separators are `,` and `;`. An MPN with `,`, `;` or a parenthesis is in quotes, as in CSV: `("BC847B,215", BSS138LT1G)` |
-| `MPN` | The confirmed copy of the MPNs of `Value` |
+| `Value` | The general value: `2N7002`, `100nF 10V`. The check reads no MPN from it |
+| `MPN` | The orderable MPNs of the designer, the fitted part first: `2N7002LT1G, BSS138LT1G`. The separators are `,` and `;`. An MPN with `,` or `;` is in quotes, as in CSV: `"BC847B,215", BSS138LT1G` |
 | `Value_Confirmed` | A hidden copy of `Value` at the last confirmation |
+| `MPN_Confirmed` | A hidden copy of `MPN` at the last confirmation |
+
+A difference between a field and its confirmed copy is a change that the user must
+confirm. Until the user confirms it, the confirmed MPNs are the parts of the design.
+A new general value with the confirmed MPN (`100nF` to `220nF`) can need a new part:
+the user selects a new part, or confirms that the part stays.
 
 A general value with no MPN (`10k`) has no selected part. `MPN` = `-` tells that the
 symbol needs no part (for example a test point). The units of one package (`U1A` and
-`U1B`) must have the same `Value`, `MPN` and `Value_Confirmed`: `export_bom` gives an
-error when they do not.
+`U1B`) must have the same `Value`, `MPN`, `Value_Confirmed` and `MPN_Confirmed`:
+`export_bom` gives an error when they do not.
+
+The old convention put the MPNs in the parentheses of `Value`
+(`2N7002 (2N7002LT1G)`). For a symbol of the old convention (no `MPN_Confirmed`),
+the check proposes the move into the four fields. The move keeps the state of the
+confirmation: a confirmed symbol stays confirmed.
 
 ## The procedure
 
@@ -40,11 +52,13 @@ error when they do not.
    in its store, or adds it from the URL of the `Datasheet` field, a distributor or a
    local PDF. `project_sync` copies the documents into the project folder. Then
    `project_check` must give no missing, extra or different part.
-4. **Confirm the MPNs.** `project_check` gives the changes of `Value` that the user
-   must confirm, and the fields that complete a symbol by the convention. The agent
-   asks the user. After the confirmation, `set_symbol_fields` writes `MPN`,
-   `Value_Confirmed` (and `Value` to complete a symbol) into the schematic, as KiCad
-   writes them. KiCad must not have the schematic open.
+4. **Confirm the MPNs.** `project_check` gives the changes of `Value` and `MPN` that
+   the user must confirm, and the moves of the old convention. For a new MPN, the
+   agent adds its datasheet first (this changes no project), then asks the user.
+   After the confirmation, `set_symbol_fields` writes `MPN_Confirmed` and
+   `Value_Confirmed` (for a move also `Value` and `MPN`) into the schematic, as KiCad
+   writes them, and datasheet-lens updates the project file. KiCad must not have the
+   schematic open.
 5. **Do the check again after each change.** After a change of the parts of the
    schematic (for example `add_component_from_library` or a new MPN), run steps 1
    and 2 again.

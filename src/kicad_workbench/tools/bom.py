@@ -550,8 +550,8 @@ async def export_bom(
     symbols that are excluded from the BOM into the BOM.
 
     The units of one package (one reference, U1A and U1B) must have the same
-    Value, MPN and Value_Confirmed. When they do not, the output starts with an error
-    of the design: the BOM line of the package joins the values, and the
+    Value, MPN, Value_Confirmed and MPN_Confirmed. When they do not, the output starts
+    with an error of the design: the BOM line of the package joins the values, and the
     joined MPNs look like an MPN and its alternative. Tell the user, and
     correct the fields in KiCad.
 

@@ -20,8 +20,9 @@ plans/roadmap.md, "Phase 4", "Step 1":
   symbol and the default text size of the schematic
   (DIALOG_SYMBOL_PROPERTIES::OnAddField, SCH_FIELD). KiCad 9 and 10 make a
   new field hidden, KiCad 8 does not: the tool does as the KiCad of the file
-  version (user, 2026-11-05: as KiCad). Value_Confirmed is always hidden (the
-  model of confirmed MPNs of datasheet-lens, decision 5).
+  version (user, 2026-11-05: as KiCad). Value_Confirmed and MPN_Confirmed are
+  always hidden, also in an other spelling (field_key): the model of confirmed
+  MPNs of datasheet-lens, decisions 5 and 27.
 - The format of the file version (SCH_IO_KICAD_SEXPR::saveField): before
   SCHEMATIC_FIELD_FLAGS the hidden state is in the effects, from it in the
   property. Variants exist from SCHEMATIC_VARIANTS. A file older than
@@ -63,6 +64,7 @@ from ..parsers.sexpr import (
 )
 from ..parsers.sheet_list import screens_by_file
 from ..parsers.symbol_info import letter_reference
+from ..parsers.unit_fields import is_confirmed_field, is_mpn_confirmed_field
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.kicad_lock import write_schematics
@@ -74,8 +76,6 @@ from ..utils.variants import file_variants, project_variants
 from .library import cell
 from .schematic_editor import _field_error, _mm
 
-# The hidden field of the model of confirmed MPNs (datasheet-lens).
-VALUE_CONFIRMED = "Value_Confirmed"
 # DEFAULT_TEXT_SIZE of eeschema/default_values.h, in mils. The limits of the
 # project setting (SCHEMATIC_SETTINGS, PARAM_SCALED): 5 to 1000 mils.
 _DEFAULT_TEXT_SIZE_MILS = 50
@@ -89,8 +89,8 @@ class FieldChange(BaseModel):
     reference: str = Field(description="The reference of the symbol, for example U3.")
     fields: dict[str, str] = Field(
         description=(
-            'The fields to write, by name, for example {"MPN": "LM358DR", "Value_Confirmed": '
-            '"LM358 (LM358DR)"}. A field that the symbol does not have is a new field, hidden '
+            'The fields to write, by name, for example {"MPN_Confirmed": "LM358DR", '
+            '"Value_Confirmed": "LM358"}. A field that the symbol does not have is a new field, hidden '
             "as KiCad 9 and 10 make it (not in a variant). Not Reference."
         )
     )
@@ -167,7 +167,8 @@ def _new_property(symbol: Node, name: str, value: str, size: float, version: int
     """Return a new field of a placed symbol, as the symbol properties dialog of
     the KiCad of the file version adds it, and SCH_IO_KICAD_SEXPR::saveField
     writes it: one list on each line (see _insert_after). The field is hidden
-    from KiCad 9 (KiCad 8 does not hide it), and Value_Confirmed always.
+    from KiCad 9 (KiCad 8 does not hide it), and Value_Confirmed and MPN_Confirmed
+    always.
 
     Before SCHEMATIC_FIELD_FLAGS, KiCad writes the hidden state in the effects
     (EDA_TEXT::Format of KiCad 8, SCH_FIELD::Format of KiCad 9); from it, KiCad
@@ -181,7 +182,7 @@ def _new_property(symbol: Node, name: str, value: str, size: float, version: int
         if field is not None and field[0] == "Reference":
             reference_at = prop.first("at")
             angle = reference_at.value(2, "0") if reference_at is not None else "0"
-    hidden = name == VALUE_CONFIRMED or version > KICAD8.schematic
+    hidden = is_confirmed_field(name) or is_mpn_confirmed_field(name) or version > KICAD8.schematic
     text_size = _mm(size)
     font = f"(effects\n(font\n(size {text_size} {text_size})\n)"
     head = f"(property {quote(name)} {quote(value)}\n(at {_mm(x)} {_mm(y)} {angle})"
@@ -681,7 +682,8 @@ def _output(project: Path, rows: list[_Row], written: list[Path], problems: list
     lines += [
         "",
         "Each field goes into each unit of the reference. A new field is hidden as KiCad 9 "
-        "and 10 make it (a file of KiCad 8: visible; Value_Confirmed: always hidden). A "
+        "and 10 make it (a file of KiCad 8: visible; Value_Confirmed and MPN_Confirmed: always "
+        "hidden). A "
         "variant keeps only the fields that are different from the fields of the symbol "
         "(KiCad).",
     ]
@@ -744,9 +746,9 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
     The tool writes each field into each unit of the reference (one package
     has one Value and one MPN). A field that the symbol does not have becomes
     a new field, hidden as KiCad 9 and 10 make it (a file of KiCad 8: visible;
-    Value_Confirmed: always hidden). With a variant (KiCad 10), the tool writes the fields
-    of that variant into each unit: a value equal to the field of the symbol
-    removes the field from the variant. The tool checks all changes and all
+    Value_Confirmed and MPN_Confirmed: always hidden). With a variant (KiCad 10), the
+    tool writes the fields of that variant into each unit: a value equal to the
+    field of the symbol removes the field from the variant. The tool checks all changes and all
     files first, and writes no file when a check fails. It writes all files or
     no file: an error of the disk also changes no file. KiCad must not have the
     files open.
@@ -755,9 +757,10 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
     of fields for all its references (U201 and U301): give the same fields for
     each of these references, or write different fields through a variant.
 
-    Use it for the fields that project_check of datasheet-lens gives (MPN,
-    Value_Confirmed, and Value for "complete the fields"), after the user
-    confirmed them.
+    Use it for the fields that project_check of datasheet-lens or
+    check_symbol_fields gives (MPN_Confirmed and Value_Confirmed for a
+    confirmation; Value, MPN, MPN_Confirmed and Value_Confirmed for the move of
+    the old convention), after the user confirmed them.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool finds the

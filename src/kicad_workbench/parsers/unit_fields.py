@@ -1,5 +1,5 @@
-"""The fields of the units of one symbol: one package has one Value, MPN and
-Value_Confirmed.
+"""The fields of the units of one symbol: one package has one Value, MPN,
+Value_Confirmed and MPN_Confirmed.
 
 The units of one reference (U301A and U301B) are one package and one line of
 the BOM. KiCad gives an ERC error when the units have different values
@@ -10,10 +10,11 @@ KiCad 9 and 10 join the different values of the units with a comma
 ("LM358NG,LM358P"), which looks like an MPN and its alternative, and KiCad 8
 writes "-- mixed values --" (FIELDS_EDITOR_GRID_DATA_MODEL::getValue).
 
-This module compares Value, the MPN fields and Value_Confirmed of the units of
-each reference (decision of the user, 2026-11-05: an empty field in one unit is a
-difference too). Value_Confirmed is the confirmed copy of Value (the model of the
-confirmed MPNs, parsers/confirmed_mpns.py): the BOM line joins its values too. It
+This module compares Value, the MPN fields, Value_Confirmed and MPN_Confirmed of
+the units of each reference (decision of the user, 2026-11-05: an empty field in
+one unit is a difference too). Value_Confirmed and MPN_Confirmed are the confirmed
+copies of Value and MPN (the model of the confirmed MPNs, parsers/confirmed_mpns.py):
+the BOM line joins their values too. It
 reads each schematic file of the sheet hierarchy:
 
 - KiCad keeps the reference and the unit of a placed symbol for each sheet
@@ -72,8 +73,10 @@ def field_key(name: str) -> str:
 
 
 _MPN_KEYS = {field_key(name) for name in MPN_FIELDS}
-# The hidden field of the confirmed Value (parsers/confirmed_mpns.py).
+# The hidden fields of the confirmed Value and of the confirmed MPN
+# (parsers/confirmed_mpns.py).
 CONFIRMED_FIELD = "Value_Confirmed"
+MPN_CONFIRMED_FIELD = "MPN_Confirmed"
 
 
 def is_mpn_field(name: str) -> bool:
@@ -91,6 +94,22 @@ def mpn_order(names: list[str]) -> list[int]:
 def is_confirmed_field(name: str) -> bool:
     """Return True for the name of the field Value_Confirmed (see field_key)."""
     return field_key(name) == field_key(CONFIRMED_FIELD)
+
+
+def is_mpn_confirmed_field(name: str) -> bool:
+    """Return True for the name of the field MPN_Confirmed (see field_key)."""
+    return field_key(name) == field_key(MPN_CONFIRMED_FIELD)
+
+
+def _compared(name: str) -> bool:
+    """Return True for a field that the units of one package must share: Value, the MPN
+    fields, Value_Confirmed and MPN_Confirmed."""
+    return (
+        name == "Value"
+        or is_mpn_field(name)
+        or is_confirmed_field(name)
+        or is_mpn_confirmed_field(name)
+    )
 
 
 @dataclass(frozen=True)
@@ -113,13 +132,12 @@ class _Unit:
     reference: str
     unit: int
     unit_count: int
-    fields: dict[str, str]  # Value, the MPN fields and Value_Confirmed of the symbol
+    fields: dict[str, str]  # the fields of _compared of the symbol
     variants: dict[str, dict[str, str]]  # variant name -> the fields that it sets
 
 
 def _symbol_fields(symbol: Node, value: str, version: int) -> dict[str, str]:
-    """Return Value, the MPN fields and Value_Confirmed of a placed symbol, as KiCad
-    reads them.
+    """Return the fields of _compared of a placed symbol, as KiCad reads them.
 
     value: The Value field after the load (PlacedSymbol.value): the parser sets it
         also from the (value ...) of an instance.
@@ -128,14 +146,13 @@ def _symbol_fields(symbol: Node, value: str, version: int) -> dict[str, str]:
     fields = {"Value": value}
     for prop in symbol.children("property"):
         field = property_field(prop)
-        if field is not None and (is_mpn_field(field[0]) or is_confirmed_field(field[0])):
+        if field is not None and field[0] != "Value" and _compared(field[0]):
             fields.setdefault(field[0], file_text(field[1], version))
     return fields
 
 
 def _variant_fields(path: Node | None) -> dict[str, dict[str, str]]:
-    """Return the fields of the variants of an instance: Value, the MPN fields and
-    Value_Confirmed."""
+    """Return the fields of the variants of an instance: the fields of _compared."""
     variants: dict[str, dict[str, str]] = {}
     for variant in path.children("variant") if path is not None else []:
         name = variant.first("name")
@@ -147,7 +164,7 @@ def _variant_fields(path: Node | None) -> dict[str, dict[str, str]]:
             if field_name is None or value is None:
                 continue
             text = field_name.value(0, "")
-            if text == "Value" or is_mpn_field(text) or is_confirmed_field(text):
+            if _compared(text):
                 fields[text] = value.value(0, "")
     return variants
 
@@ -196,8 +213,8 @@ class UnitCheck:
     conflicts: dict[str, list[UnitConflict]]
     hierarchy: list[str]  # the problems of the sheet hierarchy (a sheet not read)
     duplicates: list[str]  # the duplicate references: their fields are not compared
-    # The MPN fields and the fields Value_Confirmed of each reference (in upper case),
-    # also the empty ones, in the order of the fields of its units.
+    # The MPN fields and the fields Value_Confirmed and MPN_Confirmed of each reference
+    # (in upper case), also the empty ones, in the order of the fields of its units.
     fields: dict[str, list[str]]
 
     @property
@@ -219,8 +236,8 @@ def variant_unit_conflicts(
     the sheet hierarchy (a sheet that the check could not read), and the duplicate
     references.
 
-    It compares Value, each MPN field and Value_Confirmed that a unit of the reference
-    has. A unit with no such field, or with an empty one, has the value "". The
+    It compares Value, each MPN field, Value_Confirmed and MPN_Confirmed that a unit of
+    the reference has. A unit with no such field, or with an empty one, has the value "". The
     fields of a variant are the fields of the symbol with the fields of its variant:
     a variant can also make the fields of the units equal.
 

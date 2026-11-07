@@ -128,8 +128,8 @@ def unit_check_lines(conflicts: list[UnitConflict], problems: list[str]) -> list
     if conflicts:
         lines_out += [
             "❌ ERROR IN THE DESIGN: the units of one package have different fields. One "
-            "package has one Value, one MPN and one Value_Confirmed. Correct the fields in "
-            "KiCad. The line of the package in the BOM joins the values: KiCad 9 and 10 "
+            "package has one Value, one MPN, one Value_Confirmed and one MPN_Confirmed. "
+            "Correct the fields in KiCad. The line of the package in the BOM joins the values: KiCad 9 and 10 "
             'write "A,B", which looks like an MPN and its alternative, and KiCad 8 writes '
             '"-- mixed values --".',
             *(f"- {conflict.text()}" for conflict in conflicts),

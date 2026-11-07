@@ -40,10 +40,11 @@ datasheets:
   compares this file with the project file `datasheet-lens.toml`, and gives the
   parts that are missing, extra or different. The project file and the datasheets go
   into the repository of the design, the same for each person of the team.
-- **Confirmed MPNs.** The Value field holds the general value and the orderable MPNs
-  (`2N7002 (2N7002LT1G, BSS138LT1G)`). The field MPN is the copy that the user
-  confirmed. datasheet-lens finds the changes, and `set_symbol_fields` writes the
-  confirmed fields into the schematic, as KiCad writes them. Without datasheet-lens,
+- **Confirmed MPNs.** The Value field holds the general value (`2N7002`), the field
+  MPN the orderable MPNs (`2N7002LT1G, BSS138LT1G`), and the hidden fields
+  Value_Confirmed and MPN_Confirmed the copies that the user confirmed.
+  datasheet-lens finds the changes, and `set_symbol_fields` writes the confirmed
+  fields into the schematic, as KiCad writes them. Without datasheet-lens,
   `check_symbol_fields` does the same check with the same messages.
 - **Checks against the datasheet.** The agent compares the pins of a symbol with the
   pin table of the datasheet, a footprint with the package drawing, and the circuit

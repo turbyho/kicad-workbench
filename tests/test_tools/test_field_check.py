@@ -35,7 +35,9 @@ def schematic(*symbols):
     )
 
 
-HEADER = '"Reference","Value","Footprint","MPN","Value_Confirmed"\n'
+HEADER = '"Reference","Value","Footprint","MPN","Value_Confirmed","MPN_Confirmed"\n'
+# A confirmed symbol: Value_Confirmed and MPN_Confirmed are the copies of Value and MPN.
+CONFIRMED = '"Q1","2N7002","","2N7002LT1G","2N7002","2N7002LT1G"\n'
 
 
 @pytest.fixture
@@ -72,8 +74,7 @@ async def check(project):
 
 class TestCheckSymbolFields:
     async def test_all_confirmed(self, project):
-        line = '"Q1","2N7002 (2N7002LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
-        project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
+        project["state"]["csv"] = {"": HEADER + CONFIRMED, "Lite": HEADER + CONFIRMED}
         out = await check(project)
         calls = project["state"]["calls"]
         # One BOM of each variant, with each field and also the DNP symbols (datasheet-lens
@@ -86,64 +87,84 @@ class TestCheckSymbolFields:
             in out
         )
         assert (
-            "✅ The fields Value, MPN and Value_Confirmed of all BOM lines (also the DNP "
-            "symbols, in each variant) follow the convention" in out
+            "✅ The fields Value, MPN, Value_Confirmed and MPN_Confirmed of all BOM lines (also "
+            "the DNP symbols, in each variant) follow the convention" in out
         )
 
     async def test_a_dnp_symbol_gets_the_check_of_a_fitted_symbol(self, project):
         # datasheet-lens checks the fields of a DNP symbol too (its commit 65168da): the
         # user can fit it at any time.
-        line = '"Q1","2N7002 (2N7002LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
-        project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
-        project["state"]["dnp"] = '"D1","BAT54 (BAT54C)","","BAT54A","BAT54 (BAT54A)"\n'
+        project["state"]["csv"] = {"": HEADER + CONFIRMED, "Lite": HEADER + CONFIRMED}
+        project["state"]["dnp"] = '"D1","BAT54","","BAT54C","BAT54","BAT54A"\n'
         out = await check(project)
         assert "⚠️ change in the CAD project: D1:" in out, out
         assert "✅" not in out
 
     async def test_messages_and_writes(self, project):
+        lines = (
+            '"Q1","2N7002","","2N7002LT1G, BSS138LT1G","2N7002","2N7002LT1G"\n'
+            + '"R5","10k (RC0603FR-0710KL)","","RC0603FR-0710KL","10k (RC0603FR-0710KL)",""\n'
+            + '"C5","220nF","","GRM1","100nF","GRM1"\n'
+            + '"R7","10k","","","10k","A1"\n'
+        )
         project["state"]["csv"] = {
-            "": HEADER
-            + '"Q1","2N7002 (2N7002LT1G, BSS138LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
-            + '"R5","10k","","RC0603FR-0710KL","10k"\n'
-            + '"R1","10k","","",""\n',
-            "Lite": HEADER
-            + '"Q1","2N7002 (2N7002LT1G, BSS138LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
-            + '"R5","10k","","RC0603FR-0710KL","10k"\n'
-            + '"R1","1k","","",""\n',
+            "": HEADER + lines + '"R1","10k","","","",""\n',
+            "Lite": HEADER + lines + '"R1","1k","","","",""\n',
         }
         out = await check(project)
         assert (
-            "- ⚠️ change in the CAD project: Q1: Value '2N7002 (2N7002LT1G, BSS138LT1G)', "
-            "Value_Confirmed '2N7002 (2N7002LT1G)': the confirmed MPN '2N7002LT1G' can be wrong "
-            'now. New: BSS138LT1G. Tell the user. When the user confirms the change: Write `{"'
-            'reference": "Q1", "fields": {"MPN": "2N7002LT1G, BSS138LT1G", "Value_Confirmed": '
-            '"2N7002 (2N7002LT1G, BSS138LT1G)"}}`. Else the Value must change back.'
+            "- ⚠️ change in the CAD project: Q1: MPN '2N7002LT1G, BSS138LT1G', MPN_Confirmed "
+            "'2N7002LT1G': the MPN is not the confirmed MPN. New: BSS138LT1G. Find the datasheet "
+            "of each new MPN now (this changes no project), and give it to the user with the "
+            'change. Tell the user. When the user confirms the change: Write `{"reference": '
+            '"Q1", "fields": {"MPN_Confirmed": "2N7002LT1G, BSS138LT1G", "Value_Confirmed": '
+            '"2N7002"}}`. Else the Value and the MPN must change back.'
         ) in out
         assert (
-            "- complete the fields: R5: the MPN is not in Value (the convention: the MPNs in "
-            'parentheses in Value). The parts do not change. Write `{"reference": "R5", '
-            '"fields": {"Value": "10k (RC0603FR-0710KL)", "MPN": "RC0603FR-0710KL", '
-            '"Value_Confirmed": "10k (RC0603FR-0710KL)"}}`.'
+            "- ⚠️ change in the CAD project: C5: Value '220nF', Value_Confirmed '100nF': the MPN "
+            "'GRM1' can be wrong now. Ask the user: a new part for the new value, or the same "
+            "part. A new part: select it with the user, write its MPN into the field MPN, then "
+            'run check_symbol_fields again. The same part: Write `{"reference": "C5", '
+            '"fields": {"MPN_Confirmed": "GRM1", "Value_Confirmed": "220nF"}}`. Else the Value '
+            "must change back."
+        ) in out
+        assert (
+            "- the old convention: R5: the MPNs are in the parentheses of Value. Move them into "
+            "the field MPN (Value holds the general value, MPN the MPNs, the hidden fields "
+            "Value_Confirmed and MPN_Confirmed the confirmed copies). A confirmed symbol stays "
+            "confirmed, and the parts do not change. Tell the user (a text in parentheses that is "
+            "a part of the general value stays), and when the user agrees: Write "
+            '`{"reference": "R5", "fields": {"Value": "10k", "MPN": "RC0603FR-0710KL", '
+            '"MPN_Confirmed": "RC0603FR-0710KL", "Value_Confirmed": "10k"}}`.'
+        ) in out
+        # A change with no new MPN gives no step for a datasheet.
+        assert (
+            "- ⚠️ change in the CAD project: R7: MPN '(empty)', MPN_Confirmed 'A1': the MPN is "
+            "not the confirmed MPN. Not in MPN now: A1. Tell the user."
         ) in out
         # The variant gives only its own messages: "no part selected" one time for R1, as
         # check_parts of datasheet-lens.
         assert "no part selected (a general value and no MPN): R1. A part" in out
-        assert out.count('"reference": "Q1"') == 1 and out.count('"reference": "R5"') == 1
+        for reference in ("Q1", "R5", "C5", "R7"):
+            assert out.count(f'"reference": "{reference}"') == 1
         assert "Give all changes in one call" in out
         assert "✅" not in out
 
     async def test_variant_write(self, project):
-        line = '"Q1","2N7002 (2N7002LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
         project["state"]["csv"] = {
-            "": HEADER + line,
-            "Lite": HEADER + '"Q1","BSS138 (BSS138LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n',
+            "": HEADER + CONFIRMED,
+            "Lite": HEADER + '"Q1","BSS138","","BSS138LT1G","2N7002","2N7002LT1G"\n',
         }
         out = await check(project)
         assert (
-            '"fields": {"MPN": "BSS138LT1G", "Value_Confirmed": "BSS138 (BSS138LT1G)"}, '
+            '"fields": {"MPN_Confirmed": "BSS138LT1G", "Value_Confirmed": "BSS138"}, '
             '"variant": "Lite"}' in out
         )
-        assert "change in the CAD project: Q1 (variant Lite):" in out
+        assert (
+            "change in the CAD project: Q1 (variant Lite): Value 'BSS138', Value_Confirmed "
+            "'2N7002'; MPN 'BSS138LT1G', MPN_Confirmed '2N7002LT1G': the value and the part are "
+            "not the confirmed ones. New: BSS138LT1G. Not in MPN now: 2N7002LT1G." in out
+        )
 
     async def test_units_with_different_mpns(self, project):
         """The units of one package with different MPNs: the error of the design, and a
@@ -152,7 +173,7 @@ class TestCheckSymbolFields:
         (directory / "board.kicad_sch").write_text(
             schematic(placed("U1", 1, "LM358DR"), placed("U1", 2, "LM358DT")), encoding="utf-8"
         )
-        line = '"U1","LM358","","LM358DR,LM358DT",""\n'
+        line = '"U1","LM358","","LM358DR,LM358DT","",""\n'
         project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
         out = await check(project)
         assert out.index("❌ ERROR IN THE DESIGN: the units of one package") < out.index(
@@ -165,7 +186,7 @@ class TestCheckSymbolFields:
             "wrong."
         ) in out
         assert out.count("U1: the units of one package") == 1  # not U1 (variant Lite)
-        assert "## Complete the fields" not in out and "Write `" not in out
+        assert "## Not confirmed" not in out and "Write `" not in out
 
     async def test_variant_repairs_the_units(self, project):
         """A variant that makes the MPNs of the units equal has no conflict."""
@@ -175,37 +196,39 @@ class TestCheckSymbolFields:
             encoding="utf-8",
         )
         project["state"]["csv"] = {
-            "": HEADER + '"U1","LM358","","LM358DR,LM358DT",""\n',
-            "Lite": HEADER + '"U1","LM358","","LM358DT",""\n',
+            "": HEADER + '"U1","LM358","","LM358DR,LM358DT","",""\n',
+            "Lite": HEADER + '"U1","LM358","","LM358DT","",""\n',
         }
         out = await check(project)
         assert "- ❌ conflict in the CAD project: U1: the units" in out
         assert (
-            "complete the fields: U1 (variant Lite): the MPN is not in Value (the convention: "
-            "the MPNs in parentheses in Value). The parts do not change. Write "
-            '`{"reference": "U1", "fields": {"Value": "LM358 (LM358DT)", "MPN": "LM358DT", '
-            '"Value_Confirmed": "LM358 (LM358DT)"}, "variant": "Lite"}`.'
+            "- not confirmed: U1 (variant Lite): Not confirmed: LM358DT. When the user agrees: "
+            'Write `{"reference": "U1", "fields": {"MPN_Confirmed": "LM358DT", "Value_Confirmed": '
+            '"LM358"}, "variant": "Lite"}`. The symbol has no field MPN_Confirmed, '
+            "Value_Confirmed: first write them into the symbol (a change with no variant)."
         ) in out
 
-    async def test_no_field_value_confirmed(self, project):
+    async def test_no_confirmed_fields(self, project):
         header = '"Reference","Value","MPN"\n'
         project["state"]["version"] = "9.0.9"
-        project["state"]["csv"] = {"": header + '"R1","10k (A)",""\n'}
+        project["state"]["csv"] = {"": header + '"R1","10k (A)",""\n"R2","10k","B"\n'}
         out = await check(project)
         assert len(project["state"]["calls"]) == 1  # KiCad 9: no variants
+        # The move writes the new fields: MPN_Confirmed, but no Value_Confirmed (the
+        # project has no such field: the user decides).
         assert (
-            '- not confirmed: R1: When the user agrees: Write `{"reference": "R1", "fields": {"MPN": "A"}}`.'
-            in out
+            'when the user agrees: Write `{"reference": "R1", "fields": {"Value": "10k", "MPN": '
+            '"A", "MPN_Confirmed": ""}}`.' in out
         )
-        assert "⚠️ no field Value_Confirmed: 1 symbols." in out
+        assert "⚠️ no field Value_Confirmed: 2 symbols." in out
+        assert "⚠️ no field MPN_Confirmed: 1 symbols. A change of a part (an other MPN)" in out
 
     async def test_no_check_mark_with_errors_or_warnings(self, project):
         """No ✅ when the units of a symbol that the BOM does not have (here the BOM of
         the test has no line of U1; in KiCad: Exclude from BOM) have different fields,
         or when kicad-cli gave a warning."""
         directory = project["directory"]
-        line = '"Q1","2N7002 (2N7002LT1G)","","2N7002LT1G","2N7002 (2N7002LT1G)"\n'
-        project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
+        project["state"]["csv"] = {"": HEADER + CONFIRMED, "Lite": HEADER + CONFIRMED}
         (directory / "board.kicad_sch").write_text(
             schematic(placed("U1", 1, "LM358DR"), placed("U1", 2, "LM358DT")), encoding="utf-8"
         )
@@ -234,12 +257,14 @@ class TestCheckSymbolFields:
         project["state"]["csv"] = {"": header + lines, "Lite": header + lines}
         out = await check(project)
         assert (
-            'not confirmed: U1: When the user agrees: Write `{"reference": "U1", "fields": '
-            '{"Manufacturer Part Number": "LM358DR"}}`.' in out
+            "the old convention: U1: the MPNs are in the parentheses of Value." in out
+            and 'Write `{"reference": "U1", "fields": {"Value": "LM358", "Manufacturer Part '
+            'Number": "LM358DR", "MPN_Confirmed": ""}}`.'
+            in out
         )
         assert (
-            'not confirmed: U2: When the user agrees: Write `{"reference": "U2", "fields": '
-            '{"<the field for the MPN: MPN or Manufacturer Part Number>": "LM358DT"}}`. The '
+            'Write `{"reference": "U2", "fields": {"Value": "LM358", "MPN_Confirmed": "", '
+            '"<the field for the MPN: MPN or Manufacturer Part Number>": "LM358DT"}}`. The '
             "field for the MPN is not known (MPN, Manufacturer Part Number): ask the user which "
             "one the symbol uses, and put its name in place of the name in angle brackets." in out
         )
@@ -258,8 +283,9 @@ class TestCheckSymbolFields:
         }
         out = await check(project)
         assert (
-            '"fields": {"MPN": "LM358DT"}, "variant": "Lite"}`. The symbol has no field MPN: '
-            "first write it into the symbol (a change with no variant)." in out
+            '"fields": {"Value": "LM358", "MPN": "LM358DT", "MPN_Confirmed": ""}, "variant": '
+            '"Lite"}`. The symbol has no field MPN, MPN_Confirmed: first write them into the '
+            "symbol (a change with no variant)." in out
         )
 
     async def test_more_own_fields(self, project):
@@ -269,13 +295,13 @@ class TestCheckSymbolFields:
         (directory / "board.kicad_sch").write_text(
             schematic(placed("U1", 1, ""), unit_b), encoding="utf-8"
         )
-        line = '"U1","LM358 (LM358DT)","","",""\n'
+        line = '"U1","LM358 (LM358DT)","","","",""\n'
         project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
         out = await check(project)
         assert '"<the field for the MPN: MPN or MP>": "LM358DT"' in out
 
     async def test_not_annotated(self, project):
-        line = '"U?","LM358 (LM358DT)","","",""\n'
+        line = '"U?","LM358 (LM358DT)","","","",""\n'
         project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
         out = await check(project)
         assert (
@@ -292,7 +318,7 @@ class TestCheckSymbolFields:
         (directory / "board.kicad_sch").write_text(
             schematic(placed("U1", 1, "A"), placed("U1", 1, "B")), encoding="utf-8"
         )
-        line = '"U1","LM358 (A)","","A,B",""\n'
+        line = '"U1","LM358","","A,B","",""\n'
         project["state"]["csv"] = {"": HEADER + line, "Lite": HEADER + line}
         out = await check(project)
         assert "U1: a duplicate reference (the same unit two times" in out

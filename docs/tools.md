@@ -125,8 +125,8 @@ index in the cache folder of the user is used until a library file changes.
 
 | Tool | What it does |
 |---|---|
-| `export_bom(schematic_path, output_path?, fields?, group_by?, exclude_dnp?, variant?, all_variants?)` | The BOM of the full project, as `kicad-cli sch export bom` makes it: the selected fields (default: all), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or a CSV file for each variant). It gives an error when the units of one package have a different Value, MPN or Value_Confirmed |
-| `check_symbol_fields(schematic_path)` | The check of the confirmed MPNs (Value, MPN, Value_Confirmed), for a user with no datasheet-lens. See [datasheet-lens.md](datasheet-lens.md) |
+| `export_bom(schematic_path, output_path?, fields?, group_by?, exclude_dnp?, variant?, all_variants?)` | The BOM of the full project, as `kicad-cli sch export bom` makes it: the selected fields (default: all), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or a CSV file for each variant). It gives an error when the units of one package have a different Value, MPN, Value_Confirmed or MPN_Confirmed |
+| `check_symbol_fields(schematic_path)` | The check of the confirmed MPNs (Value, MPN, Value_Confirmed, MPN_Confirmed), for a user with no datasheet-lens. See [datasheet-lens.md](datasheet-lens.md) |
 
 ## Edits
 

@@ -431,15 +431,18 @@ class TestReviewCases:
         # KiCad 8 does not hide a new field (DIALOG_SYMBOL_PROPERTIES::OnAddField of
         # 8.0.9). KiCad writes the effects also with the default size.
         path = write_project(tmp_path, symbol("U1", 1), version="20231120")
-        await write(
-            path, FieldChange(reference="U1", fields={"Manufacturer": "TI", "Value_Confirmed": "V"})
-        )
+        # The hidden fields of the confirmed MPNs are always hidden, also in an other
+        # spelling.
+        fields = {"Manufacturer": "TI", "Value_Confirmed": "V", "mpn confirmed": "W"}
+        await write(path, FieldChange(reference="U1", fields=fields))
         text = path.read_text(encoding="utf-8")
         assert (
             '\t\t(property "Manufacturer" "TI"\n\t\t\t(at 100 50 90)\n\t\t\t(effects\n\t\t\t\t(font\n'
             "\t\t\t\t\t(size 1.27 1.27)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n"
         ) in text
         assert '(property "Value_Confirmed" "V"\n\t\t\t(at 100 50 90)\n\t\t\t(effects' in text
+        assert '(property "mpn confirmed" "W"\n\t\t\t(at 100 50 90)\n\t\t\t(effects' in text
+        assert text.count("\t\t\t\t(hide yes)\n\t\t\t)\n\t\t)\n") == 2
         assert "\t\t\t\t(hide yes)\n\t\t\t)\n\t\t)\n\t\t(instances" in text
 
     async def test_file_versions_of_the_nightly_builds(self, tmp_path):

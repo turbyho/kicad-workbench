@@ -296,9 +296,10 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         pins, note = await asyncio.to_thread(_netlist_pins, Path(file_path), component.reference)
         if pins is None:
             # The pins of all units of the reference.
-            pins = merge_units([copy.deepcopy(u.component) for u in units])[0].pins
+            merged = merge_units([copy.deepcopy(u.component) for u in units])[0]
+            pins = merged.pins
             note = f"⚠️ The pins are the pins of the schematic file: {note}."
-            if alternates := unknown_alternate_note([component]):
+            if alternates := unknown_alternate_note([merged]):
                 note += f"\n\n{alternates}"
         if pins:
             lines.append("")

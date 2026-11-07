@@ -72,6 +72,15 @@ def _alphanumeric(text: str) -> tuple[str, int]:
     return text[:start], _LONG_MAX if len(digits) > 19 else min(int(digits), _LONG_MAX)
 
 
+def stacked_text(number: str) -> bool:
+    """Return True for a pin number in brackets, which a stacked notation reads.
+
+    KiCad 10.0 and branch master of 2026-11-04 read a number that does not
+    start with "[" and end with "]" as one number (ExpandStackedPinNotation).
+    """
+    return number.startswith("[") and number.endswith("]")
+
+
 def expand_stacked(number: str) -> tuple[list[str], bool]:
     """Expand a pin number as ExpandStackedPinNotation of KiCad 10.0 does.
 

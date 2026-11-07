@@ -518,3 +518,47 @@ def test_library_order(major, order):
     )
     definition = _definition_pins(parse(text), Path("a.kicad_sch"), 20260306)
     assert [definition[i]["file_number"] for i in _library_order(definition, major)] == order
+
+
+STACKED = (
+    '(symbol "Lib:S" (symbol "S_1_1"'
+    ' (pin bidirectional line (name "E") (number "[5-6]") (alternate "ALT" output line))'
+    ' (pin passive line (name "F") (number "[A1-A2,B3]"))'
+    ' (pin passive line (name "G") (number "[3-1]"))'
+    ' (pin passive line (name "H") (number "4"))))'
+)
+
+
+def stacked_pins(kicad: str | None) -> list[tuple]:
+    definition = _definition_pins(parse(STACKED), Path("a.kicad_sch"), 20260306)
+    symbol = parse('(symbol (lib_id "Lib:S") (unit 1) (pin "[5-6]" (alternate "ALT")))')
+    return [
+        (p["number"], p["name"], p["base_name"], p["electrical_type"])
+        for p in _component_pins(symbol, definition, kicad)
+    ]
+
+
+def test_stacked_pin_numbers_of_kicad_10():
+    # KiCad 10.0 gives the netlist one node for each number of a stacked pin number,
+    # with the name and the type of the pin (SCH_PIN::GetStackedPinNumbers). "[3-1]"
+    # is not a valid range: one number with the text. The pin of the (pin ...) item is
+    # first, then the new pins in the order of the library (_component_pins).
+    assert stacked_pins("10.0.7") == [
+        ("5", "ALT", "E", "output"),
+        ("6", "ALT", "E", "output"),
+        ("4", "H", "H", "passive"),
+        ("[3-1]", "G", "G", "passive"),
+        ("A1", "F", "F", "passive"),
+        ("A2", "F", "F", "passive"),
+        ("B3", "F", "F", "passive"),
+    ]
+    # A patch release that the server does not know is a KiCad 10.0 too.
+    assert [p[0] for p in stacked_pins("10.0.8")][:2] == ["5", "6"]
+
+
+@pytest.mark.parametrize("kicad", ["8.0.9", "9.0.9", "10.99.0", None])
+def test_stacked_pin_numbers_that_keep_the_text(kicad):
+    # KiCad 8 and 9 use the text as one number. A nightly build can have other rules
+    # (branch master: UnescapeStackedPinItem), and a version that is not known has no
+    # rules: the number keeps its text (the tools refuse these two: placed_instances).
+    assert [p[0] for p in stacked_pins(kicad)] == ["[5-6]", "4", "[3-1]", "[A1-A2,B3]"]

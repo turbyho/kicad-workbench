@@ -10,6 +10,7 @@ from typing import Any
 from ..errors import InputError
 from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import read_as_kicad
+from ..utils.pin_pad_mapping import expand_stacked
 from ..utils.sch_hierarchy import sheet_files
 from .kicad_fields import (
     FieldRules,
@@ -18,7 +19,13 @@ from .kicad_fields import (
     sheet_fields,
     symbol_fields,
 )
-from .kicad_versions import KicadFileError, file_text, kicad_release, version_triple
+from .kicad_versions import (
+    KICAD10,
+    KicadFileError,
+    file_text,
+    kicad_release,
+    version_triple,
+)
 from .lib_symbols import LibrarySymbol, pin_number, sub_symbols, symbol_name
 from .sch_geometry import body_style, node_point, symbol_unit
 from .sch_geometry import definition_key as _lib_key
@@ -440,12 +447,22 @@ def _component_pins(
     Returns:
         For each pin: "number", "name" (the alternate, else the name of the library
         pin), "base_name" (the name of the library pin), "electrical_type" (the type
-        of the alternate, else of the library pin) and "alternate". A pin whose
+        of the alternate, else of the library pin) and "alternate". KiCad 10.0 gives
+        a stacked pin number ("[1-3]") one pin for each of its numbers. A pin whose
         alternate is not known has the alternate None, and an empty name and type.
     """
     rules = _kicad_rules(kicad)
     orders = {} if orders is None else orders
     unit = symbol_unit(symbol) if unit is None else unit
+    # KiCad 10.0 gives the netlist one node for each number of a stacked pin number
+    # ("[1-3]": 1, 2 and 3; NETLIST_EXPORTER_XML::makeListOfNets,
+    # SCH_PIN::GetStackedPinNumbers, ExpandStackedPinNotation). KiCad 8 and 9 use
+    # the text as one number. Branch master adds escapes (UnescapeStackedPinItem),
+    # and a nightly build can have an older or a newer rule: for it, and for a
+    # version that is not known, a number in brackets keeps its text. No tool gives
+    # such pins: the tools that read pins get them through placed_instances, which
+    # refuses a nightly build and a version that is not known.
+    expand = kicad is not None and kicad_release(kicad) is KICAD10
     style = body_style(symbol)
     items = []  # (number of the file, alternate) of each (pin ...), in the file order.
     for item in symbol.children("pin"):
@@ -474,13 +491,16 @@ def _component_pins(
             kind = pin["alternates"].get(alt, _UNKNOWN_ALTERNATE_TYPE)
         else:
             name, kind = pin["name"], pin["electrical_type"]
-        pins.append({
-            "number": pin["number"],
-            "name": name,
-            "base_name": pin["name"],
-            "electrical_type": kind,
-            "alternate": alt,
-        })
+        for number in expand_stacked(pin["number"])[0] if expand else [pin["number"]]:
+            pins.append(
+                {
+                    "number": number,
+                    "name": name,
+                    "base_name": pin["name"],
+                    "electrical_type": kind,
+                    "alternate": alt,
+                }
+            )
     return pins
 
 

@@ -64,7 +64,13 @@ from ..utils.library_tables import (
     project_variables,
 )
 from ..utils.model_paths import ModelFile, resolve_model
-from ..utils.pin_pad_mapping import PinPadMapping, StackedPinError, map_pins, match_pads
+from ..utils.pin_pad_mapping import (
+    PinPadMapping,
+    StackedPinError,
+    map_pins,
+    match_pads,
+    stacked_text,
+)
 from ..utils.sch_hierarchy import (
     AmbiguousRootError,
     netlist_root,
@@ -994,15 +1000,6 @@ async def get_library_footprint(lib_id: str, project_path: str = "") -> str:
         return error_answer(e, "Error")
 
 
-def _stacked_text(number: str) -> bool:
-    """Return True for a pin number in brackets, which a stacked notation reads.
-
-    KiCad 10.0 and branch master of 2026-11-04 read a number that does not
-    start with "[" and end with "]" as one number (ExpandStackedPinNotation).
-    """
-    return number.startswith("[") and number.endswith("]")
-
-
 def _stacked_rules(kicad: str, unsure: list[str]) -> bool:
     """Return True when the installed KiCad expands the stacked pin numbers ("[1-4]").
 
@@ -1210,7 +1207,7 @@ async def _check_pin_pad_mapping(symbol_id: str, footprint_id: str, project_path
             f"❌ {symbol_id} is a power symbol. KiCad puts no power symbol into the netlist, "
             "thus it has no footprint."
         )
-    stacked = _stacked_rules(kicad, [pin.number for pin in info.pins if _stacked_text(pin.number)])
+    stacked = _stacked_rules(kicad, [pin.number for pin in info.pins if stacked_text(pin.number)])
     from_field = not footprint_id
     if from_field:
         footprint_id = dict(info.fields).get("Footprint", "")
@@ -1809,7 +1806,7 @@ async def _check_schematic(schematic_path: str, references: list[str] | None) ->
         return found
     checked = [c for c in found.components if not not_found_reason(c, found)]
     stacked = _stacked_rules(
-        kicad, [p.number for c in checked for p in c.pins if _stacked_text(p.number)]
+        kicad, [p.number for c in checked for p in c.pins if stacked_text(p.number)]
     )
     checks = []
     for component in found.components:

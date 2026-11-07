@@ -40,8 +40,11 @@ def _byte_offset(text: str, index: int) -> int:
     return len(text[:index].encode("utf-8", errors="surrogateescape"))
 
 
-def decode_as_kicad(data: bytes, path: Path) -> str:
+def decode_as_kicad(data: bytes, path: Path | str) -> str:
     """Return the text of the bytes of a KiCad file as KiCad reads it.
+
+    path: the name of the file for the message of an error (also a file name of the
+    loader of KiCad, which can hold "/./": see parsers/sheet_file_names.py).
 
     A string with a byte that is not valid UTF-8 becomes an empty string.
 

@@ -269,8 +269,8 @@ class TestReviewFindings:
         problems = load(root, tolerant=True).problems
         assert len(problems) == 2
         a_problem, b_problem = problems
-        assert a_problem.startswith(f"{tmp_path / 'a.kicad_sch'}: the parser"), a_problem
-        assert b_problem.startswith(f"{tmp_path / 'b.kicad_sch'}: the parser"), b_problem
+        assert a_problem.count(str(tmp_path / "a.kicad_sch")) == 1, a_problem
+        assert b_problem.count(str(tmp_path / "b.kicad_sch")) == 1, b_problem
         assert "a.kicad_sch" not in b_problem
 
     @needs_unix
@@ -335,3 +335,20 @@ def test_the_info_of_two_screens_with_different_sheets(tmp_path, monkeypatch):
     assert f"## Sheet symbols of the screen {base}/sub.kicad_sch\n- Up:" in result
     assert f"## Sheet symbols of the screen {base}/./sub.kicad_sch\n- Up:" in result
     assert result.count("(the file holds its own ancestor: an empty sheet in KiCad)") == 1
+    # The message names the screen with the file name of KiCad ("/./" stays).
+    assert f"The sheet 'Up' of {base}/./sub.kicad_sch holds its own ancestor" in result
+
+
+def test_a_parse_error_names_the_screen_with_the_file_name_of_kicad(tmp_path):
+    # The messages give the file name of KiCad: Path removes "/./".
+    base = tmp_path.as_posix()
+    root = schematic(tmp_path / "t.kicad_sch", ROOT, sheet(1, "B", f"{base}/./sub.kicad_sch"))
+    (tmp_path / "sub.kicad_sch").write_bytes(b"(kicad_sch (version 20260306) \xff)\n")
+    name = f"{base}/./sub.kicad_sch"
+    with pytest.raises(KicadFileError) as error:
+        load(root)
+    assert str(error.value).count(name) == 1, error.value
+    assert f"{base}/sub.kicad_sch" not in str(error.value)
+    problems = load(root, tolerant=True).problems
+    assert len(problems) == 1 and problems[0].count(name) == 1, problems
+    assert f"{base}/sub.kicad_sch" not in problems[0]

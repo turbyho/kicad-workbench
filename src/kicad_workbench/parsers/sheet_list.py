@@ -504,7 +504,7 @@ def _read_screen(name: KicadFileName, kicad: int | None) -> tuple[Screen, str | 
     """
     file = Path(name.text)
     data, stamp = read_stamped(file)
-    root = parse(decode_as_kicad(data, file))
+    root = parse(decode_as_kicad(data, name.text))
     rules = rules_for_file(root)
     screen = Screen(file, name, root, stamp, schematic_version(root), rules, definitions(root))
     screen.kiids = parsed_kiids(root, kicad if kicad is not None else rules.kicad)
@@ -538,13 +538,14 @@ _TOLERANT_CACHE: dict[tuple[str, int | None], _TolerantFile] = {}
 _TOLERANT_CACHE_SIZE = 1024
 
 
-def _tolerant_file(data: bytes, file: Path, kicad: int | None) -> _TolerantFile:
-    """Read the parts of a file for a tolerant load.
+def _tolerant_file(data: bytes, key: str, kicad: int | None) -> _TolerantFile:
+    """Read the parts of a file for a tolerant load. key: the file name of KiCad, for
+    the messages.
 
     Raises:
         KiCadEncodingError, SExprError: The parser of KiCad stops.
     """
-    root = parse(decode_as_kicad(data, file))
+    root = parse(decode_as_kicad(data, key))
     version = file_version(root) or 0
     try:
         all_rules = [rules_for_file(root)]
@@ -609,14 +610,15 @@ def _read_tolerant(name: KicadFileName, kicad: int | None) -> tuple[Screen, str 
     parts = _TOLERANT_CACHE.get((stamp, kicad))
     if parts is None:
         try:
-            parts = _tolerant_file(data, file, kicad)
+            parts = _tolerant_file(data, name.text, kicad)
         except (KiCadEncodingError, SExprError) as e:
-            # Not in the cache: the message names the file.
+            # Not in the cache: the message can name the file.
             reason = f"the parser of KiCad stops: {e}"
             screen = Screen(file, name, _EMPTY_ROOT, stamp, 0, FieldRules(10, 0), {})
             screen.partial, screen.stopped = reason, True
             screen.file_kiid = (RandomKiid(None), None)
-            return screen, None, [f"{file}: {reason}"]
+            problem = reason if name.text in str(e) else f"{name.text}: {reason}"
+            return screen, None, [problem]
         if len(_TOLERANT_CACHE) >= _TOLERANT_CACHE_SIZE:
             _TOLERANT_CACHE.clear()
         _TOLERANT_CACHE[(stamp, kicad)] = parts
@@ -626,8 +628,8 @@ def _read_tolerant(name: KicadFileName, kicad: int | None) -> tuple[Screen, str 
         SheetItem(None, index, sheet_kiid, uuid, sheet_name, raw, point, list(pages))
         for index, sheet_kiid, uuid, sheet_name, raw, point, pages in parts.sheets
     ]
-    problems = [f"{file}: {parts.note}"] if parts.note else []
-    problems += [f"{file}: {error}" for error in parts.errors]
+    problems = [f"{name.text}: {parts.note}"] if parts.note else []
+    problems += [f"{name.text}: {error}" for error in parts.errors]
     return screen, parts.root_page, problems
 
 
@@ -686,7 +688,7 @@ def _walk(
         # Two items of one sheet: the two rule sets of a tolerant load.
         if a.index != b.index and _sheet_order(a, b) == 0:
             walk.problems.append(
-                f"The sheets {a.name!r} and {b.name!r} of {screen.file} have the same "
+                f"The sheets {a.name!r} and {b.name!r} of {screen.key} have the same "
                 "position and a UUID that KiCad makes at random: their order in the "
                 "sheet list is not known."
             )
@@ -695,7 +697,7 @@ def _walk(
             continue  # A child with the file name of its parent.
         if isinstance(child.kiid, RandomKiid):
             walk.problems.append(
-                f"The sheet {child.name!r} of {screen.file} has no valid UUID: KiCad gives "
+                f"The sheet {child.name!r} of {screen.key} has no valid UUID: KiCad gives "
                 "it a new UUID at each load, thus no instance in the files matches its "
                 "sheet paths."
             )
@@ -753,15 +755,16 @@ def build_sheet_list(
 
     def load(name: KicadFileName) -> tuple[Screen | None, str]:
         """Return the screen of a file, or None and the reason of an empty sheet
-        (EMPTY_REASONS)."""
-        file = Path(name.text)
+        (EMPTY_REASONS). The messages give the file name of KiCad (name.text): Path
+        removes "/./"."""
+        key = name.text
         try:
             screen, _page = read(name)
         except FileNotFoundError:
             return None, "not there"  # KiCad shows an empty sheet.
         except OSError as e:
             # KiCad cannot open the file: nothing of it.
-            problems.append(f"{file} cannot be read: {e}. KiCad shows an empty sheet.")
+            problems.append(f"{key} cannot be read: {e}. KiCad shows an empty sheet.")
             return None, "cannot be read"
         except (KiCadEncodingError, SExprError, KicadParseError) as e:
             # A parse error: KiCad keeps the items of the file before the error, and
@@ -770,8 +773,8 @@ def build_sheet_list(
             # name, a sub-symbol name). The server does not model the part of a file
             # (user decision, 2026-11-07).
             reason = str(e).strip()
-            if str(file) not in reason:
-                reason = f"{file}: {reason}"
+            if key not in reason:
+                reason = f"{key}: {reason}"
             if not reason.endswith("."):
                 reason += "."
             raise KicadParseError(
@@ -780,8 +783,8 @@ def build_sheet_list(
                 "sheets. The server does not model this: repair the file."
             ) from e
         except KicadFileError as e:
-            raise with_file(e, file) from e
-        screens[name.text] = screen
+            raise with_file(e, key) from e
+        screens[key] = screen
         return screen, ""
 
     def load_children(screen: Screen, ancestors: list[str]) -> None:
@@ -797,14 +800,14 @@ def build_sheet_list(
                 child = sheet_file_name(expanded, screen.name)
             except SheetFileError as e:
                 if not tolerant:
-                    raise with_file(e, screen.file) from e
+                    raise with_file(e, screen.key) from e
                 item.empty = "working directory"
-                problems.append(f"{screen.file}: {e} KiCad shows an empty sheet or the file.")
+                problems.append(f"{screen.key}: {e} KiCad shows an empty sheet or the file.")
                 continue
             item.file = child.text
             if uses_home(expanded, WINDOWS):
                 problems.append(
-                    f"The sheet {item.name!r} of {screen.file} has the file {item.raw_file!r}: "
+                    f"The sheet {item.name!r} of {screen.key} has the file {item.raw_file!r}: "
                     "KiCad replaces its first directory with the home directory of the "
                     f"user of the KiCad process. The server uses its own: {child.text}. "
                     "When KiCad runs with an other home directory, it loads an other file."
@@ -812,7 +815,7 @@ def build_sheet_list(
             if child.text in ancestors:
                 item.empty = "ancestor"
                 problems.append(
-                    f"The sheet {item.name!r} of {screen.file} holds its own ancestor "
+                    f"The sheet {item.name!r} of {screen.key} holds its own ancestor "
                     f"{child.text}: KiCad shows it as empty."
                 )
                 continue
@@ -840,19 +843,19 @@ def build_sheet_list(
             screen, root_page = read(name)
         except FileNotFoundError as e:
             if not tolerant:
-                raise InputError(f"KiCad cannot load the top-level sheet {top.file}: {e}") from e
+                raise InputError(f"KiCad cannot load the top-level sheet {name.text}: {e}") from e
             top_screens.append(None)
             continue
         except OSError as e:
             if not tolerant:
-                raise InputError(f"KiCad cannot load the top-level sheet {top.file}: {e}") from e
-            problems.append(f"{top.file} cannot be read: {e}")
+                raise InputError(f"KiCad cannot load the top-level sheet {name.text}: {e}") from e
+            problems.append(f"{name.text} cannot be read: {e}")
             top_screens.append(None)
             continue
         except (KiCadEncodingError, SExprError, KicadParseError) as e:
-            raise InputError(f"KiCad cannot load the top-level sheet {top.file}: {e}") from e
+            raise InputError(f"KiCad cannot load the top-level sheet {name.text}: {e}") from e
         except KicadFileError as e:
-            raise with_file(e, Path(name.text)) from e
+            raise with_file(e, name.text) from e
         if screen.stopped:
             # A parse error of a top-level sheet: KiCad does not load the schematic
             # (loadHierarchy gives the error of the root to the caller).
@@ -877,7 +880,7 @@ def build_sheet_list(
             top_kiid, top_uuid = kiid(NIL_UUID), NIL_UUID
         elif top_uuid is None:
             problems.append(
-                f"{top.file} has no UUID: KiCad gives it a new UUID at each load, "
+                f"{top_screen.key} has no UUID: KiCad gives it a new UUID at each load, "
                 "thus no instance in the files matches its sheet paths."
             )
         top_name = () if len(tops) == 1 else (top.name,)

@@ -261,12 +261,53 @@ class TestTopLevelSheets:
             {"filename": "template.kicad_sch", "name": "T", "uuid": "c2"},
         ]
         pro = tmp_path / "board.kicad_pro"
-        pro.write_text(json.dumps({"schematic": {"top_level_sheets": entries}}), encoding="utf-8")
+        settings = {"meta": {"version": 3}, "schematic": {"top_level_sheets": entries}}
+        pro.write_text(json.dumps(settings), encoding="utf-8")
         assert top_level_sheets(pro) == [
-            TopLevelSheet(tmp_path / "board.kicad_sch", None, "Root"),
+            TopLevelSheet(tmp_path / "board.kicad_sch", NIL_UUID, "Root"),
             TopLevelSheet(tmp_path / "second.kicad_sch", "c1", "Second"),
             TopLevelSheet(tmp_path / "board.kicad_sch", "c2", "board"),
         ]
+        # No number meta.version: JSON_SETTINGS::LoadFromFile fails, PROJECT_FILE does
+        # not change the entries (measured with kicad-cli 10.0.7).
+        pro.write_text(json.dumps({"schematic": {"top_level_sheets": entries}}), encoding="utf-8")
+        assert top_level_sheets(pro)[2] == TopLevelSheet(tmp_path / "template.kicad_sch", "c2", "T")
+
+    @pytest.mark.parametrize(
+        "entry, sheet",
+        [
+            # The directory of filename goes (wxFileName with a path and a name).
+            (
+                {"filename": "sub/second.kicad_sch", "name": "S", "uuid": "c1"},
+                ("second", "c1", "S"),
+            ),
+            # No uuid: a random UUID (KIID()); no name: an empty name.
+            ({"filename": "second.kicad_sch"}, ("second", "", "")),
+            # Not an object: an entry with no fields, thus the schematic of the project.
+            ("x", ("board", "", "board")),
+        ],
+    )
+    def test_entries_as_kicad_reads_them(self, tmp_path, entry, sheet):
+        write(tmp_path / "board.kicad_sch")
+        write(tmp_path / "second.kicad_sch")
+        write(tmp_path / "sub" / "second.kicad_sch")
+        entries = [{"filename": "board.kicad_sch", "name": "Root", "uuid": "r"}, entry]
+        pro = tmp_path / "board.kicad_pro"
+        settings = {"meta": {"version": 3}, "schematic": {"top_level_sheets": entries}}
+        pro.write_text(json.dumps(settings), encoding="utf-8")
+        stem, uuid, name = sheet
+        assert top_level_sheets(pro)[1] == TopLevelSheet(tmp_path / f"{stem}.kicad_sch", uuid, name)
+
+    @pytest.mark.parametrize("bad", [{"uuid": 5}, {"name": None}, {"filename": []}])
+    def test_a_type_error_ignores_the_list(self, tmp_path, bad):
+        # PARAM_LIST::Load throws: KiCad has no top-level sheets of the list, thus the
+        # schematic of the project name (measured with kicad-cli 10.0.7).
+        write(tmp_path / "board.kicad_sch")
+        entries = [{"filename": "second.kicad_sch", "name": "S", "uuid": "c1"}, bad]
+        pro = tmp_path / "board.kicad_pro"
+        settings = {"meta": {"version": 3}, "schematic": {"top_level_sheets": entries}}
+        pro.write_text(json.dumps(settings), encoding="utf-8")
+        assert top_level_sheets(pro) == [TopLevelSheet(tmp_path / "board.kicad_sch", None, "board")]
 
     def test_project_of_an_other_top_level_sheet(self, tmp_path):
         # sheet_files gives the tree of one root. The project of a file below
@@ -288,14 +329,17 @@ class TestTopLevelSheets:
 
     @pytest.fixture
     def nested(self, tmp_path):
-        """A KiCad 10 project whose second top-level sheet is the root of an other project."""
+        """A KiCad 10 project whose second top-level sheet holds the sub-sheet of an other
+        project. (A top-level sheet in a directory is not possible: KiCad uses only the
+        last component of its filename.)"""
         project(tmp_path, "top")
         inner = tmp_path / "inner"
         root = project(inner, "board", "sub.kicad_sch")
         sub = write(inner / "sub.kicad_sch")
+        write(tmp_path / "second.kicad_sch", sch("inner/sub.kicad_sch"))
         entries = [
             {"filename": "top.kicad_sch", "name": "Top", "uuid": "t"},
-            {"filename": "inner/board.kicad_sch", "name": "Board", "uuid": "b"},
+            {"filename": "second.kicad_sch", "name": "Second", "uuid": "b"},
         ]
         (tmp_path / "top.kicad_pro").write_text(
             json.dumps({"schematic": {"top_level_sheets": entries}}), encoding="utf-8"

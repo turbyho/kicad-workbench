@@ -71,6 +71,7 @@ from ..utils.kicad_project import (
     PRO_SUFFIX,
     SCH_SUFFIX,
     TopLevelSheet,
+    is_declared,
     text_variables,
     top_level_sheets,
 )
@@ -982,12 +983,7 @@ def _tops(project_file: Path, version: str, view: str, problems: list[str]) -> l
     if view in ("erc", "update", "gui"):
         load_all = kicad >= 10
     else:
-        load_all = (
-            numbers >= (10, 0, 7)
-            and len(declared) > 1
-            and root.is_file()
-            and any(top.file.resolve() == root.resolve() for top in declared)
-        )
+        load_all = numbers >= (10, 0, 7) and len(declared) > 1 and is_declared(root, declared)
     if not load_all:
         return [TopLevelSheet(root, None, root.stem)]
     tops = []

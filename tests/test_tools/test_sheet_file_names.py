@@ -20,7 +20,6 @@ from kicad_workbench.parsers.sexpr import parse
 from kicad_workbench.parsers.sheet_file_names import (
     SheetFileError,
     parse_file_name,
-    root_file_name,
     sheet_file_name,
     user_home,
 )
@@ -110,9 +109,6 @@ class TestWindowsNames:
     )
     def test_names(self, name, text):
         assert sheet_file_name(name, WINDOWS_PARENT).text == text
-
-    def test_root(self):
-        assert root_file_name("C:\\w\\p\\t.kicad_sch", True) == WINDOWS_PARENT
 
 
 @pytest.mark.parametrize("rules", [FieldRules(9, 20250114), FieldRules(10, 20260306)])
@@ -352,3 +348,98 @@ def test_a_parse_error_names_the_screen_with_the_file_name_of_kicad(tmp_path):
     problems = load(root, tolerant=True).problems
     assert len(problems) == 1 and problems[0].count(name) == 1, problems
     assert f"{base}/sub.kicad_sch" not in problems[0]
+
+
+class TestTopLevelSheetFiles:
+    """The top-level sheets of KiCad 10 (measured with kicad-cli 10.0.7:
+    spike/kicad-versions/top_level_sheets_check.py)."""
+
+    def project(self, tmp_path, entries):
+        import json
+
+        schematic(tmp_path / "t.kicad_sch", ROOT)
+        schematic(tmp_path / "s.kicad_sch", SUB)
+        (tmp_path / "t.kicad_pro").write_text(
+            json.dumps(
+                {
+                    "meta": {"version": 3},
+                    "schematic": {"top_level_sheets": entries},
+                    "text_variables": {"N": "s"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return tmp_path / "t.kicad_pro"
+
+    def test_an_entry_with_no_uuid_has_a_random_uuid(self, tmp_path):
+        pro = self.project(
+            tmp_path,
+            [{"filename": "t.kicad_sch", "name": "T", "uuid": ROOT}, {"filename": "s.kicad_sch"}],
+        )
+        paths, problems = sheet_paths(pro)
+        assert [(p.shown, p.uuids is None) for p in paths] == [("/T/", False), ("//", True)]
+        assert problems == [
+            "The entry '' (s.kicad_sch) of top_level_sheets has no valid UUID: KiCad gives it a "
+            "new UUID at each load, thus no instance in the files matches its sheet paths."
+        ]
+
+    def test_the_nil_uuid_is_the_uuid_of_the_file(self, tmp_path):
+        nil = "00000000-0000-0000-0000-000000000000"
+        pro = self.project(
+            tmp_path,
+            [
+                {"filename": "t.kicad_sch", "name": "T", "uuid": ROOT},
+                {"filename": "s.kicad_sch", "name": "S", "uuid": nil},
+            ],
+        )
+        paths, problems = sheet_paths(pro)
+        assert [p.uuids for p in paths] == [(ROOT,), (SUB,)] and problems == []
+
+    def test_a_file_name_with_a_text_variable(self, tmp_path):
+        # KiCad checks the file "${N}.kicad_sch", and loadHierarchy loads s.kicad_sch.
+        pro = self.project(
+            tmp_path,
+            [
+                {"filename": "t.kicad_sch", "name": "T", "uuid": ROOT},
+                {"filename": "${N}.kicad_sch", "name": "S", "uuid": SUB},
+            ],
+        )
+        schematic(tmp_path / "${N}.kicad_sch", "dddddddd-0000-0000-0000-000000000000")
+        paths, _problems = sheet_paths(pro)
+        assert [p.file.name for p in paths] == ["t.kicad_sch", "s.kicad_sch"]
+
+    def test_one_loaded_top_level_sheet_has_no_name_in_the_paths(self, tmp_path):
+        # PathHumanReadable: the name of the top-level sheet only when KiCad loaded more
+        # than one (GetTopLevelSheets). No meta.version: gone.kicad_sch stays.
+        import json
+
+        pro = self.project(
+            tmp_path,
+            [
+                {"filename": "t.kicad_sch", "name": "T", "uuid": ROOT},
+                {"filename": "gone.kicad_sch", "name": "G", "uuid": SUB},
+            ],
+        )
+        settings = json.loads(pro.read_text(encoding="utf-8"))
+        del settings["meta"]
+        pro.write_text(json.dumps(settings), encoding="utf-8")
+        paths, _problems = sheet_paths(pro)
+        assert [p.shown for p in paths] == ["/"]
+
+    def test_a_type_error_and_comments_as_kicad_reads_them(self, tmp_path):
+        # nlohmann::json reads a byte order mark and comments; a boolean meta.version is
+        # a number for Get<int> (measured with kicad-cli 10.0.7).
+        from kicad_workbench.utils.kicad_project import top_level_sheets
+
+        pro = self.project(tmp_path, [])
+        text = (
+            '\ufeff// a comment\n{"meta": {"version": true}, /* c */ "schematic": '
+            '{"top_level_sheets": [{"filename": "gone.kicad_sch", "name": "G", "uuid": "'
+            + SUB
+            + '"}, {"filename": "s.kicad_sch", "name": "S", "uuid": "'
+            + SUB
+            + '"}]}}'
+        )
+        pro.write_text(text, encoding="utf-8")
+        files = [top.file.name for top in top_level_sheets(pro)]
+        assert files == ["t.kicad_sch", "s.kicad_sch"]  # gone.kicad_sch: the template change

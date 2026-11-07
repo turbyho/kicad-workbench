@@ -32,9 +32,6 @@ from ..utils.kicad_cli import (
     run_kicad_cli,
     run_kicad_cli_sync,
 )
-from ..utils.kicad_project import (
-    top_level_sheets,
-)
 from ..utils.sch_hierarchy import (
     AmbiguousRootError,
     schematic_project_file,
@@ -200,18 +197,18 @@ def _file_svg_names(
     problems."""
     project = schematic_project_file(sch)
     paths, problems = cli_sheet_paths(root, kicad, project)
-    # With more than one top-level sheet (kicad-cli 10.0.7 and later), the first name
-    # of a path is the name of its top-level sheet: the file of that sheet gives the
-    # first part of the file name.
+    # With more than one top-level sheet that kicad-cli loads (10.0.7 and later), the
+    # first name of a path is the name of its top-level sheet: the file of the screen of
+    # that sheet gives the first part of the file name. Two top-level sheets can have
+    # one name: the index of the top-level sheet finds its file.
     # cli_root gives an error for more than one top-level sheet with an older kicad-cli.
-    tops = top_level_sheets(project)
-    several = len(tops) > 1
-    files = {top.name: top.file for top in tops}
+    files = {p.top: p.file for p in paths if p.file is not None and len(p.names) <= 1}
+    several = len({p.top for p in paths}) > 1
     target = sch.resolve()
     names, all_names = [], []
     for path in paths:
         if several and path.names:
-            name = svg_name(files.get(path.names[0], root), path.names[1:])
+            name = svg_name(files.get(path.top, root), path.names[1:])
         else:
             name = svg_name(root, path.names)
         all_names.append(name)

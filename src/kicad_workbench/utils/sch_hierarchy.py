@@ -28,6 +28,8 @@ from .kicad_project import (
     PRO_SUFFIX,
     SCH_SUFFIX,
     TopLevelSheet,
+    is_declared,
+    same_file,
     text_variables,
     top_level_sheets,
 )
@@ -56,6 +58,7 @@ class SheetPath:
     # a file or a sheet on the path a new UUID at each load.
     uuids: tuple[str, ...] | None
     names: tuple[str, ...]  # The name of each sheet below the top level.
+    top: int = 0  # the index of its top-level sheet (top_level_sheets)
 
     @property
     def path(self) -> str:
@@ -107,7 +110,7 @@ def _places(sheet_list: SheetList) -> list[SheetPath]:
         texts = tuple(kiid_text(kiid) for kiid in path.kiids)
         uuids = None if None in texts else tuple(text for text in texts if text is not None)
         file = path.screen.file if path.screen is not None else None
-        places.append(SheetPath(file, uuids, path.names))
+        places.append(SheetPath(file, uuids, path.names, path.top))
     return places
 
 
@@ -140,7 +143,7 @@ def netlist_root(project: Path, kicad: str | None, output: str = "netlist") -> t
     tops = top_level_sheets(project)
     named = Path(os.path.abspath(project.with_suffix(".kicad_sch")))
     if len(tops) == 1:
-        if project.is_file() and tops[0].file.resolve() != named.resolve():
+        if project.is_file() and not same_file(tops[0].file, named):
             raise InputError(
                 f"The top-level sheet of the project {project} is {tops[0].file.name}. "
                 "kicad-cli uses the project file of the name of the schematic, thus it does "
@@ -155,7 +158,7 @@ def netlist_root(project: Path, kicad: str | None, output: str = "netlist") -> t
             f"writes the {output} of one top-level sheet only. KiCad 10.0.7 and later "
             f"write the {output} of all top-level sheets."
         )
-    if not named.is_file() or all(top.file.resolve() != named.resolve() for top in tops):
+    if not is_declared(named, tops):
         raise InputError(
             f"The project {project} has {len(tops)} top-level sheets, but {named.name} is "
             f"not one of them. kicad-cli writes the {output} of all top-level sheets only for "

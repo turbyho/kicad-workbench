@@ -54,7 +54,12 @@ from pathlib import Path
 
 from ..errors import InputError, KicadFileError, KicadParseError, with_file
 from ..utils.file_stamp import FileStamp, read_stamped
-from ..utils.kicad_project import NIL_UUID, TopLevelSheet, expand_text_variables
+from ..utils.kicad_project import (
+    NIL_UUID,
+    TopLevelSheet,
+    expand_text_variables,
+    top_level_file,
+)
 from ..utils.kicad_text import KiCadEncodingError, decode_as_kicad
 from .c_numbers import to_int, to_long
 from .kicad_fields import FieldRules, rules_for_file, sheet_fields
@@ -65,7 +70,6 @@ from .sheet_file_names import (
     WINDOWS,
     KicadFileName,
     SheetFileError,
-    root_file_name,
     sheet_file_name,
     uses_home,
 )
@@ -832,8 +836,34 @@ def build_sheet_list(
                 load_children(item.screen, [*ancestors, child.text])
 
     top_screens: list[Screen | None] = []
+    # The file name of the root sheet of each top-level sheet (SCH_SHEET::GetFileName):
+    # relative to the project, in the notation of Unix (SCH_SHEET::SetFileName).
+    relatives = [
+        os.path.relpath(os.path.normpath(top.file), project_dir).replace("\\", "/") for top in tops
+    ]
     for index, top in enumerate(tops):
-        name = root_file_name(str(top.file), WINDOWS)
+        if not top.file.is_file():
+            # KiCad loads only a top-level sheet whose file is there (FileExists of
+            # OpenProjectFiles and LoadSchematic, before the expansion of its name).
+            if not tolerant:
+                raise InputError(f"KiCad cannot load the top-level sheet {top.file}: no such file.")
+            top_screens.append(None)
+            continue
+        try:
+            name = top_level_file(top.file, project_dir, variables)
+        except SheetFileError as e:
+            if not tolerant:
+                raise with_file(e, top.file) from e
+            problems.append(f"{top.file}: {e}")
+            top_screens.append(None)
+            continue
+        if uses_home(expand_text_variables(relatives[index], variables), WINDOWS):
+            problems.append(
+                f"The top-level sheet {top.file}: KiCad replaces the first directory of its "
+                "name with the home directory of the user of the KiCad process. The server "
+                f"uses its own: {name.text}. When KiCad runs with an other home directory, it "
+                "loads an other file."
+            )
         if name.text in screens:
             # The loader finds the screen of an other top-level sheet, and does not
             # read the file again (loadHierarchy, m_loadedRootSheets).
@@ -868,26 +898,35 @@ def build_sheet_list(
         load_children(screen, [name.text])
 
     paths: list[SheetPath] = []
+    # SCH_SHEET_PATH::PathHumanReadable puts the name of the top-level sheet into the
+    # path when KiCad loaded more than one top-level sheet (GetTopLevelSheets).
+    several = sum(screen is not None for screen in top_screens) > 1
     for index, top in enumerate(tops):
         top_screen = top_screens[index]
         if top_screen is None:
             continue
-        if top.uuid is not None:
-            top_kiid, top_uuid = kiid(top.uuid), top.uuid
-        else:
+        # The UUID of the entry of the project, unless it is the nil UUID: then the
+        # UUID of the file (OpenProjectFiles, LoadSchematic).
+        entry_kiid = kiid(top.uuid) if top.uuid is not None else None
+        if entry_kiid is None or entry_kiid == kiid(NIL_UUID):
             top_kiid, top_uuid = file_kiid(top_screen)
+            where = f"{top_screen.key} has no UUID"
+        else:
+            top_kiid = entry_kiid
+            # KIID::AsString: the UUID as KiCad writes it in the instances.
+            top_uuid = kiid_text(entry_kiid)
+            where = (
+                f"The entry {top.name!r} ({top.file.name}) of top_level_sheets has no valid UUID"
+            )
         if top_uuid is None and nil_top_uuid:
             top_kiid, top_uuid = kiid(NIL_UUID), NIL_UUID
         elif top_uuid is None:
             problems.append(
-                f"{top_screen.key} has no UUID: KiCad gives it a new UUID at each load, "
-                "thus no instance in the files matches its sheet paths."
+                f"{where}: KiCad gives it a new UUID at each load, thus no instance in "
+                "the files matches its sheet paths."
             )
-        top_name = () if len(tops) == 1 else (top.name,)
-
-        # The loader gives a top-level sheet its file name relative to the project, in
-        # the notation of Unix (SCH_SHEET::SetFileName).
-        relative = os.path.relpath(os.path.normpath(top.file), project_dir).replace("\\", "/")
+        top_name = (top.name,) if several else ()
+        relative = relatives[index]
         _walk(
             _Walk(paths, problems, index),
             top_screen,

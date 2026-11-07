@@ -197,13 +197,3 @@ def sheet_file_name(name: str, parent: KicadFileName) -> KicadFileName:
         dirs = dirs[1:]
     all_dirs = _without_dots((*base.dirs, *dirs), True)
     return KicadFileName(windows, volume, True, all_dirs, own.last)
-
-
-def root_file_name(path: str, windows: bool) -> KicadFileName:
-    """Return the file name of a top-level sheet: KiCad makes it relative to the
-    project and then absolute again, thus "." and ".." go (``MakeRelativeTo``).
-
-    Args:
-        path: The absolute path of the file.
-    """
-    return parse_file_name(os.path.normpath(path), windows)

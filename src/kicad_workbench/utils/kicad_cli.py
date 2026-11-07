@@ -33,6 +33,7 @@ from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_versions import version_numbers, version_triple
 from .kicad_project import (
     PRO_SUFFIX,
+    is_declared,
     top_level_sheets,
 )
 from .kicad_text import read_kicad_json
@@ -447,7 +448,8 @@ def cli_sheet_paths(
     schematic (cli_root), and the problems.
 
     kicad-cli 10.0.7 and later load all top-level sheets of the project when the
-    schematic is one of them (EESCHEMA_HELPERS::LoadSchematic): the paths of
+    project has more than one and the schematic is one of them
+    (EESCHEMA_HELPERS::LoadSchematic, findDeclaredTopLevelSheet): the paths of
     sheet_paths, with the name of the top-level sheet in each path. Else kicad-cli
     loads the schematic as the one top-level sheet: the paths of root_sheet_paths.
 
@@ -462,6 +464,7 @@ def cli_sheet_paths(
     numbers = version_triple(kicad) if kicad else None
     # The KIIDs of the parser of that kicad-cli (sheet_list.parsed_kiids).
     major = numbers[0] if numbers is not None else None
-    if len(top_level_sheets(project)) > 1 and numbers is not None and numbers >= (10, 0, 7):
+    tops = top_level_sheets(project)
+    if len(tops) > 1 and is_declared(root, tops) and numbers is not None and numbers >= (10, 0, 7):
         return sheet_paths(project, major)
     return root_sheet_paths(root, major)

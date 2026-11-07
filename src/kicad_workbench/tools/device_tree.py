@@ -13,11 +13,11 @@ from pathlib import Path
 from jinja2 import Template
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
 from ..utils.file_save import AfterSaveError
 from ..utils.kicad_text import write_kicad_text
 from ..utils.tool_errors import error_answer
+from .schematic import components_of_project
 
 # Device tree compatible strings database
 DEVICE_TREE_BINDINGS = {
@@ -370,7 +370,8 @@ async def generate_device_tree(
     source file compatible with the specified SOC family.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
         target_soc: Target SOC family (stm32f4, esp32, nrf52)
         output_path: Optional output file path
 
@@ -393,10 +394,9 @@ Please specify a supported SOC family."""
 
         from .netlist import current_netlist
 
-        # The netlist that kicad-cli writes now, then the schematic with the KiCad of the netlist (the pins of
-        # the components: SchematicParser._component_pins).
+        # The netlist that kicad-cli writes now, then the components of the project with
+        # the KiCad of the netlist (components_of_project: the pins of each unit).
         netlist_parser = await current_netlist(sch_path)
-        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract device tree data
         dt_data = {
@@ -408,7 +408,7 @@ Please specify a supported SOC family."""
         }
 
         # Analyze components and extract peripheral configuration
-        components = list(schematic_parser.get_components(recursive=True))
+        components = await components_of_project(sch_path, netlist_parser.kicad_version)
 
         for component in components:
             comp_ref = component.reference
@@ -590,7 +590,8 @@ async def extract_gpio_config(
     """Extract GPIO pin configurations from schematic.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
         soc_family: Optional SOC family filter
 
     Returns:
@@ -606,13 +607,12 @@ async def extract_gpio_config(
         from .pin_analysis import STM32_PIN
 
         netlist_parser = await current_netlist(sch_path)
-        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # pin number -> name from schematic lib_symbols
         # The name of the library pin (base_name): the GPIO port comes from it, not from
         # an alternate function (SchematicParser._component_pins).
         pin_name_of: dict[tuple[str, str], str] = {}
-        for c in schematic_parser.get_components(recursive=True):
+        for c in await components_of_project(sch_path, netlist_parser.kicad_version):
             for p in c.pins:
                 pin_name_of[(c.reference, str(p.get("number", "")))] = p.get(
                     "base_name", p.get("name", "")
@@ -726,7 +726,8 @@ async def extract_i2c_devices(
     """Extract I2C bus and device configurations.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
 
     Returns:
         I2C device configuration report
@@ -740,12 +741,11 @@ async def extract_i2c_devices(
         from .netlist import current_netlist
 
         netlist_parser = await current_netlist(sch_path)
-        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract I2C devices
         i2c_devices = []
 
-        components = list(schematic_parser.get_components(recursive=True))
+        components = await components_of_project(sch_path, netlist_parser.kicad_version)
 
         for component in components:
             comp_ref = component.reference
@@ -830,7 +830,8 @@ async def extract_spi_devices(
     """Extract SPI bus and device configurations.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
 
     Returns:
         SPI device configuration report
@@ -844,12 +845,11 @@ async def extract_spi_devices(
         from .netlist import current_netlist
 
         netlist_parser = await current_netlist(sch_path)
-        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Extract SPI devices
         spi_devices = []
 
-        components = list(schematic_parser.get_components(recursive=True))
+        components = await components_of_project(sch_path, netlist_parser.kicad_version)
 
         for component in components:
             comp_ref = component.reference
@@ -932,7 +932,8 @@ async def extract_power_domains(
     """Extract power domain and regulator configurations.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
 
     Returns:
         Power domain configuration report
@@ -942,13 +943,10 @@ async def extract_power_domains(
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # Parse schematic
-        schematic_parser = SchematicParser(str(sch_path))
-
         # Extract power components
         power_components = []
 
-        components = list(schematic_parser.get_components(recursive=True))
+        components = await components_of_project(sch_path, None)
 
         for component in components:
             comp_ref = component.reference
@@ -1037,7 +1035,8 @@ async def validate_pin_configuration(
     device tree generation and reports any conflicts or issues.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
 
     Returns:
         Validation report with conflicts and recommendations
@@ -1066,8 +1065,7 @@ Pin conflicts prevent reliable device tree generation. Please
 resolve all conflicts before attempting device tree generation."""
 
         # Check for MCU components
-        schematic_parser = SchematicParser(str(sch_path))
-        components = list(schematic_parser.get_components(recursive=True))
+        components = await components_of_project(sch_path, None)
 
         mcu_found = False
         for component in components:

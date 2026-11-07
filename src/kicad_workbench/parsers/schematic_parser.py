@@ -115,7 +115,7 @@ class SchematicPin:
         )
 
 
-def _merge_duplicate_references(
+def merge_units(
     components: list[SchematicComponent],
 ) -> list[SchematicComponent]:
     """Merge multi-unit symbol instances that share a reference.
@@ -128,7 +128,10 @@ def _merge_duplicate_references(
     """
     merged: dict[str, SchematicComponent] = {}
     for comp in components:
-        key = comp.reference or f"__unannotated_{len(merged)}"
+        # A reference with no number ("R?", SCH_REFERENCE::IsUnannotated) is the
+        # reference of each symbol that is not annotated: no units of one package.
+        unannotated = not comp.reference or comp.reference.endswith("?")
+        key = f"__unannotated_{len(merged)}" if unannotated else comp.reference
         existing = merged.get(key)
         if existing is None:
             merged[key] = comp
@@ -394,6 +397,7 @@ def _component_pins(
     definition: list[dict[str, Any]],
     kicad: str | None,
     orders: dict[int, list[int]] | None = None,
+    unit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return the pins that the netlist gives a placed symbol, as KiCad makes them.
 
@@ -430,6 +434,8 @@ def _component_pins(
             not known: an alternate that differs between the rules of KiCad 8, 9
             and 10 is then not known, and the order is the order of KiCad 10.
         orders: A cache of _library_order for this definition, by major version.
+        unit: The unit of the sheet path (SCH_SYMBOL::GetUnitSelection); None: the
+            (unit N) of the symbol.
 
     Returns:
         For each pin: "number", "name" (the alternate, else the name of the library
@@ -439,7 +445,7 @@ def _component_pins(
     """
     rules = _kicad_rules(kicad)
     orders = {} if orders is None else orders
-    unit = symbol_unit(symbol)
+    unit = symbol_unit(symbol) if unit is None else unit
     style = body_style(symbol)
     items = []  # (number of the file, alternate) of each (pin ...), in the file order.
     for item in symbol.children("pin"):
@@ -572,6 +578,7 @@ class SchematicParser:
         self.kicad = kicad
         # The order of the library pins of each definition, by major version.
         self._lib_orders: dict[str, dict[int, list[int]]] = {}
+        self._symbols_by_start: dict[int, Node] | None = None
 
     def _root(self) -> Node:
         """Return the parsed tree of the file.
@@ -709,50 +716,57 @@ class SchematicParser:
         """
         components = []
         for symbol in self._top("symbol"):
-            lib_id_node = symbol.first("lib_id")
-            if lib_id_node is None or _lib_key(symbol) in self._power_keys:
-                continue
-            lib_id = lib_id_node.value(0, "")
-            fields = self._symbol_fields(symbol)
-            reference = fields.get("Reference", "")
-            if not reference or reference.startswith("#"):
-                continue
-            value = fields.get("Value", "")
-            footprint = fields.get("Footprint") or None
-            x, y = _position(symbol)
-
-            # The pins of the netlist: the library pins of the unit (UpdatePins), or the
-            # (pin ...) items of a symbol with no definition.
-            key = _lib_key(symbol)
-            if key in self._lib_pins:
-                orders = self._lib_orders.setdefault(key, {})
-                pins = _component_pins(symbol, self._lib_pins[key], self.kicad, orders)
-            else:
-                pins = _pins_with_no_definition(symbol, self.kicad)
-
-            flags = dict(KICAD_FLAG_DEFAULTS)
-            for flag in KICAD_SYMBOL_FLAGS:
-                item = symbol.first(flag)
-                if item is not None and item.value(0) in ("yes", "no"):
-                    flags[flag] = item.value(0) == "yes"
-
-            properties = [
-                {"key": "Reference", "value": reference},
-                {"key": "Value", "value": value},
-            ]
-            if footprint:
-                properties.append({"key": "Footprint", "value": footprint})
-
-            components.append({
-                "lib_id": lib_id,
-                "reference": reference,
-                "value": value,
-                "properties": properties,
-                "at": {"x": x, "y": y},
-                "pins": pins,
-                "flags": flags,
-            })
+            data = self._component_dict(symbol)
+            if data is not None and data["reference"] and not data["reference"].startswith("#"):
+                components.append(data)
         return components
+
+    def _component_dict(self, symbol: Node, unit: int | None = None) -> dict[str, Any] | None:
+        """Return the component of a placed symbol with the fields of the file, or None
+        for a symbol that is no component (no lib_id, a power symbol). unit: the unit
+        of the pins (None: the (unit N) of the symbol)."""
+        lib_id_node = symbol.first("lib_id")
+        if lib_id_node is None or _lib_key(symbol) in self._power_keys:
+            return None
+        lib_id = lib_id_node.value(0, "")
+        fields = self._symbol_fields(symbol)
+        reference = fields.get("Reference", "")
+        value = fields.get("Value", "")
+        footprint = fields.get("Footprint") or None
+        x, y = _position(symbol)
+
+        # The pins of the netlist: the library pins of the unit (UpdatePins), or the
+        # (pin ...) items of a symbol with no definition.
+        key = _lib_key(symbol)
+        if key in self._lib_pins:
+            orders = self._lib_orders.setdefault(key, {})
+            pins = _component_pins(symbol, self._lib_pins[key], self.kicad, orders, unit)
+        else:
+            pins = _pins_with_no_definition(symbol, self.kicad)
+
+        flags = dict(KICAD_FLAG_DEFAULTS)
+        for flag in KICAD_SYMBOL_FLAGS:
+            item = symbol.first(flag)
+            if item is not None and item.value(0) in ("yes", "no"):
+                flags[flag] = item.value(0) == "yes"
+
+        properties = [
+            {"key": "Reference", "value": reference},
+            {"key": "Value", "value": value},
+        ]
+        if footprint:
+            properties.append({"key": "Footprint", "value": footprint})
+
+        return {
+            "start": symbol.start,
+            "lib_id": lib_id,
+            "reference": reference,
+            "value": value,
+            "properties": properties,
+            "at": {"x": x, "y": y},
+            "pins": pins,
+            "flags": flags,
+        }
 
     def _labels(self, *kinds: str) -> list[dict[str, Any]]:
         """Return the labels of the kinds, in the order of the file.
@@ -850,8 +864,42 @@ class SchematicParser:
                 components.extend(
                     SchematicComponent.from_dict(c) for c in sub_data["components"]
                 )
-            components = _merge_duplicate_references(components)
+            components = merge_units(components)
         return components
+
+    def placed_component(
+        self, start: int, reference: str, unit: int, value: str
+    ) -> SchematicComponent | None:
+        """Return the component of the placed symbol at the offset start of the file,
+        with the reference, the unit and the Value of one sheet path, as KiCad has
+        them after the load (annotation.placed_symbols_after_load), and the pins of
+        that unit. None: the symbol is no component (a power symbol).
+
+        The Reference field and the (unit N) of the symbol are only the values of
+        one sheet path: a sheet that the hierarchy uses more than one time gives
+        each path its own reference and unit (SCH_SYMBOL::GetRef,
+        GetUnitSelection).
+        """
+        self._parse_file()
+        if self._symbols_by_start is None:
+            self._symbols_by_start = {symbol.start: symbol for symbol in self._top("symbol")}
+        symbol = self._symbols_by_start.get(start)
+        if symbol is None:
+            # placed_instances read an other text of the file.
+            raise InputError(
+                f"The file {self.file_path} changed while the tool read it. Do this "
+                "operation again."
+            )
+        data = self._component_dict(symbol, unit)
+        if data is None or reference.startswith("#"):
+            return None
+        data["reference"], data["value"], data["unit"] = reference, value, unit
+        data["properties"] = [
+            {"key": "Reference", "value": reference},
+            {"key": "Value", "value": value},
+            *(p for p in data["properties"] if p["key"] not in ("Reference", "Value")),
+        ]
+        return SchematicComponent.from_dict(data)
 
     def get_nets(self) -> list[SchematicNet]:
         """Get all nets from schematic.

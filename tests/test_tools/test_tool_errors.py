@@ -200,7 +200,7 @@ def test_schematic_tools_with_a_file_that_is_not_there(tmp_path, tool):
 
 def test_symbol_details_of_a_reference_that_is_not_there(sch):
     result = asyncio.run(schematic.get_symbol_details(str(sch), "U9"))
-    assert result.startswith("❌ Component 'U9' not found in schematic."), result
+    assert result.startswith("❌ Component 'U9' not found in the project."), result
 
 
 def test_editor_with_a_file_that_is_not_there(tmp_path):

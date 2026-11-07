@@ -1,18 +1,110 @@
 """Schematic analysis tools for KiCad Workbench."""
 
 import asyncio
+import copy
+import re
+from dataclasses import dataclass
 from functools import cmp_to_key
 from pathlib import Path
 
 from ..errors import InputError
+from ..parsers.annotation import ref_des_prefix
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.schematic_parser import SchematicParser, unknown_alternate_note
+from ..parsers.sch_instances import placed_instances
+from ..parsers.schematic_parser import (
+    SchematicComponent,
+    SchematicParser,
+    merge_units,
+    unknown_alternate_note,
+)
 from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.tool_errors import error_answer
 from .netlist import NetlistError, netlist_of
+
+_NO_VERSION = (
+    "❌ The version of KiCad is not known (kicad-cli does not run): the references of the "
+    "symbols of each sheet path depend on it. Install KiCad or set KICAD_CLI."
+)
+
+
+@dataclass
+class _Placed:
+    """A component in one sheet path, with the reference and the unit of KiCad."""
+
+    component: SchematicComponent
+    sheet: str  # the sheet names of the path, for example "/Power/"
+    file: Path
+    # SCH_SYMBOL::GetLibSymbolRef: only a symbol with a library symbol is in the
+    # netlist (spike/kicad-versions/component_refs_check.py compares the two).
+    has_library_symbol: bool
+
+
+def placed_components(
+    sch_path: Path, kicad: str, project_wide: bool = False
+) -> tuple[list[_Placed], list[str]]:
+    """Return the components of a schematic file in each of its sheet paths (with
+    project_wide: of all files of the project), and the problems of the hierarchy.
+
+    The reference, the unit and the Value of each sheet path are the values that
+    KiCad gives after the load (sch_instances.placed_instances with the view "cli",
+    as the netlist and the BOM of kicad-cli): a sheet that the hierarchy uses more
+    than one time gives each path its own reference (C201, C301), and a symbol
+    with "U?" in its Reference field has the reference of its instance. The
+    Reference field and the (unit N) of a symbol are the values of one path only.
+    A power symbol and a reference that starts with "#" are no components. The
+    function blocks: run it off the event loop.
+
+    Raises:
+        AmbiguousRootError: More than one project holds the file.
+        KiCadEncodingError, SExprError, OSError, KicadFileError, InputError: A file
+            cannot be read (placed_instances).
+    """
+    project = schematic_project_file(sch_path)
+    placed, _screens, problems = placed_instances(project, kicad, "cli")
+    target = sch_path.resolve()
+    parsers: dict[Path, SchematicParser] = {}
+    result = []
+    for item in placed:
+        if not project_wide and item.file.resolve() != target:
+            continue
+        parser = parsers.get(item.file)
+        if parser is None:
+            parser = parsers[item.file] = SchematicParser(str(item.file), kicad)
+        component = parser.placed_component(
+            item.symbol.start, item.reference, item.unit, item.value
+        )
+        if component is not None:
+            result.append(_Placed(component, item.sheet.shown, item.file, item.has_library_symbol))
+    return result, problems
+
+
+def project_components(sch_path: Path, kicad: str) -> list[SchematicComponent]:
+    """Return the components of the project, one for each reference: the units of a
+    reference are one component (the pins of all units, the fields of the first
+    unit: merge_units), with the references and units of KiCad
+    (placed_components). The function blocks: run it off the event loop."""
+    placed, _problems = placed_components(sch_path, kicad, project_wide=True)
+    return merge_units([item.component for item in placed])
+
+
+async def components_of_project(sch_path: Path, kicad: str | None) -> list[SchematicComponent]:
+    """project_components off the event loop. kicad: the version of KiCad (of the
+    netlist); None: the version of kicad-cli.
+
+    Raises:
+        InputError: The version of KiCad is not known.
+    """
+    kicad = kicad or await get_kicad_version()
+    if kicad is None:
+        raise InputError(_NO_VERSION.removeprefix("❌ "))
+    return await asyncio.to_thread(project_components, sch_path, kicad)
+
+
+def _problem_lines(problems: list[str]) -> list[str]:
+    return [f"⚠️ {problem}" for problem in problems]
 
 
 @mcp.tool()
@@ -25,6 +117,11 @@ async def list_schematic_components(
 ) -> str:
     """List all components in a KiCad schematic file.
 
+    Each placed symbol of the file is in the list one time for each sheet path of
+    the file, with the reference and the unit that KiCad gives that path (a sheet
+    that the hierarchy uses two times gives two references). Power symbols are not
+    components. The tool needs kicad-cli (the rules of the KiCad version).
+
     Args:
         file_path: Path to .kicad_sch file
         filter_type: Optional filter by component type prefix (e.g., 'R', 'C', 'U', 'IC')
@@ -35,21 +132,30 @@ async def list_schematic_components(
         Formatted list of components with their properties
     """
     try:
-        parser = SchematicParser(file_path)
-        components = parser.get_components()
+        path = Path(file_path)
+        if not path.is_file():
+            return f"❌ File not found: {file_path}"
+        kicad = await get_kicad_version()
+        if kicad is None:
+            return _NO_VERSION
+        placed, problems = await asyncio.to_thread(placed_components, path, kicad)
+        sheets = {item.sheet for item in placed}
 
         # Apply filters
         if filter_type:
-            components = [c for c in components if c.reference.startswith(filter_type.upper())]
+            placed = [p for p in placed if p.component.reference.startswith(filter_type.upper())]
 
         if filter_value:
-            components = [c for c in components if filter_value.lower() in c.value.lower()]
+            placed = [p for p in placed if filter_value.lower() in p.component.value.lower()]
 
         if filter_dnp is not None:
-            components = [c for c in components if c.flags.get("dnp", False) == filter_dnp]
+            placed = [p for p in placed if p.component.flags.get("dnp", False) == filter_dnp]
+        components = [p.component for p in placed]
 
         if not components:
-            return "No components found matching the specified criteria."
+            return "\n\n".join(
+                ["No components found matching the specified criteria.", *_problem_lines(problems)]
+            )
 
         # Check if any non-default flags exist
         has_dnp = any(c.flags.get("dnp", False) for c in components)
@@ -58,6 +164,9 @@ async def list_schematic_components(
         # Format output
         header = "| Reference | Value | Footprint | Library |"
         separator = "|-----------|-------|-----------|---------|"
+        if len(sheets) > 1:
+            header += " Sheet |"
+            separator += "-------|"
         if has_dnp or has_not_in_bom:
             header += " DNP | In BOM |"
             separator += "-----|--------|"
@@ -70,17 +179,20 @@ async def list_schematic_components(
             separator,
         ]
 
-        for comp in components:
+        for item in placed:
+            comp = item.component
             footprint = comp.footprint or "-"
             library = comp.library_id.split(":")[-1] if ":" in comp.library_id else comp.library_id
             row = f"| {comp.reference} | {comp.value} | {footprint} | {library} |"
+            if len(sheets) > 1:
+                row += f" {item.sheet} |"
             if has_dnp or has_not_in_bom:
                 dnp = "Yes" if comp.flags.get("dnp", False) else ""
                 in_bom = "No" if not comp.flags.get("in_bom", True) else ""
                 row += f" {dnp} | {in_bom} |"
             lines.append(row)
 
-        return "\n".join(lines)
+        return "\n".join(lines + ["", *_problem_lines(problems)] if problems else lines)
 
     except Exception as e:
         return error_answer(e, "Error parsing schematic")
@@ -132,15 +244,28 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         loads them. A power symbol (a reference with "#") is not a component.
     """
     try:
+        path = Path(file_path)
+        if not path.is_file():
+            return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
+        if kicad is None:
+            return _NO_VERSION
+        # The reference is a reference of the project: its units can be in an other
+        # file or sheet path than file_path.
+        placed, problems = await asyncio.to_thread(placed_components, path, kicad, True)
+        if reference.endswith("?"):
+            return (
+                f"❌ '{reference}' is not annotated: KiCad gives this reference to each symbol "
+                "with no annotation. Annotate the schematic, then give the reference."
+            )
+        units = [p for p in placed if p.component.reference == reference]
 
-        def find():
-            return SchematicParser(file_path, kicad).get_component_by_reference(reference)
-
-        component = await asyncio.to_thread(find)
-
-        if not component:
-            return f"❌ Component '{reference}' not found in schematic."
+        if not units:
+            return "\n\n".join(
+                [f"❌ Component '{reference}' not found in the project.", *_problem_lines(problems)]
+            )
+        found = units[0]
+        component = found.component
 
         # Format output
         lines = [
@@ -150,10 +275,14 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
             f"**Library:** {component.library_id}",
             f"**Footprint:** {component.footprint or 'Not assigned'}",
             f"**Position:** ({component.position[0]:.2f}, {component.position[1]:.2f})",
+            f"**Sheet:** {found.sheet} (`{found.file.name}`)",
         ]
 
         if component.unit:
             lines.append(f"**Unit:** {component.unit}")
+        if len(units) > 1:
+            places = ", ".join(f"unit {u.component.unit} in {u.sheet}" for u in units)
+            lines.append(f"**Placed units:** {places}")
 
         # Properties
         if component.properties:
@@ -166,7 +295,8 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         # Pins: the netlist of kicad-cli, else the schematic model.
         pins, note = await asyncio.to_thread(_netlist_pins, Path(file_path), component.reference)
         if pins is None:
-            pins = component.pins
+            # The pins of all units of the reference.
+            pins = merge_units([copy.deepcopy(u.component) for u in units])[0].pins
             note = f"⚠️ The pins are the pins of the schematic file: {note}."
             if alternates := unknown_alternate_note([component]):
                 note += f"\n\n{alternates}"
@@ -185,6 +315,7 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         if note:
             lines.append("")
             lines.append(note)
+        lines += ["", *_problem_lines(problems)] if problems else []
 
         return "\n".join(lines)
 
@@ -210,11 +341,41 @@ async def search_symbols(
         List of matching components
     """
     try:
-        parser = SchematicParser(file_path)
-        components = parser.search_components(pattern)
+        path = Path(file_path)
+        if not path.is_file():
+            return f"❌ File not found: {file_path}"
+        fields = {
+            "all": ("reference", "value", "library"),
+            "reference": ("reference",),
+            "value": ("value",),
+            "library": ("library",),
+        }.get(search_fields)
+        if fields is None:
+            return (
+                f"❌ search_fields {search_fields!r} is not known: give all, reference, value "
+                "or library."
+            )
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            return f"❌ The pattern {pattern!r} is not a regular expression: {e}"
+        kicad = await get_kicad_version()
+        if kicad is None:
+            return _NO_VERSION
+        placed, problems = await asyncio.to_thread(placed_components, path, kicad)
+
+        def texts(comp: SchematicComponent) -> list[str]:
+            values = {"reference": comp.reference, "value": comp.value, "library": comp.library_id}
+            return [values[name] for name in fields]
+
+        components = [
+            p.component for p in placed if any(regex.search(t) for t in texts(p.component))
+        ]
 
         if not components:
-            return f"No components found matching pattern: {pattern}"
+            return "\n\n".join(
+                [f"No components found matching pattern: {pattern}", *_problem_lines(problems)]
+            )
 
         # Format output
         lines = [
@@ -325,16 +486,31 @@ async def get_schematic_info(file_path: str) -> str:
         Schematic metadata and statistics
     """
     try:
-        parser = SchematicParser(file_path)
-        title_block = parser.get_title_block()
-        components = parser.get_components()
-        nets = parser.get_nets()
-        sheets = parser.get_sheets()
+        path = Path(file_path)
+        if not path.is_file():
+            return f"❌ File not found: {file_path}"
+        kicad = await get_kicad_version()
+        if kicad is None:
+            return _NO_VERSION
+        def read():
+            parser = SchematicParser(file_path, kicad)
+            return parser.get_title_block(), parser.get_nets(), parser.get_sheets()
 
-        # Count components by type
+        title_block, nets, sheets = await asyncio.to_thread(read)
+        placed, problems = await asyncio.to_thread(placed_components, path, kicad)
+        # One component for each reference (the units of a package are one
+        # component), in each sheet path of the file. A symbol that is not annotated
+        # ("R?") is one component.
+        all_references = [p.component.reference for p in placed]
+        annotated = {r for r in all_references if not r.endswith("?")}
+        unannotated = [r for r in all_references if r.endswith("?")]
+        references = [*sorted(annotated), *unannotated]
+        paths = {p.sheet for p in placed}
+
+        # Count components by type: the prefix of KiCad (UTIL::GetRefDesPrefix).
         component_counts = {}
-        for comp in components:
-            prefix = "".join(c for c in comp.reference if c.isalpha())
+        for reference in references:
+            prefix = ref_des_prefix(reference)
             component_counts[prefix] = component_counts.get(prefix, 0) + 1
 
         # Format output
@@ -353,15 +529,18 @@ async def get_schematic_info(file_path: str) -> str:
         if title_block.get("rev"):
             lines.append(f"**Revision:** {title_block['rev']}")
 
-        lines.extend([
-            "",
-            "## Statistics",
-            f"**Total Components:** {len(components)}",
-            f"**Total Nets:** {len(nets)}",
-            f"**Hierarchical Sheets:** {len(sheets)}",
-            "",
-            "## Components by Type",
-])
+        lines.extend(
+            [
+                "",
+                "## Statistics",
+                f"**Total Components:** {len(references)}"
+                + (f" (in {len(paths)} sheet paths of the file)" if len(paths) > 1 else ""),
+                f"**Total Nets:** {len(nets)}",
+                f"**Hierarchical Sheets:** {len(sheets)}",
+                "",
+                "## Components by Type",
+            ]
+        )
 
         for prefix in sorted(component_counts.keys()):
             lines.append(f"- {prefix}: {component_counts[prefix]}")
@@ -373,6 +552,7 @@ async def get_schematic_info(file_path: str) -> str:
             ])
             for sheet in sheets:
                 lines.append(f"- {sheet['name']}: {sheet['file']}")
+        lines += ["", *_problem_lines(problems)] if problems else []
 
         return "\n".join(lines)
 

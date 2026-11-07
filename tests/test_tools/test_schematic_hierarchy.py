@@ -10,7 +10,7 @@ from pathlib import Path
 from kicad_workbench.parsers.schematic_parser import (
     SchematicComponent,
     SchematicParser,
-    _merge_duplicate_references,
+    merge_units,
 )
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "hier"
@@ -55,15 +55,15 @@ class TestMergeDuplicateReferences:
     def test_multi_unit_instances_merge_with_pin_union(self):
         u1a = self._comp("U1", [{"number": "1", "name": "VDD"}])
         u1b = self._comp("U1", [{"number": "2", "name": "GND"}, {"number": "1", "name": "VDD"}])
-        merged = _merge_duplicate_references([u1a, u1b])
+        merged = merge_units([u1a, u1b])
         assert len(merged) == 1
         numbers = [p["number"] for p in merged[0].pins]
         assert numbers == ["1", "2"]  # union, no duplicates
 
     def test_distinct_references_preserved(self):
         comps = [self._comp("R1", []), self._comp("C9", [])]
-        assert len(_merge_duplicate_references(comps)) == 2
+        assert len(merge_units(comps)) == 2
 
     def test_empty_references_are_not_collapsed(self):
         comps = [self._comp("", []), self._comp("", [])]
-        assert len(_merge_duplicate_references(comps)) == 2
+        assert len(merge_units(comps)) == 2

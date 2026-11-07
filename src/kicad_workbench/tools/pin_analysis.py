@@ -11,10 +11,10 @@ import re
 from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.schematic_parser import SchematicParser
 from ..server import mcp
 from ..utils.tool_errors import error_answer
 from .netlist import current_netlist
+from .schematic import components_of_project
 
 # MCU family component patterns
 MCU_PATTERNS = {
@@ -200,7 +200,8 @@ async def analyze_pin_functions(
     - Detecting potential pin conflicts
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
         reference: Optional component reference (e.g., 'U1') to analyze specific component
 
     Returns:
@@ -211,13 +212,13 @@ async def analyze_pin_functions(
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # The netlist, then the schematic with the KiCad of the netlist (the pins of
-        # the components: SchematicParser._component_pins).
+        # The netlist, then the components of the project with the KiCad of the netlist
+        # (components_of_project: the pins of each unit).
         netlist_parser = await current_netlist(sch_path)
-        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Get components to analyze
-        all_components = list(schematic_parser.get_components(recursive=True))
+        # Each reference of the project, with the references and units of KiCad.
+        all_components = await components_of_project(sch_path, netlist_parser.kicad_version)
         if reference:
             # Analyze specific component
             components = [comp for comp in all_components if comp.reference == reference]
@@ -390,7 +391,8 @@ async def detect_pin_conflicts(
     - Pin type mismatches
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
 
     Returns:
         Detailed conflict detection report
@@ -562,7 +564,8 @@ async def extract_pinmux_config(
     for MCU components, showing which peripherals are assigned to which pins.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project. The tool uses the
+            components and the netlist of the full project.
         component_type: Optional MCU type filter (e.g., 'stm32', 'esp32', 'nrf52')
 
     Returns:
@@ -573,12 +576,11 @@ async def extract_pinmux_config(
         if not sch_path.exists():
             return f"❌ **Schematic file not found:** {schematic_path}"
 
-        # The netlist, then the schematic with the KiCad of the netlist.
+        # The netlist, then the components of the project with the KiCad of the netlist.
         netlist_parser = await current_netlist(sch_path)
-        schematic_parser = SchematicParser(str(sch_path), netlist_parser.kicad_version)
 
         # Find MCU components
-        components = list(schematic_parser.get_components(recursive=True))
+        components = await components_of_project(sch_path, netlist_parser.kicad_version)
         mcu_components = []
 
         for component in components:
@@ -622,7 +624,7 @@ No MCU components were found in the schematic.
 3. Try without component_type filter"""
 
         # pin number -> name from schematic lib_symbols
-        sch_components = {c.reference: c for c in schematic_parser.get_components(recursive=True)}
+        sch_components = {c.reference: c for c in components}
 
         # Extract pinmux configuration for each MCU
         pinmux_configs = []

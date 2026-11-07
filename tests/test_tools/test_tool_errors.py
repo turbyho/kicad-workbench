@@ -177,7 +177,14 @@ def test_hierarchical_nets_with_a_filter_that_is_not_a_regular_expression(monkey
     assert result.startswith("❌ The filter pattern '(GND' is not a regular expression:"), result
 
 
-def test_trace_of_a_reference_that_is_not_there(sch):
+def test_trace_of_a_reference_that_is_not_there(monkeypatch, sch):
+    # The netlist comes from a fake kicad-cli: the test does not need KiCad.
+    path = sch.with_suffix(".xml")
+    path.write_text('<export version="E"><components/><nets/></export>', encoding="utf-8")
+
+    monkeypatch.setattr(
+        netlist, "export_with_kicad_cli", lambda *args: CliExport(path.read_bytes(), [])
+    )
     result = asyncio.run(hierarchical_analysis.trace_hierarchical_connection(str(sch), "U9"))
     assert result.startswith("❌ The netlist of kicad-cli has no component 'U9'"), result
 

@@ -30,9 +30,10 @@ SchematicFile = Screen
 
 def placed_instances(
     project: Path, version: str, view: str
-) -> tuple[list[PlacedInstance], dict[Path, SchematicFile], list[str]]:
-    """Return the placed symbols of each sheet path of a project, the files, and the
-    problems of the sheet hierarchy (placed_symbols_after_load).
+) -> tuple[list[PlacedInstance], dict[str, SchematicFile], list[str]]:
+    """Return the placed symbols of each sheet path of a project, the files (by the
+    text of the file name that KiCad gives each screen: Screen.key), and the problems
+    of the sheet hierarchy (placed_symbols_after_load).
 
     Args:
         project: The .kicad_pro file (it can be missing).

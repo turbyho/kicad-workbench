@@ -15,12 +15,11 @@ from kicad_workbench.tools.schematic_editor import (
     add_label,
     add_wire,
 )
+from kicad_workbench.utils.file_stamp import file_stamp, read_for_write_stamped
 from kicad_workbench.utils.kicad_lock import (
     check_board_not_open,
     check_schematic_not_open,
-    file_stamp,
     lock_file_path,
-    read_for_write_stamped,
     write_board,
     write_schematic,
 )

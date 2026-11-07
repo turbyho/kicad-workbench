@@ -34,8 +34,10 @@ from ..utils.kicad_cli import (
     get_kicad_version,
     run_kicad_cli,
 )
-from ..utils.sch_hierarchy import (
+from ..utils.kicad_project import (
     PRO_SUFFIX,
+)
+from ..utils.sch_hierarchy import (
     AmbiguousRootError,
     project_files,
     schematic_project_file,

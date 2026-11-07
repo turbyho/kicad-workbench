@@ -17,31 +17,22 @@ project (for example ``../common/power.kicad_sch``) has no link back to its
 project in the file system, thus this module cannot find its root.
 """
 
-import hashlib
-import json
 import os
-import re
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
-from ..parsers.kicad_fields import FieldRules, rules_for_file, sheet_fields
-from ..parsers.kicad_versions import KicadFileError, file_version, version_triple
-from ..parsers.sexpr import Node, SExprError, parse
-from .kicad_text import KiCadEncodingError, decode_as_kicad
+from ..parsers.kicad_versions import version_triple
+from ..parsers.sheet_list import SheetList, build_sheet_list, kiid_text, screens_by_file
+from .kicad_project import (
+    PRO_SUFFIX,
+    SCH_SUFFIX,
+    TopLevelSheet,
+    text_variables,
+    top_level_sheets,
+)
 
-SCH_SUFFIX = ".kicad_sch"
-PRO_SUFFIX = ".kicad_pro"
 PRO_LOCK_SUFFIX = PRO_SUFFIX + ".lck"
-NIL_UUID = "00000000-0000-0000-0000-000000000000"
-
-_TEXT_VAR = re.compile(r"\$\{([^}]+)\}")
-# The UUID and the sheets of each schematic content, by the digest of the
-# content. One tool call reads the same hierarchy more than one time, and a
-# large schematic takes a long time to parse.
-_SHEETS_CACHE: dict[bytes, tuple[str | None, list["_Sheet"]]] = {}
-_SHEETS_CACHE_SIZE = 1024
 
 
 class AmbiguousRootError(WorkbenchError):
@@ -54,167 +45,15 @@ class AmbiguousRootError(WorkbenchError):
         super().__init__(f"{sheet} is a sub-sheet of more than one root schematic: {names}")
 
 
-def _hierarchy_rules(root: Node) -> list[FieldRules]:
-    """Return the field rules to find the sheets of a schematic of any version.
-
-    The server reads and changes only files of known versions
-    (kicad_fields.rules_for_file), but the hierarchy holds all files that KiCad
-    loads. The installed KiCad reads an older file with its own parser, and a
-    newer KiCad reads a newer file. The KiCad that loads the file is not
-    known: the kicad-cli of PATH is not always the KiCad of the user. Thus
-    such a file gets the rules of KiCad 8 and 9 and of KiCad 10: its sheets
-    are the sheets of the two rule sets. For the lock check this gives more
-    files, never fewer.
-    """
-    try:
-        return [rules_for_file(root)]
-    except KicadFileError:
-        version = file_version(root) or 0
-        return [FieldRules(9, version), FieldRules(10, version)]
-
-
-@dataclass(frozen=True)
-class _Sheet:
-    """A sheet symbol of a schematic."""
-
-    uuid: str | None
-    name: str
-    file: str
-    problem: str = ""  # KiCad cannot read the fields of the sheet.
-
-
-def _read_sheets(path: Path) -> tuple[str | None, list[_Sheet]]:
-    """Return the UUID of a schematic file and its sheet symbols, with a cache.
-
-    The file is read as KiCad reads it (kicad_text.decode_as_kicad): a string
-    with a byte that is not valid UTF-8 is an empty string. Only a (sheet ...)
-    at the top level is a sheet: a symbol field with the name of a sheet field
-    is not.
-
-    Raises:
-        OSError: The file cannot be read.
-        KiCadEncodingError, SExprError: KiCad cannot load the file (a byte
-            that is not valid UTF-8 outside a string, unbalanced parentheses).
-    """
-    data = path.read_bytes()
-    key = hashlib.blake2b(data, digest_size=16).digest()
-    cached = _SHEETS_CACHE.get(key)
-    if cached is None:
-        root = parse(decode_as_kicad(data, path))
-        uuid = root.first("uuid")
-        sheets = []
-        all_rules = _hierarchy_rules(root)
-        for sheet in root.children("sheet"):
-            sheet_uuid = sheet.first("uuid")
-            found = []
-            errors = []
-            for rules in all_rules:
-                try:
-                    fields = sheet_fields(sheet, rules)
-                except KicadFileError as e:
-                    errors.append(str(e))
-                    continue
-                found.append(
-                    _Sheet(
-                        (sheet_uuid.value(0) or None) if sheet_uuid else None,
-                        fields["Sheetname"],
-                        fields["Sheetfile"],
-                    )
-                )
-            if not found:
-                # Only this sheet is not known: the other sheets of the file stay.
-                found.append(_Sheet(None, "", "", errors[0]))
-            sheets.extend(dict.fromkeys(found))
-        cached = ((uuid.value(0) or None) if uuid else None), sheets
-        if len(_SHEETS_CACHE) >= _SHEETS_CACHE_SIZE:
-            _SHEETS_CACHE.clear()
-        _SHEETS_CACHE[key] = cached
-    return cached
-
-
-def text_variables(root: Path) -> dict[str, str]:
-    """Return the text variables that KiCad uses to expand a sheet file name.
-
-    KiCad expands a sheet file name with the variables of the project only
-    (PROJECT::TextVarResolver): PROJECTNAME and the text variables of the
-    .kicad_pro file. It does not use environment variables. The variables
-    for date, time and git hash are not applicable to a file name.
-    """
-    variables: dict[str, str] = {}
-    try:
-        project = json.loads(root.with_suffix(PRO_SUFFIX).read_text(encoding="utf-8"))
-        # KiCad keeps the text variables as strings. Other values are not
-        # applicable to a file name.
-        variables.update(
-            (name, value)
-            for name, value in (project.get("text_variables") or {}).items()
-            if isinstance(value, str)
-        )
-    except (OSError, ValueError, AttributeError, TypeError):
-        pass
-    variables["PROJECTNAME"] = root.stem
-    return variables
-
-
-def expand_text_variables(name: str, variables: dict[str, str]) -> str:
-    """Return a sheet file name with the text variables of text_variables expanded.
-    A variable that is not known stays as it is."""
-    return _TEXT_VAR.sub(lambda m: variables.get(m.group(1), m.group(0)), name)
-
-
-def _top_level_entries(project_file: Path) -> list:
-    """Return "schematic.top_level_sheets" of a project file, or []."""
-    try:
-        project = json.loads(project_file.read_text(encoding="utf-8"))
-        entries = project["schematic"]["top_level_sheets"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return []
-    return entries if isinstance(entries, list) else []
-
-
-@dataclass(frozen=True)
-class TopLevelSheet:
-    """A top-level sheet of a project."""
-
-    file: Path
-    uuid: str | None  # The UUID of the sheet path. None: the UUID of the file.
-    name: str
-
-
-def top_level_sheets(project_file: Path) -> list[TopLevelSheet]:
-    """Return the top-level sheets of a project.
-
-    KiCad 10 keeps them in "schematic.top_level_sheets" of the .kicad_pro
-    file (PROJECT_FILE). When the list is not there (KiCad 9 and earlier, or
-    no project file), the project has one top-level sheet: the schematic
-    with the name of the project, with the UUID of the file. KiCad uses the
-    schematic of the project name for an entry whose file does not exist (a
-    project from a template).
-    """
-    directory = Path(os.path.abspath(project_file)).parent
-    default = directory / (project_file.stem + SCH_SUFFIX)
-    sheets = []
-    for entry in _top_level_entries(project_file):
-        if not isinstance(entry, dict) or not isinstance(entry.get("filename"), str):
-            continue
-        file = directory / entry["filename"]
-        name = entry.get("name") if isinstance(entry.get("name"), str) else file.stem
-        if not file.exists() and default.exists():
-            file, name = default, project_file.stem
-        uuid = entry.get("uuid") if isinstance(entry.get("uuid"), str) else None
-        if uuid == NIL_UUID:
-            uuid = None  # KiCad gives the default sheet this UUID (PROJECT_FILE::LoadFromFile).
-        sheets.append(TopLevelSheet(Path(os.path.normpath(file)), uuid, name))
-    return sheets or [TopLevelSheet(default, None, project_file.stem)]
-
-
 @dataclass(frozen=True)
 class SheetPath:
     """One place of a schematic file in the sheet hierarchy of a project."""
 
-    file: Path
-    # The top-level sheet, then each sheet symbol. None: KiCad gives a file or
-    # a sheet on the path a new UUID at each load.
+    # The file of the screen. None: an empty sheet (KiCad has the sheet path, with no
+    # file: see sheet_list.EMPTY_REASONS).
+    file: Path | None
+    # The top-level sheet, then each sheet symbol (KIID::AsString). None: KiCad gives
+    # a file or a sheet on the path a new UUID at each load.
     uuids: tuple[str, ...] | None
     names: tuple[str, ...]  # The name of each sheet below the top level.
 
@@ -241,81 +80,42 @@ class SheetPath:
         return "/" + "".join(f"{uuid}/" for uuid in self.uuids[1:])
 
 
-def _walk(
-    tops: list[TopLevelSheet], variables: dict[str, str], unique: bool = False
-) -> tuple[list[SheetPath], list[str]]:
-    """Return each place of each file in the sheet trees of the top-level sheets.
-
-    The function resolves each sheet file name as KiCad does: it expands the
-    text variables, and it makes a relative name absolute with the directory
-    of the parent sheet. KiCad does not load a sheet that holds one of its
-    parents. KiCad shows a missing sheet as empty, and it loads the other
-    sheets when it cannot load one sheet: such a file gives no place, a file
-    that cannot be loaded gives a problem.
+def _load(
+    tops: list[TopLevelSheet],
+    project_dir: Path,
+    variables: dict[str, str],
+    kicad: int | None = None,
+    nil_top: bool = False,
+) -> SheetList:
+    """Load the hierarchy as KiCad does, but do not stop at a file that the server
+    cannot read (a tolerant load of sheet_list.build_sheet_list): more files than
+    KiCad loads, never fewer.
 
     Args:
-        unique: Give each file one place: do not read the sheets of a file
-            again when the hierarchy uses it more than one time.
-
-    Returns:
-        (places in the order of the tree levels, problems).
+        kicad: The major version of the KiCad that loads the files; None: not known
+            (the KiCad of the version of each file).
     """
-    places: list[SheetPath] = []
-    problems: list[str] = []
-    expanded: set[Path] = set()
-    pending = deque(
-        (top.file, (top.uuid,) if top.uuid else (), () if len(tops) == 1 else (top.name,), ())
-        for top in tops
+    return build_sheet_list(
+        tops, project_dir, variables, kicad, tolerant=True, nil_top_uuid=nil_top
     )
-    while pending:
-        file, uuids, names, parents = pending.popleft()
-        try:
-            real = file.resolve()
-            if unique and real in expanded:
-                continue
-            expanded.add(real)
-            file_uuid, sheets = _read_sheets(file)
-        except (FileNotFoundError, RuntimeError):
-            # RuntimeError: a loop of symbolic links (Python 3.12 and earlier).
-            continue
-        except (OSError, KiCadEncodingError, SExprError) as e:
-            problems.append(f"{file} cannot be read: {e}")
-            continue
-        if uuids == ():
-            uuids = (file_uuid,) if file_uuid else None
-            if uuids is None:
-                problems.append(f"{file} has no UUID.")
-        # KiCad has one place for a file with one UUID path. The two rule sets
-        # of a file of an other version can give one sheet two names.
-        if uuids is not None and any(p.uuids == uuids and p.file == file for p in places):
-            continue
-        places.append(SheetPath(file, uuids, names))
-        for sheet in sheets:
-            if sheet.problem:
-                problems.append(f"{file}: {sheet.problem}")
-                continue
-            name = expand_text_variables(sheet.file, variables)
-            if not name:
-                # An empty file name, also after the expansion: an empty sheet
-                # (SCH_IO_KICAD_SEXPR::loadHierarchy), as sheet_list.build_sheet_list.
-                continue
-            child = Path(name)
-            if not child.is_absolute():
-                child = file.parent / child
-            child = Path(os.path.normpath(child))
-            try:
-                if child.resolve() in (*parents, real):
-                    continue
-            except (OSError, RuntimeError):
-                continue  # KiCad shows such a sheet as missing.
-            child_uuids = None
-            if uuids is not None:
-                if sheet.uuid is None:
-                    problems.append(f"The sheet {sheet.name!r} of {file} has no UUID.")
-                else:
-                    child_uuids = (*uuids, sheet.uuid)
-            pending.append((child, child_uuids, (*names, sheet.name), (*parents, real)))
-    return places, problems
+
+
+def _places(sheet_list: SheetList) -> list[SheetPath]:
+    """Return the sheet paths of a load in the order of SCH_SHEET_LIST::BuildSheetList."""
+    places = []
+    for path in sheet_list.paths:
+        texts = tuple(kiid_text(kiid) for kiid in path.kiids)
+        uuids = None if None in texts else tuple(text for text in texts if text is not None)
+        file = path.screen.file if path.screen is not None else None
+        places.append(SheetPath(file, uuids, path.names))
+    return places
+
+
+def _files(sheet_list: SheetList) -> list[Path]:
+    """Return each file of the screens of a load one time (a file with two names, for
+    example through a symbolic link, is two screens of KiCad)."""
+    by_file = screens_by_file(list(sheet_list.screens.values()))
+    return [screens[0].file for screens in by_file.values()]
 
 
 def netlist_root(project: Path, kicad: str | None, output: str = "netlist") -> tuple[Path, int]:
@@ -364,9 +164,9 @@ def netlist_root(project: Path, kicad: str | None, output: str = "netlist") -> t
     return named, len(tops)
 
 
-def root_sheet_paths(root: Path) -> tuple[list[SheetPath], list[str]]:
-    """Return each place of each file in the hierarchy of a root schematic, as
-    kicad-cli loads it: the schematic is the one top-level sheet
+def root_sheet_paths(root: Path, kicad: int | None = None) -> tuple[list[SheetPath], list[str]]:
+    """Return each sheet path of the hierarchy of a root schematic, as kicad-cli
+    loads it: the schematic is the one top-level sheet
     (EESCHEMA_HELPERS::LoadSchematic of KiCad 8, 9 and 10.0.0 to 10.0.6; KiCad
     10.0.7 and later also load the other top-level sheets of its project).
 
@@ -375,35 +175,37 @@ def root_sheet_paths(root: Path) -> tuple[list[SheetPath], list[str]]:
     the paths below it have UUIDs. Use these paths for the netlist only, not for
     the instances of the symbols (path).
 
+    Args:
+        kicad: The major version of the KiCad that loads the files; None: not known.
+
     Returns:
-        (paths, problems), see _walk.
+        (the paths in the order of SCH_SHEET_LIST::BuildSheetList, also the paths
+        of the empty sheets, problems).
     """
     root = Path(os.path.abspath(root))
-    try:
-        file_uuid, _sheets = _read_sheets(root)
-    except (OSError, RuntimeError, KiCadEncodingError, SExprError):
-        file_uuid = None  # _walk gives the problem
-    uuid = None if file_uuid else NIL_UUID
-    return _walk([TopLevelSheet(root, uuid, root.stem)], text_variables(root))
+    tops = [TopLevelSheet(root, None, root.stem)]
+    sheet_list = _load(tops, root.parent, text_variables(root), kicad, nil_top=True)
+    return _places(sheet_list), sheet_list.problems
 
 
 def sheet_files(root: Path) -> list[Path]:
     """Return the root schematic and all sub-sheet files of its hierarchy.
 
-    Each file is in the list one time, also when the hierarchy uses it more
-    than one time. A missing file, and a file that KiCad cannot load, is not
-    in the list. A file of an old version is in the list, with the files
-    below it (_hierarchy_rules): a parser of the file then gives the error. A file with a byte that is not valid UTF-8 in a string is in
-    the list, as in KiCad. See _walk for the rules.
+    Each file is in the list one time, also when the hierarchy uses it more than
+    one time or under more than one name. A missing file, and a file that the
+    system cannot open, is not in the list. A sub-sheet that the server cannot read
+    (a parse error, a version that the server does not know) is in the list (a
+    tolerant load, see _load): a parser of the file then gives the error. A
+    top-level sheet with a parse error is not in the list, with no sub-sheets:
+    KiCad does not load it.
     """
     root = Path(os.path.abspath(root))
     tops = [TopLevelSheet(root, None, root.stem)]
-    places, _problems = _walk(tops, text_variables(root), unique=True)
-    return [place.file for place in places]
+    return _files(_load(tops, root.parent, text_variables(root)))
 
 
-def sheet_paths(project_file: Path) -> tuple[list[SheetPath], list[str]]:
-    """Return each place of each schematic file in the sheet hierarchy of a project.
+def sheet_paths(project_file: Path, kicad: int | None = None) -> tuple[list[SheetPath], list[str]]:
+    """Return each sheet path of the sheet hierarchy of a project.
 
     A file that the hierarchy uses more than one time has more than one path.
     The path of a top-level sheet is the UUID of its schematic file, or the
@@ -411,13 +213,21 @@ def sheet_paths(project_file: Path) -> tuple[list[SheetPath], list[str]]:
     sheet, the names start below it, as KiCad shows them. A file or a sheet
     with no UUID gives paths with no UUIDs below it, and a problem.
 
+    Args:
+        kicad: The major version of the KiCad that loads the files; None: not known.
+
     Returns:
-        (paths, problems).
+        (the paths in the order of SCH_SHEET_LIST::BuildSheetList, also the paths
+        of the empty sheets, problems).
     """
     project_file = Path(os.path.abspath(project_file))
-    return _walk(
-        top_level_sheets(project_file), text_variables(project_file.with_suffix(SCH_SUFFIX))
+    sheet_list = _load(
+        top_level_sheets(project_file),
+        project_file.parent,
+        text_variables(project_file.with_suffix(SCH_SUFFIX)),
+        kicad,
     )
+    return _places(sheet_list), sheet_list.problems
 
 
 def project_root_schematics(file_path: Path) -> list[Path]:
@@ -474,12 +284,11 @@ def project_files(project_file: Path) -> list[Path]:
 
     A project of KiCad 9 and earlier has one top-level sheet, the schematic of
     the project name. The sheet file names are expanded with the variables of
-    the project.
+    the project. See sheet_files for the files in the list.
     """
     project_file = Path(os.path.abspath(project_file))
     variables = text_variables(project_file.with_suffix(SCH_SUFFIX))
-    places, _problems = _walk(top_level_sheets(project_file), variables, unique=True)
-    return [place.file for place in places]
+    return _files(_load(top_level_sheets(project_file), project_file.parent, variables))
 
 
 def in_project(file_path: Path, root: Path) -> bool:

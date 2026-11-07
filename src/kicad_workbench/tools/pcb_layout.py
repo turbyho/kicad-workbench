@@ -15,14 +15,9 @@ from ..parsers.kicad_versions import (
 )
 from ..parsers.sexpr import SExprError, parse
 from ..server import mcp
+from ..utils.file_stamp import FileStamp, file_stamp
 from ..utils.kicad_cli import decode_output, run_kicad_cli
-from ..utils.kicad_lock import (
-    FileStamp,
-    check_board_not_open,
-    file_stamp,
-    write_board,
-    write_with_warning,
-)
+from ..utils.kicad_lock import check_board_not_open, write_board, write_with_warning
 from ..utils.kicad_python import KicadPythonError, board_text
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.tool_errors import error_answer

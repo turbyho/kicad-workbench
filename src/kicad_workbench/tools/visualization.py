@@ -32,7 +32,13 @@ from ..utils.kicad_cli import (
     run_kicad_cli,
     run_kicad_cli_sync,
 )
-from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file, top_level_sheets
+from ..utils.kicad_project import (
+    top_level_sheets,
+)
+from ..utils.sch_hierarchy import (
+    AmbiguousRootError,
+    schematic_project_file,
+)
 from ..utils.tool_errors import error_answer
 
 _RENDER_SIDES = {"top", "bottom", "left", "right", "front", "back"}
@@ -209,7 +215,7 @@ def _file_svg_names(
         else:
             name = svg_name(root, path.names)
         all_names.append(name)
-        if path.file.resolve() == target:
+        if path.file is not None and path.file.resolve() == target:
             names.append(name)
     counts = collections.Counter(all_names)
     shared = sorted({name for name in names if counts[name] > 1})

@@ -163,16 +163,17 @@ def _units(project: Path, version: str) -> tuple[dict[str, list[_Unit]], list[st
         InputError: A unit is not a number, KiCad has no verified rules for the
             installed version, or KiCad cannot load the root schematic.
     """
-    instances, files, problems = placed_instances(project, version, "cli")
-    fields: dict[tuple[Path, int], dict[str, str]] = {}  # each symbol one time
+    instances, _files, problems = placed_instances(project, version, "cli")
+    fields: dict[tuple[str, int], dict[str, str]] = {}  # each symbol one time
     units: dict[str, list[_Unit]] = {}
     for instance in instances:
         text = instance.reference
         if text.startswith("#") or split_reference(text).number < 0:
             continue
-        record = files[instance.file]
         if instance.key not in fields:
-            fields[instance.key] = _symbol_fields(instance.symbol, instance.value, record.version)
+            fields[instance.key] = _symbol_fields(
+                instance.symbol, instance.value, instance.screen.version
+            )
         units.setdefault(text.upper(), []).append(
             _Unit(
                 text,

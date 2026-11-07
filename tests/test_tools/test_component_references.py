@@ -9,6 +9,7 @@ references and units of placed_instances (view "cli", as the netlist).
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -172,9 +173,22 @@ def test_the_info_of_a_loaded_sheet_and_of_an_ancestor(project, tmp_path):
     ), result
 
 
+def test_the_info_of_a_file_with_two_names(project):
+    # KiCad loads sub.kicad_sch under two names (sheet_file_names): two screens.
+    root = project / "board.kicad_sch"
+    text = root.read_text(encoding="utf-8").replace(
+        '"Sheetfile" "sub.kicad_sch"', f'"Sheetfile" "{project.as_posix()}/./sub.kicad_sch"', 1
+    )
+    root.write_text(text, encoding="utf-8")
+    result = run(schematic.get_schematic_info(str(project / "sub.kicad_sch")))
+    assert "⚠️ KiCad loads this file under 2 names" in result, result
+    assert "**Total Components:** 2" in result
+
+
 def test_the_info_of_a_file_that_the_load_does_not_hold(project, tmp_path, monkeypatch):
-    # The file tree of sch_hierarchy (the project of the file) and the load of
-    # sheet_list can disagree: then the tool tells that KiCad does not load the file.
+    # A guard: the project of the file (sch_hierarchy) and the load of its components
+    # use the same loader (sheet_list). When the load does not hold the file, the
+    # tool tells that KiCad does not load it.
     real = schematic.placed_components_and_files
 
     def no_file(path, kicad, project_wide=False):
@@ -208,9 +222,9 @@ def test_the_info_gives_the_expanded_file_and_loads_a_file_one_time(tmp_path, mo
     loads = []
     real = sheet_list._read_screen
 
-    def counted(file, kicad):
-        loads.append(file.name)
-        return real(file, kicad)
+    def counted(name, kicad):
+        loads.append(Path(name.text).name)
+        return real(name, kicad)
 
     monkeypatch.setattr(sheet_list, "_read_screen", counted)
     result = run(schematic.get_schematic_info(str(path)))

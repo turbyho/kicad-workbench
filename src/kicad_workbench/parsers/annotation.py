@@ -67,7 +67,7 @@ from pathlib import Path
 
 from ..errors import InputError
 from ..models.types import ERCError, ERCItem
-from ..utils.sch_hierarchy import (
+from ..utils.kicad_project import (
     PRO_SUFFIX,
     SCH_SUFFIX,
     TopLevelSheet,
@@ -467,7 +467,7 @@ def _sub_reference(symbol: _Symbol, unit: int, kicad: int, settings: SubpartSett
 class _State:
     sheet_list: SheetList
     pages: dict[object, str]
-    symbols: dict[Path, list[_Symbol]]
+    symbols: dict[str, list[_Symbol]]
     order: list[SheetPath]  # the hierarchy, sorted
     problems: list[str]
 
@@ -509,7 +509,7 @@ def _missing_instances(state: _State, kicad: int, project: str) -> None:
     for path in state.order:
         if path.screen is None:
             continue
-        for symbol in state.symbols[path.screen.file]:
+        for symbol in state.symbols[path.screen.key]:
             if symbol.instance(path.kiids) is not None:
                 continue
             if kicad <= 9:
@@ -565,7 +565,7 @@ def _annotate_power_symbols(
     for path in state.order:
         if path.screen is None:
             continue
-        for symbol in state.symbols[path.screen.file]:
+        for symbol in state.symbols[path.screen.key]:
             if symbol.definition is not None and symbol.power:
                 refs.append(_new_ref(symbol, path, kicad, 0))
     seen: set[str] = set()
@@ -610,7 +610,7 @@ def _annotate_power_symbols(
         for path in state.order:
             if path.screen is None:
                 continue
-            for symbol in state.symbols[path.screen.file]:
+            for symbol in state.symbols[path.screen.key]:
                 reference = symbol.get_ref(path.kiids)
                 if id(symbol) in power or not _in_list(symbol, reference, symbols_filter):
                     continue
@@ -857,7 +857,7 @@ def _in_list(symbol: _Symbol, reference: str, symbols_filter: str) -> bool:
 
 def _loaded_state(
     sheet_list: SheetList,
-    loaded: dict[Path, list[_Symbol]],
+    loaded: dict[str, list[_Symbol]],
     kicad: int,
     view: str,
     symbols_filter: str,
@@ -892,7 +892,7 @@ def _loaded_state(
 
 def _run(
     sheet_list: SheetList,
-    loaded: dict[Path, list[_Symbol]],
+    loaded: dict[str, list[_Symbol]],
     kicad: int,
     view: str,
     symbols_filter: str,
@@ -908,7 +908,7 @@ def _run(
     for path in state.order:
         if path.screen is None:
             continue
-        for symbol in state.symbols[path.screen.file]:
+        for symbol in state.symbols[path.screen.key]:
             if _in_list(symbol, symbol.get_ref(path.kiids), symbols_filter):
                 refs.append(_new_ref(symbol, path, kicad, numbers[id(path)]))
     if not refs:
@@ -1010,7 +1010,7 @@ class _Loaded:
     project: Path  # the absolute .kicad_pro file
     kicad: int  # the major version
     sheet_list: SheetList
-    symbols: dict[Path, list[_Symbol]]  # the placed symbols of each file
+    symbols: dict[str, list[_Symbol]]  # the placed symbols of each screen (Screen.key)
     problems: list[str]  # the problems of the hierarchy and the notes of _tops
 
 
@@ -1064,17 +1064,18 @@ class PlacedSymbol:
         return self.screen.file
 
     @property
-    def key(self) -> tuple[Path, int]:
-        """The placed symbol: its file and its offset (one symbol, more instances)."""
-        return (self.screen.file, self.symbol.start)
+    def key(self) -> tuple[str, int]:
+        """The placed symbol: its screen (Screen.key) and its offset (one symbol, more
+        instances). Two names of one file are two screens, as in KiCad."""
+        return (self.screen.key, self.symbol.start)
 
 
 def placed_symbols_after_load(
     project_file: Path, version: str, view: str
-) -> tuple[list[PlacedSymbol], dict[Path, Screen], list[str]]:
+) -> tuple[list[PlacedSymbol], dict[str, Screen], list[str]]:
     """Return each placed symbol in each sheet path with the reference and the unit
-    that KiCad gives it after the load, the screens, and the problems of the sheet
-    hierarchy (a file that cannot be read, a sheet with no UUID).
+    that KiCad gives it after the load, the screens (by Screen.key), and the problems
+    of the sheet hierarchy (a file that cannot be read, a sheet with no UUID).
 
     The parser rules of the version apply (_load_symbol): the last (path ...) of a
     sheet path wins, the first instance sets the Reference field, and KiCad 8 and 9
@@ -1103,7 +1104,7 @@ def placed_symbols_after_load(
     for path in state.order:
         if path.screen is None:
             continue
-        for symbol in state.symbols[path.screen.file]:
+        for symbol in state.symbols[path.screen.key]:
             found = symbol.instance(path.kiids)
             in_bom = symbol.node.first("in_bom")
             placed.append(

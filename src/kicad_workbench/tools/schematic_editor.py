@@ -64,18 +64,16 @@ from ..parsers.sexpr import (
     property_field,
     quote,
 )
+from ..parsers.sheet_list import kiid, kiid_path
 from ..server import mcp
+from ..utils.file_stamp import FileStamp, read_for_write_stamped
 from ..utils.kicad_cli import kicad_cli_version_sync
-from ..utils.kicad_lock import (
-    FileStamp,
-    read_for_write_stamped,
-    writable_schematic_version,
-    write_schematic,
-    write_with_warning,
+from ..utils.kicad_lock import writable_schematic_version, write_schematic, write_with_warning
+from ..utils.kicad_project import (
+    PRO_SUFFIX,
 )
 from ..utils.library_lookup import LibraryLookupError, find_library_symbol
 from ..utils.sch_hierarchy import (
-    PRO_SUFFIX,
     AmbiguousRootError,
     SheetPath,
     schematic_project_file,
@@ -289,10 +287,11 @@ def _same_path(wanted: str, sheet: SheetPath) -> bool:
     """Return True if a text gives the sheet path: its names or its UUID path.
 
     The slashes at the start and the end are optional ("Power", "/Power/").
-    A KiCad sheet name cannot hold "/".
+    A KiCad sheet name cannot hold "/". The UUIDs are compared as KiCad reads them
+    (KIID_PATH): with or without the dashes, in upper or lower case.
     """
     names = tuple(name for name in wanted.split("/") if name)
-    if sheet.uuids is not None and names == sheet.uuids:
+    if sheet.uuids is not None and kiid_path(wanted) == tuple(kiid(u) for u in sheet.uuids):
         return True
     return SheetPath(sheet.file, None, names).shown == sheet.shown
 
@@ -307,7 +306,7 @@ def _sheet_path(path: Path, project: Path, wanted: str) -> tuple[SheetPath, int]
     """
     paths, problems = sheet_paths(project)
     target = path.resolve()
-    mine = [sheet for sheet in paths if sheet.file.resolve() == target]
+    mine = [sheet for sheet in paths if sheet.file is not None and sheet.file.resolve() == target]
     if not mine:
         return f"the schematic is not in the sheet hierarchy of the project {project}." + "".join(
             f" {problem}" for problem in problems

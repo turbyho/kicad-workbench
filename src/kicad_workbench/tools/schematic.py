@@ -52,10 +52,11 @@ def placed_components(
 
 def placed_components_and_files(
     sch_path: Path, kicad: str, project_wide: bool = False
-) -> tuple[list[_Placed], dict[Path, SchematicFile], list[str]]:
+) -> tuple[list[_Placed], dict[str, SchematicFile], list[str]]:
     """Return the components of a schematic file in each of its sheet paths (with
     project_wide: of all files of the project), the files of the hierarchy as KiCad
-    loads them (sch_instances.SchematicFile), and the problems of the hierarchy.
+    loads them (sch_instances.SchematicFile, by Screen.key: one for each name of a
+    file), and the problems of the hierarchy.
 
     The reference, the unit and the Value of each sheet path are the values that
     KiCad gives after the load (sch_instances.placed_instances with the view "cli",
@@ -507,6 +508,23 @@ async def list_schematic_nets(
         return error_answer(e, "Error parsing schematic")
 
 
+def _sheet_symbol_lines(screen: SchematicFile) -> list[str]:
+    """Return a line for each sheet symbol of a screen: its name, its file, and the
+    reason of an empty sheet."""
+    lines = []
+    for sheet in screen.sheets:
+        name = sheet.name if sheet.name.strip() else f"(no name: {sheet.name!r})"
+        file = sheet.raw_file or "(no file name)"
+        if sheet.file is not None and ("${" in sheet.raw_file or sheet.raw_file.startswith("~")):
+            # After the expansion of the text variables and of "~" (sheet_file_names).
+            file += f" = {sheet.file}"
+        if sheet.empty:
+            # A new, empty screen (sheet_list.EMPTY_REASONS).
+            file += f" ({EMPTY_REASONS[sheet.empty]}: an empty sheet in KiCad)"
+        lines.append(f"- {name}: {file}")
+    return lines
+
+
 @mcp.tool()
 @with_field_rules_note
 async def get_schematic_info(file_path: str) -> str:
@@ -536,13 +554,14 @@ async def get_schematic_info(file_path: str) -> str:
         def read():
             parser = SchematicParser(file_path, kicad)
             placed, screens, problems = placed_components_and_files(path, kicad)
-            # The sheet symbols of the file, as KiCad loads them (sheet_list). None:
-            # the hierarchy of the project does not hold the file.
+            # The screens of the file, as KiCad loads them (sheet_list): one for each
+            # name of the file in the sheets. None: the hierarchy does not hold it.
             target = path.resolve()
-            screen = next((s for f, s in screens.items() if f.resolve() == target), None)
-            return parser.get_title_block(), parser.get_nets(), placed, screen, problems
+            mine = [s for s in screens.values() if s.file.resolve() == target]
+            return parser.get_title_block(), parser.get_nets(), placed, mine, problems
 
-        title_block, nets, placed, screen, problems = await asyncio.to_thread(read)
+        title_block, nets, placed, mine, problems = await asyncio.to_thread(read)
+        screen = mine[0] if mine else None
         # One component for each reference (the units of a package are one
         # component), in each sheet path of the file. A symbol that is not annotated
         # ("R?") is one component.
@@ -592,17 +611,22 @@ async def get_schematic_info(file_path: str) -> str:
         for prefix in sorted(component_counts.keys()):
             lines.append(f"- {prefix}: {component_counts[prefix]}")
 
-        if screen is not None and screen.sheets:
-            lines.extend(["", "## Sheet symbols"])
-            for sheet in screen.sheets:
-                name = sheet.name if sheet.name.strip() else f"(no name: {sheet.name!r})"
-                file = sheet.raw_file or "(no file name)"
-                if sheet.file is not None and "${" in sheet.raw_file:
-                    file += f" = {sheet.file}"  # after the expansion of the text variables
-                if sheet.empty:
-                    # A new, empty screen (sheet_list.EMPTY_REASONS).
-                    file += f" ({EMPTY_REASONS[sheet.empty]}: an empty sheet in KiCad)"
-                lines.append(f"- {name}: {file}")
+        # Each screen of the file has its own sheet items: the first sheet path of a
+        # sheet decides its screen, thus the lists of two screens can be different.
+        with_sheets = [s for s in mine if s.sheets]
+        lists = [_sheet_symbol_lines(s) for s in with_sheets]
+        if lists and all(listing == lists[0] for listing in lists):
+            lines.extend(["", "## Sheet symbols", *lists[0]])
+        else:
+            for s, listing in zip(with_sheets, lists, strict=True):
+                lines.extend(["", f"## Sheet symbols of the screen {s.key}", *listing])
+        if len(mine) > 1:
+            names = ", ".join(s.key for s in mine)
+            problems = [
+                f"KiCad loads this file under {len(mine)} names ({names}): each name is a "
+                "screen of its own, with its own copy of the items of the file.",
+                *problems,
+            ]
         if screen is None:
             problems = [
                 "The hierarchy of the project does not hold this file: KiCad does not "

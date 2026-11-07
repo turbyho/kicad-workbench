@@ -166,6 +166,23 @@ def test_a_sheet_of_the_netlist_that_the_hierarchy_does_not_have(project):
     assert ": /Other/. The tool cannot tell if their components are in the file" in result
 
 
+def test_a_sheet_of_a_missing_file(project):
+    # KiCad has the sheet path of a missing file (an empty screen), and the netlist has
+    # its sheet: the tool knows it too, thus no warning (before: "does not find").
+    gone = "77777777-7777-7777-7777-777777777777"
+    root = project["dir"] / "root.kicad_sch"
+    root.write_text(
+        _schematic(ROOT, _sheet(S_MID, "Mid", "mid.kicad_sch"),
+                   _sheet(S_LEAF2, "Leaf2", "leaf.kicad_sch"),
+                   _sheet(gone, "Gone", "gone.kicad_sch")),
+        encoding="utf-8",
+    )  # fmt: skip
+    project["xml"] = netlist_xml(sheets=[*SHEETS, ("/Gone/", f"/{gone}/", "gone.kicad_sch")])
+    result = search(project["dir"] / "mid.kicad_sch")
+    assert found(result) == ["U3"], result
+    assert "⚠️" not in result
+
+
 def test_a_sheet_name_with_a_text_variable(project):
     # KiCad expands the text variables of a sheet name in "names"
     # (GetShownText): the tool uses only "tstamps".

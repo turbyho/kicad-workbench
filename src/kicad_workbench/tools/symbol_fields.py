@@ -61,6 +61,7 @@ from ..parsers.sexpr import (
     property_field,
     quote,
 )
+from ..parsers.sheet_list import screens_by_file
 from ..parsers.symbol_info import letter_reference
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
@@ -382,7 +383,7 @@ def _plan(
         InputError: A change cannot be written (the message tells why).
     """
     # The references of the schematic editor of the installed KiCad (user, 2026-11-05).
-    instances, files, problems = placed_instances(project, kicad, "gui")
+    instances, screens, problems = placed_instances(project, kicad, "gui")
     if problems:
         # A sheet that the tool cannot read can hold an other reference of a symbol
         # (a shared sheet): the check of _check_shared would not be complete.
@@ -390,10 +391,11 @@ def _plan(
             "The tool cannot read the full sheet hierarchy, thus it cannot find each "
             "reference of a symbol: " + " ".join(problems) + " Correct it in KiCad first."
         )
+    files, shared = _screens_of_files(list(screens.values()))
     known_variants: set[str] = set()
     if any(c.variant for c in changes):
         known_variants = project_variants(project).union(
-            *(file_variants(f.root) for f in files.values())
+            *(file_variants(f.root) for f in screens.values())
         )
     by_key: dict[tuple[str, str], FieldChange] = {}
     for change in changes:
@@ -403,7 +405,7 @@ def _plan(
             raise InputError(f"Two changes of {change.reference}{_variant_label(change.variant)}.")
         by_key[key] = change
     groups: dict[str, list[PlacedInstance]] = {}
-    references: dict[tuple[Path, int], set[str]] = {}  # more than one in a shared sheet
+    references: dict[tuple[str, int], set[str]] = {}  # more than one in a shared sheet
     for instance in instances:
         groups.setdefault(instance.reference.upper(), []).append(instance)
         references.setdefault(instance.key, set()).add(instance.reference)
@@ -413,8 +415,8 @@ def _plan(
     warnings: list[str] = []
     # The texts of the fields of each symbol after the changes of the symbols: the
     # base of the variants (a text equal to it is no differential).
-    base: dict[tuple[Path, int], dict[str, str]] = {}
-    done: dict[tuple[Path, int], list[_Row]] = {}  # the symbols that got their fields
+    base: dict[tuple[str, int], dict[str, str]] = {}
+    done: dict[tuple[str, int], list[_Row]] = {}  # the symbols that got their fields
     variants: dict[tuple[Path, int], _Variants] = {}  # by (file, offset of the path)
     for (key, variant), change in sorted(by_key.items(), key=lambda item: item[0][1] != ""):
         group = groups.get(key)
@@ -429,6 +431,7 @@ def _plan(
         for instance in sorted(group, key=lambda i: i.unit):
             # The letters of the unit of a package with more units (U1A), else empty.
             unit_text = letter_reference(instance.unit) if instance.unit_count > 1 else ""
+            _check_one_screen(instance, shared)
             record = files[instance.file]
             if variant:
                 _plan_variant(change, instance, record, base, variants, rows, unit_text)
@@ -457,6 +460,39 @@ def _plan(
                 root.source[: root.start] + edited(root, file_edits) + root.source[root.end :]
             )
     return texts, rows, files, list(dict.fromkeys(warnings))
+
+
+def _screens_of_files(screens: list[SchematicFile]) -> tuple[dict[Path, SchematicFile], set[str]]:
+    """Return the screens by their file, and the keys (Screen.key) of the screens of a
+    file of the disk with more than one screen.
+
+    KiCad loads a file under each name that the sheets give it (sheet_file_names: for
+    example a symbolic link, or "/./" in an absolute name) as a screen of its own.
+    Each screen has a copy of the symbols, and the save of one screen removes the
+    changes of the other in the file.
+    """
+    shared = {
+        screen.key
+        for group in screens_by_file(screens).values()
+        if len(group) > 1
+        for screen in group
+    }
+    return {screen.file: screen for screen in screens if screen.key not in shared}, shared
+
+
+def _check_one_screen(instance: PlacedInstance, shared: set[str]) -> None:
+    """Refuse a change of a symbol of a file with more than one screen (_screens_of_files).
+
+    Raises:
+        InputError: The file of the symbol has more than one screen.
+    """
+    if instance.screen.key in shared:
+        raise InputError(
+            f"KiCad loads the file {instance.file} of {instance.reference} under more than "
+            "one name: KiCad keeps a copy of its symbols for each name, and the save of one "
+            "copy removes the changes of the other. The tool does not change the fields "
+            "of such a file. Give the file one name in all sheets."
+        )
 
 
 def _other_projects(instance: PlacedInstance, project_name: str) -> list[str]:

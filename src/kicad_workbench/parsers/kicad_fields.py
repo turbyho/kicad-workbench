@@ -169,6 +169,9 @@ def _sheet_field_id_v9(name: str, id_in_file: int | None) -> int:
 def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
     """Return the fields "Sheetname" and "Sheetfile" of a sheet that KiCad uses.
 
+    The file name is in the notation of Unix: SCH_SHEET::SetFields of KiCad 8, 9
+    and 10 changes each "\\" to "/" (SCH_SHEET::SetFileName).
+
     KiCad 10: a sheet with no file field gets an empty file name, thus no
     sub-sheet (SCH_SHEET::SetFields adds the field: the check "Missing sheet file
     property" of SCH_IO_KICAD_SEXPR_PARSER::parseSheet never fails). Branch master
@@ -197,6 +200,7 @@ def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
         if _SHEET_NAMES[0] not in result:
             raise KicadParseError("Missing sheet name property: a sheet has no name field.")
         result.setdefault(_SHEET_NAMES[1], "")
+        result[_SHEET_NAMES[1]] = result[_SHEET_NAMES[1]].replace("\\", "/")
         return result
     fields: list[tuple[int, str]] = []
     used: set[int] = set()
@@ -212,4 +216,6 @@ def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
     # SCH_SHEET::SetFields of KiCad 8 and 9 sorts the fields by ID and then
     # reads the name and the file by index.
     fields.sort(key=lambda field: field[0])
-    return {_SHEET_NAMES[i]: fields[i][1] for i in range(len(_SHEET_NAMES))}
+    result = {_SHEET_NAMES[i]: fields[i][1] for i in range(len(_SHEET_NAMES))}
+    result[_SHEET_NAMES[1]] = result[_SHEET_NAMES[1]].replace("\\", "/")
+    return result

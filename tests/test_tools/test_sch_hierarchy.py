@@ -9,17 +9,19 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.parsers.sexpr import parse
-from kicad_workbench.utils.sch_hierarchy import (
+from kicad_workbench.utils.kicad_project import (
     NIL_UUID,
-    AmbiguousRootError,
     TopLevelSheet,
+    top_level_sheets,
+)
+from kicad_workbench.utils.sch_hierarchy import (
+    AmbiguousRootError,
     find_root_schematic,
     is_project_root,
     roots_containing,
     schematic_project_file,
     sheet_files,
     sheet_paths,
-    top_level_sheets,
 )
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -133,8 +135,8 @@ class TestSheetFields:
         # The two rule sets give the sheet two names, KiCad gives it one place.
         project(tmp_path, "board")
         (tmp_path / "board.kicad_sch").write_text(
-            '(kicad_sch (version 20230121) (generator "eeschema") (uuid "r")\n'
-            '\t(sheet (at 1 1) (size 2 2) (uuid "s1")\n'
+            '(kicad_sch (version 20230121) (generator "eeschema") (uuid "aaaaaaaa-0000-0000-0000-000000000001")\n'
+            '\t(sheet (at 1 1) (size 2 2) (uuid "bbbbbbbb-0000-0000-0000-000000000001")\n'
             '\t\t(property "Sheetname" "B" (id 5)) (property "Sheetname" "A" (id 0))\n'
             '\t\t(property "Sheetfile" "a.kicad_sch" (id 1)))\n)\n',
             encoding="utf-8",
@@ -142,8 +144,11 @@ class TestSheetFields:
         write(tmp_path / "a.kicad_sch")
         paths, _ = sheet_paths(tmp_path / "board.kicad_pro")
         assert [(p.file.name, p.path) for p in paths] == [
-            ("board.kicad_sch", "/r"),
-            ("a.kicad_sch", "/r/s1"),
+            ("board.kicad_sch", "/aaaaaaaa-0000-0000-0000-000000000001"),
+            (
+                "a.kicad_sch",
+                "/aaaaaaaa-0000-0000-0000-000000000001/bbbbbbbb-0000-0000-0000-000000000001",
+            ),
         ]
 
     def test_kicad_10_finds_the_field_with_no_difference_of_case(self, tmp_path):
@@ -337,13 +342,22 @@ class TestSheetPaths:
     def test_sheet_that_holds_its_parent_is_not_loaded(self, tmp_path):
         project(tmp_path, "board", "a.kicad_sch")
         write(tmp_path / "a.kicad_sch", sch("board.kicad_sch"))
-        paths, _ = sheet_paths(tmp_path / "board.kicad_pro")
-        assert [p.file.name for p in paths] == ["board.kicad_sch", "a.kicad_sch"]
+        paths, problems = sheet_paths(tmp_path / "board.kicad_pro")
+        # KiCad has the path of the sheet, with an empty screen.
+        assert [p.file and p.file.name for p in paths] == ["board.kicad_sch", "a.kicad_sch", None]
+        assert [p.shown for p in paths] == ["/", "/S0/", "/S0/S0/"]
+        assert len(problems) == 1 and "holds its own ancestor" in problems[0]
 
     def test_missing_sheet(self, tmp_path):
         project(tmp_path, "board", "gone.kicad_sch")
         paths, problems = sheet_paths(tmp_path / "board.kicad_pro")
-        assert ([p.file.name for p in paths], problems) == (["board.kicad_sch"], [])
+        # KiCad has the path of the sheet, with an empty screen (and the netlist and
+        # the SVG export have it).
+        assert ([p.file and p.file.name for p in paths], problems) == (
+            ["board.kicad_sch", None],
+            [],
+        )
+        assert sheet_files(tmp_path / "board.kicad_sch") == [tmp_path / "board.kicad_sch"]
 
     def test_sheet_with_no_uuid(self, tmp_path):
         project(tmp_path, "board", "a.kicad_sch")
@@ -352,18 +366,26 @@ class TestSheetPaths:
             text.replace('(uuid "00000000-0000-4000-8000-000000000000")', ""), encoding="utf-8"
         )
         paths, problems = sheet_paths(tmp_path / "board.kicad_pro")
-        # KiCad gives the sheet a new UUID at each load: no path below it.
-        assert [p.file.name for p in paths] == ["board.kicad_sch"]
-        assert problems == [f"The sheet 'S0' of {tmp_path / 'board.kicad_sch'} has no UUID."]
+        # KiCad gives the sheet a new UUID at each load: no fixed path below it.
+        # a.kicad_sch is not there: an empty sheet.
+        assert [(p.file and p.file.name, p.uuids is None) for p in paths] == [
+            ("board.kicad_sch", False),
+            (None, True),
+        ]
+        assert problems == [
+            f"The sheet 'S0' of {tmp_path / 'board.kicad_sch'} has no valid UUID: KiCad gives "
+            "it a new UUID at each load, thus no instance in the files matches its sheet paths."
+        ]
 
     def test_sheet_that_cannot_be_read(self, tmp_path):
         project(tmp_path, "board", "bad.kicad_sch", "a.kicad_sch")
         write(tmp_path / "bad.kicad_sch", "(kicad_sch (version 20250114)")
         write(tmp_path / "a.kicad_sch")
         paths, problems = sheet_paths(tmp_path / "board.kicad_pro")
-        # KiCad loads the other sheets.
-        assert [p.file.name for p in paths] == ["board.kicad_sch", "a.kicad_sch"]
-        assert len(problems) == 1 and "bad.kicad_sch cannot be read" in problems[0]
+        # KiCad keeps the items of bad.kicad_sch before the error, and loads the other
+        # sheets: the tolerant load keeps the file, with no sheets.
+        assert [p.file.name for p in paths] == ["board.kicad_sch", "bad.kicad_sch", "a.kicad_sch"]
+        assert len(problems) == 1 and "bad.kicad_sch: the parser of KiCad stops" in problems[0]
 
     def test_top_level_sheets_with_no_schematic_of_the_project_name(self, tmp_path):
         a = write(tmp_path / "a.kicad_sch")

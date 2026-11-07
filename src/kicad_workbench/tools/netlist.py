@@ -188,7 +188,11 @@ def components_of_file(
             "are in the file: they are not in the result."
         )
     target = sch_path.resolve()
-    mine = [p for p in places if p.netlist_path is not None and p.file.resolve() == target]
+    mine = [
+        p
+        for p in places
+        if p.netlist_path is not None and p.file is not None and p.file.resolve() == target
+    ]
     if not mine:
         warnings.append(
             f"⚠️ {sch_path} has no sheet path with UUIDs in the hierarchy of {hierarchy}."

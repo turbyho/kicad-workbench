@@ -126,6 +126,32 @@ class TestSymbolFields:
         assert "The fields have these values already. The tool wrote no file." in out
         assert path.read_text(encoding="utf-8") == before
 
+    async def test_a_file_with_two_names_is_not_changed(self, tmp_path):
+        # KiCad loads sub.kicad_sch under two names (sheet_file_names): two screens,
+        # each with a copy of the symbols, and the save of one copy removes the
+        # changes of the other.
+        sub = symbol("U5", 1, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6")))
+        path = write_project(tmp_path, "", sub)
+        text = path.read_text(encoding="utf-8").replace(
+            '"Sheetfile" "sub.kicad_sch"', f'"Sheetfile" "{tmp_path.as_posix()}/./sub.kicad_sch"', 1
+        )
+        path.write_text(text, encoding="utf-8")
+        before = (tmp_path / "sub.kicad_sch").read_text(encoding="utf-8")
+        out = await write(path, FieldChange(reference="U5", fields={"MPN": "X"}))
+        assert out.startswith("❌") and "under more than one name" in out, out
+        assert (tmp_path / "sub.kicad_sch").read_text(encoding="utf-8") == before
+
+    async def test_a_symbol_of_an_other_file_next_to_a_file_with_two_names(self, tmp_path):
+        sub = symbol("U5", 1, paths=(("/a0/b1", "U5"), ("/a0/b2", "U6")))
+        path = write_project(tmp_path, symbol("U1", 1), sub)
+        text = path.read_text(encoding="utf-8").replace(
+            '"Sheetfile" "sub.kicad_sch"', f'"Sheetfile" "{tmp_path.as_posix()}/./sub.kicad_sch"', 1
+        )
+        path.write_text(text, encoding="utf-8")
+        out = await write(path, FieldChange(reference="U1", fields={"MPN": "X"}))
+        assert "✅" in out, out
+        assert '(property "MPN" "X"' in path.read_text(encoding="utf-8")
+
     async def test_shared_sheet(self, tmp_path):
         # The sheet is used two times: one symbol has the references U5 and U6.
         sub = "".join(

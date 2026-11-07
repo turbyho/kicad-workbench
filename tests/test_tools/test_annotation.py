@@ -34,7 +34,9 @@ from kicad_workbench.parsers.sheet_list import (
     str_num_cmp,
     to_long,
 )
-from kicad_workbench.utils.sch_hierarchy import TopLevelSheet
+from kicad_workbench.utils.kicad_project import (
+    TopLevelSheet,
+)
 from kicad_workbench.utils.schematic_settings import (
     erc_exclusions,
     subpart_settings,

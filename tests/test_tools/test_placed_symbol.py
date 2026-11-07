@@ -239,7 +239,9 @@ class TestInstances:
         sub = schematic(tmp_path / "sub" / "power.kicad_sch")
         result = add(sub)
         assert "✅" in result and "**Sheet:** /Power/" in result, result
-        assert instances(placed(sub)[0]) == [("board", f"/{file_uuid(root)}/a1", "R1", "1")]
+        assert instances(placed(sub)[0]) == [
+            ("board", f"/{file_uuid(root)}/00000000-0000-0000-0000-0000000000a1", "R1", "1")
+        ]
 
     @pytest.fixture
     def shared(self, tmp_path):
@@ -258,8 +260,8 @@ class TestInstances:
         top = file_uuid(root)
         assert result == (
             "❌ Cannot add component Device:R: the hierarchy uses this schematic 2 times. Give "
-            f"sheet_path, the sheet that gets the reference: /Left/ (/{top}/a1), "
-            f"/Right/ (/{top}/a2)."
+            f"sheet_path, the sheet that gets the reference: /Left/ (/{top}/00000000-0000-0000-0000-0000000000a1), "
+            f"/Right/ (/{top}/00000000-0000-0000-0000-0000000000a2)."
         )
         assert amp.read_text(encoding="utf-8") == before
 
@@ -271,7 +273,9 @@ class TestInstances:
         result = add(amp, sheet_path=wanted)
         assert "✅" in result, result
         assert "**Position:** (100, 50)" in result
-        assert instances(placed(amp)[0]) == [("board", f"/{file_uuid(root)}/a2", "R1", "1")]
+        assert instances(placed(amp)[0]) == [
+            ("board", f"/{file_uuid(root)}/00000000-0000-0000-0000-0000000000a2", "R1", "1")
+        ]
         assert "Only /Right/ has the reference R1" in result
 
     def test_sheet_path_with_a_fixed_path_next_to_a_sheet_with_no_uuid(self, tmp_path, lib):
@@ -285,7 +289,9 @@ class TestInstances:
         result = add(amp)
         assert "/Right/ (no fixed UUID path)" in result, result
         assert "✅" in add(amp, sheet_path="/Left/")
-        assert instances(placed(amp)[0]) == [("board", f"/{file_uuid(root)}/a1", "R1", "1")]
+        assert instances(placed(amp)[0]) == [
+            ("board", f"/{file_uuid(root)}/00000000-0000-0000-0000-0000000000a1", "R1", "1")
+        ]
         result = add(amp, reference="R2", sheet_path="/Right/")
         assert result.startswith(
             "❌ Cannot add component Device:R: KiCad has no fixed sheet path for the sheet /Right/"
@@ -311,7 +317,9 @@ class TestInstances:
         )
         result = add(second)
         assert "✅" in result and "**Sheet:** /Second/" in result, result
-        assert instances(placed(second)[0]) == [("board", "/ccc7", "R1", "1")]
+        assert instances(placed(second)[0]) == [
+            ("board", "/00000000-0000-0000-0000-00000000ccc7", "R1", "1")
+        ]
 
     def test_schematic_with_no_uuid(self, tmp_path, lib):
         sch = tmp_path / "board.kicad_sch"
@@ -319,7 +327,8 @@ class TestInstances:
         result = add(sch)
         assert result == (
             "❌ Cannot add component Device:R: KiCad has no fixed sheet path for the sheet / "
-            f"of this schematic. {sch} has no UUID."
+            f"of this schematic. {sch} has no UUID: KiCad gives it a new UUID at each load, "
+            "thus no instance in the files matches its sheet paths."
         )
 
 

@@ -16,7 +16,6 @@ KiCad still runs, thus it also refuses the write for such a lock file. The
 error message tells how to remove it.
 """
 
-import hashlib
 import json
 import os
 from collections.abc import Callable
@@ -31,13 +30,16 @@ from .file_save import (
     file_locks,
     save_files,
 )
-from .kicad_text import kicad_text_bytes, text_for_write, write_kicad_text
-from .sch_hierarchy import (
+from .file_stamp import FileStamp, file_stamp
+from .kicad_project import (
     PRO_SUFFIX,
+    top_level_sheets,
+)
+from .kicad_text import kicad_text_bytes, write_kicad_text
+from .sch_hierarchy import (
     in_hierarchy,
     in_project,
     project_root_schematics,
-    top_level_sheets,
 )
 
 
@@ -155,65 +157,10 @@ def check_project_not_open(file_path: str | Path) -> str | None:
     return _check_file_not_open(file_path, "project", "KiCad project manager")
 
 
-# The stamp of a file: the SHA-256 of its bytes, or None when there is no file.
-# The time and the size of a file cannot show each change: two writes with the
-# same size in one tick of the clock of the file system give the same time.
-FileStamp = str | None
-
 # The tools write in threads (the save flushes the file to the disk). The lock of
 # each file (file_save.file_locks) keeps the check of the stamp and the write
 # together: of two tools that read the same stamp, the second gets the refusal,
 # and no change is lost. The writes of different files do not wait for each other.
-
-
-def bytes_stamp(data: bytes) -> str:
-    """Return the stamp of the bytes of a file (FileStamp)."""
-    return hashlib.sha256(data).hexdigest()
-
-
-def read_stamped(path: Path) -> tuple[bytes, str]:
-    """Return the bytes of a file and their stamp, from one read.
-
-    A tool or a parser that reads a file for a later write uses this function.
-    Thus a change between two reads cannot go unseen.
-
-    Raises:
-        OSError: The file cannot be read.
-    """
-    data = path.read_bytes()
-    return data, bytes_stamp(data)
-
-
-def file_stamp(path: Path) -> FileStamp:
-    """Return the stamp of the current bytes of a file, or None if no file.
-
-    The write functions compare it with the stamp of the bytes that the tool
-    read. When the two are different, an other program (for example KiCad,
-    before it closed) saved the file in the meantime, and the write would
-    remove that save.
-
-    Raises:
-        OSError: The file cannot be read.
-    """
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
-        return None
-    return bytes_stamp(data)
-
-
-def read_for_write_stamped(path: Path) -> tuple[str, str]:
-    """Return the text of a file that a tool changes (kicad_text.read_for_write),
-    and the stamp of the same bytes.
-
-    A tool gives the stamp to write_schematic() (read_stamped).
-
-    Raises:
-        OSError: The file cannot be read.
-        KiCadEncodingError: The file is not valid UTF-8.
-    """
-    data, stamp = read_stamped(path)
-    return text_for_write(data, path), stamp
 
 
 def _changed_error(path: Path) -> str:

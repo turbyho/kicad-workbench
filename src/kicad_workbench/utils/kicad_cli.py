@@ -31,17 +31,19 @@ from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_versions import version_numbers, version_triple
+from .kicad_project import (
+    PRO_SUFFIX,
+    top_level_sheets,
+)
 from .kicad_text import read_kicad_json
 from .kicad_version import find_kicad_install
 from .library_tables import kicad_settings_dir
 from .sch_hierarchy import (
-    PRO_SUFFIX,
     SheetPath,
     netlist_root,
     root_sheet_paths,
     schematic_project_file,
     sheet_paths,
-    top_level_sheets,
 )
 
 _cached_exe: str | None = None
@@ -458,6 +460,8 @@ def cli_sheet_paths(
     """
     project = project or root.with_suffix(PRO_SUFFIX)
     numbers = version_triple(kicad) if kicad else None
+    # The KIIDs of the parser of that kicad-cli (sheet_list.parsed_kiids).
+    major = numbers[0] if numbers is not None else None
     if len(top_level_sheets(project)) > 1 and numbers is not None and numbers >= (10, 0, 7):
-        return sheet_paths(project)
-    return root_sheet_paths(root)
+        return sheet_paths(project, major)
+    return root_sheet_paths(root, major)

@@ -2,7 +2,6 @@
 
 from fastmcp import FastMCP
 
-from .config import config
 from .version_check import VersionNotes
 
 # Create MCP server
@@ -49,20 +48,6 @@ from .tools import (  # noqa: F401, E402
     validation,
     visualization,
 )
-
-
-# Resources
-@mcp.resource("kicad://config")
-def get_config() -> dict:
-    """Get current server configuration."""
-    return {
-        "project_paths": config.kicad_project_paths,
-        "default_summary_detail_level": config.default_summary_detail_level,
-        "include_nets_in_summary": config.include_nets_in_summary,
-        "include_power_in_summary": config.include_power_in_summary,
-        "default_test_framework": config.default_test_framework,
-        "default_test_type": config.default_test_type,
-    }
 
 
 def create_server() -> FastMCP:

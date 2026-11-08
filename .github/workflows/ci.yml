@@ -41,6 +41,6 @@ jobs:
         run: python -m pytest tests/ -q
         env:
           # A missing locale fails the character set tests, not skips them.
-          KICAD_MCP_TEST_REQUIRE_LOCALE: "1"
+          KICAD_WORKBENCH_TEST_REQUIRE_LOCALE: "1"
         # Parser/hierarchy tests need no KiCad install; the kicad-cli
         # integration test self-skips when KiCad is absent.

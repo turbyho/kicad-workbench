@@ -29,7 +29,7 @@ An editable install gets no release notices.
 - `tests/test_build_content.py` builds the sdist and the wheel with hatchling, and
   makes sure that they have only the public files of the repository.
 - The character set tests run the tools in a locale that is not UTF-8. When the
-  environment variable `KICAD_MCP_TEST_REQUIRE_LOCALE` is set (as in CI), a missing
+  environment variable `KICAD_WORKBENCH_TEST_REQUIRE_LOCALE` is set (as in CI), a missing
   locale is an error, not a skip. On Linux, make the locale with
   `sudo localedef -i zh_CN -f GBK zh_CN.GBK`.
 

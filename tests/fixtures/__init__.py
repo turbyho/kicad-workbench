@@ -1,1 +1,1 @@
-"""Test fixtures for KiCad MCP Server."""
+"""Test fixtures of KiCad Workbench."""

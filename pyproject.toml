@@ -34,10 +34,9 @@ dependencies = [
     # fastmcp 2.14.1 + mcp 2.0.0, which install WITHOUT pydantic-settings,
     # and the server dies on import (ModuleNotFoundError: pydantic_settings).
     # Keep these in sync with requirements.txt.
-    "mcp[cli]>=1.27,<2",
+    "mcp>=1.27,<2",
     "fastmcp>=3.2,<4",
     "pydantic>=2.0.0",
-    "python-dotenv>=1.0.0",
     "jinja2>=3.1.0",
     # The version comparison of the release check (version_check).
     "packaging>=22",
@@ -52,24 +51,18 @@ test = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
-    "pytest-mock>=3.12.0",
-]
-hardware = [
-    "RPi.GPIO>=0.7.0; platform_machine == 'aarch64' or platform_machine == 'armv7l'",
-    "smbus2>=0.4.0",
-    "spidev>=3.5; platform_machine == 'aarch64' or platform_machine == 'armv7l'",
-    "pyserial>=3.5",
 ]
 dev = [
+    # The same list as requirements-dev.txt.
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
-    "black>=23.0.0",
+    "pytest-cov>=4.0.0",
     # The same version as requirements-dev.txt, which the CI workflows read.
     "ruff==0.17.4",
     "mypy>=1.0.0",
 ]
 all = [
-    "kicad-workbench[test,hardware,dev]"
+    "kicad-workbench[test,dev]"
 ]
 
 [project.scripts]
@@ -101,13 +94,8 @@ only-include = [
     "requirements.txt",
     "requirements-dev.txt",
     "requirements-test.txt",
-    ".env.example",
 ]
 exclude = ["docs/kicad-ipc"]
-
-[tool.black]
-line-length = 100
-target-version = ["py310", "py311", "py312", "py313", "py314"]
 
 [tool.ruff]
 line-length = 100

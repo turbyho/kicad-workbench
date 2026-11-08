@@ -1,14 +1,13 @@
-# Core dependencies for KiCad MCP Server
+# Runtime dependencies of KiCad Workbench (the same as "dependencies" of pyproject.toml)
 #
 # The upper bounds are load-bearing. Without them pip/uv resolve
 # fastmcp 2.14.1 + mcp 2.0.0, which install WITHOUT pydantic-settings, and
 # the server dies on import:
 #     ModuleNotFoundError: No module named 'pydantic_settings'
 # fastmcp 3.x is what actually provides the FastMCP API this server uses.
-mcp[cli]>=1.27,<2
+mcp>=1.27,<2
 fastmcp>=3.2,<4
 pydantic>=2.0.0
-python-dotenv>=1.0.0
 jinja2>=3.1.0
 packaging>=22
 resvg-py>=0.5.0,<0.6

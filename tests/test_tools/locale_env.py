@@ -13,7 +13,7 @@ show the problem. The process runs with the UTF-8 mode off or on (``-X
 utf8``), as the test asks. The UTF-8 mode is the default from Python 3.15
 (PEP 686), thus a server can run in both modes.
 
-When the environment variable KICAD_MCP_TEST_REQUIRE_LOCALE is set (the CI
+When the environment variable KICAD_WORKBENCH_TEST_REQUIRE_LOCALE is set (the CI
 does it), a missing locale fails the test. Else the test is skipped.
 """
 
@@ -50,7 +50,7 @@ def non_utf8_env() -> tuple[dict[str, str], str]:
             if encoding != "utf-8":
                 return env, encoding
     message = f"no locale that is not UTF-8 (tried {', '.join(LOCALES)})"
-    if os.environ.get("KICAD_MCP_TEST_REQUIRE_LOCALE"):
+    if os.environ.get("KICAD_WORKBENCH_TEST_REQUIRE_LOCALE"):
         pytest.fail(message)
     pytest.skip(message)
 

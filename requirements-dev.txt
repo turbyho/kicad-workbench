@@ -1,10 +1,8 @@
 # Development dependencies of KiCad Workbench
 -r requirements.txt
 
-# Testing
-pytest>=7.0.0
-pytest-asyncio>=0.21.0
-pytest-cov>=4.0.0
+# Testing: the test tools and hatchling (the extra "test" of pyproject.toml)
+-r requirements-test.txt
 
 # Code quality
 # One version of ruff for each check: a newer ruff can find new rules.

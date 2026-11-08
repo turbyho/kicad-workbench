@@ -52,15 +52,10 @@ test = [
     "pytest-cov>=4.0.0",
 ]
 dev = [
-    # The same list as requirements-dev.txt.
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
+    # The extra "test" and ruff, as requirements-dev.txt (-r requirements-test.txt).
+    "kicad-workbench[test]",
     # The same version as requirements-dev.txt, which the CI workflows read.
     "ruff==0.17.4",
-]
-all = [
-    "kicad-workbench[test,dev]"
 ]
 
 [project.scripts]

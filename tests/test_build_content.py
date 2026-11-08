@@ -10,6 +10,7 @@ The tool git-publish-filter lists the private files (``ls-blocked``): the tests
 do not have a second copy of the match rules.
 """
 
+import importlib.metadata
 import os
 import shutil
 import subprocess
@@ -18,11 +19,25 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 from kicad_workbench import __version__
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = "kicad_workbench"
+
+
+def _test_requirement(name: str) -> Requirement:
+    """The requirement of a test dependency in requirements-test.txt."""
+    for line in (ROOT / "requirements-test.txt").read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line and Requirement(line).name == name:
+            return Requirement(line)
+    raise LookupError(f"requirements-test.txt has no {name}")
+
+
+# The hatchling of the extra "test" (requirements-test.txt).
+HATCHLING = _test_requirement("hatchling")
 # The files that hatchling adds to each sdist: the metadata, and .gitignore (the
 # ignore rules of the sdist).
 SDIST_ADDED = {"PKG-INFO", ".gitignore"}
@@ -39,7 +54,14 @@ PATHSPEC_ENV = (
 @pytest.fixture(scope="module")
 def built(tmp_path_factory) -> dict[str, set[str]]:
     """The files of the sdist and of the wheel, relative to their root."""
-    pytest.importorskip("hatchling")
+    # hatchling is a test dependency (the extra "test"): a missing or old hatchling is
+    # an error of the environment, not a reason to skip the check.
+    try:
+        found = importlib.metadata.version("hatchling")
+    except importlib.metadata.PackageNotFoundError:
+        pytest.fail(f"The test needs {HATCHLING} (the extra test): it is not installed")
+    if not HATCHLING.specifier.contains(found, prereleases=True):
+        pytest.fail(f"The test needs {HATCHLING} (the extra test), not hatchling {found}")
     from hatchling.builders.sdist import SdistBuilder
     from hatchling.builders.wheel import WheelBuilder
 

@@ -144,7 +144,7 @@ KiCad does not read a change to a file that it has open.
 
 ```sh
 python3 -m venv --system-site-packages .venv
-.venv/bin/pip install -e ".[test,dev]"
+.venv/bin/pip install -e ".[dev]"
 .venv/bin/python -m pytest tests/ -q
 ```
 

@@ -10,12 +10,11 @@ its site packages:
 git clone https://github.com/turbyho/kicad-workbench.git
 cd kicad-workbench
 /usr/bin/python3 -m venv --system-site-packages .venv
-.venv/bin/pip install -e ".[test,dev]"
+.venv/bin/pip install -e ".[dev]"
 ```
 
 The extra `test` has the test tools and `hatchling` (a test builds the sdist and the
-wheel). The extra `dev` has the test tools and ruff, with no `hatchling`. Thus install
-the two.
+wheel): CI installs it. The extra `dev` has the extra `test` and ruff.
 
 An MCP client can start this install with `.venv/bin/kicad-workbench`. The server
 keeps the modules of its start: after a change of the code, restart the MCP client.

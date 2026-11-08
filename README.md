@@ -69,15 +69,14 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   variants of KiCad 10.
 - **Edits.** New projects, symbols from the libraries, wires, labels and junctions as
   the schematic editor makes them, and the fields of placed symbols. The server
-  works with the files in the version of the installed KiCad, and refuses a file
-  that KiCad has open.
-- **File versions.** Each KiCad opens a file of an older version and saves it in
-  its own version. Before a tool works with a schematic of an older version, the
-  installed KiCad 10 converts and saves the schematic files of the project
-  (`kicad-cli sch upgrade`), and the output tells it: an older KiCad cannot open
-  them then. kicad-cli 8 and 9 cannot save a schematic: the tool asks the user to
-  save the files in KiCad. A file of a newer version than the installed KiCad is an
-  error, as in KiCad.
+  writes the format of the file version, and refuses a file that KiCad has open.
+- **File versions.** Each KiCad opens a file of an older version, and its next save
+  writes the file in its own version. The server does not convert files: the user
+  converts them in KiCad. A schematic of an older version than the installed KiCad
+  gives a warning with the step for the user. A tool that writes refuses it, because
+  KiCad saves an edit of it in its own version. A file of a newer version than the
+  installed KiCad is an error, as in KiCad: the output tells the user to install a
+  newer KiCad.
 - **Firmware.** Pin functions, pin conflicts, I2C and SPI devices, power domains, and
   device tree sources for STM32F4, ESP32 and nRF52.
 - **Parts registry.** A search in an open registry of KiCad parts

@@ -85,7 +85,7 @@ from ..utils.schematic_settings import (
     off_grid_severity,
     schematic_settings,
 )
-from ..utils.schematic_upgrade import with_current_schematics
+from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 
 
@@ -965,7 +965,7 @@ def _add_pin_label_sync(
 
 
 @mcp.tool()
-@with_current_schematics("file_path")
+@with_schematic_versions("file_path", write=True)
 async def add_hierarchical_label(
     file_path: str,
     reference: str,
@@ -1026,7 +1026,7 @@ async def add_hierarchical_label(
 
 
 @mcp.tool()
-@with_current_schematics("file_path")
+@with_schematic_versions("file_path", write=True)
 async def add_global_label(
     file_path: str,
     reference: str,
@@ -1274,7 +1274,7 @@ def _add_component_from_library_sync(
 
 
 @mcp.tool()
-@with_current_schematics("file_path")
+@with_schematic_versions("file_path", write=True)
 async def add_component_from_library(
     file_path: str,
     library_name: str,
@@ -1501,7 +1501,7 @@ def _add_wire_sync(
 
 
 @mcp.tool()
-@with_current_schematics("file_path")
+@with_schematic_versions("file_path", write=True)
 async def add_wire(
     file_path: str,
     points: list[tuple[float, float]],
@@ -1572,7 +1572,7 @@ def _add_label_sync(
 
 
 @mcp.tool()
-@with_current_schematics("file_path")
+@with_schematic_versions("file_path", write=True)
 async def add_label(
     file_path: str,
     text: str,

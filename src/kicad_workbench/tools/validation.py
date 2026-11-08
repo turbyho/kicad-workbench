@@ -42,7 +42,7 @@ from ..utils.sch_hierarchy import (
     project_files,
     schematic_project_file,
 )
-from ..utils.schematic_upgrade import with_current_schematics
+from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import EXPECTED_ERRORS, error_answer
 
 
@@ -347,7 +347,7 @@ def _filter_drc_errors(errors: list[DRCError], violation_type: str = "") -> list
 
 
 @mcp.tool()
-@with_current_schematics("schematic_path")
+@with_schematic_versions("schematic_path")
 async def run_erc(
     schematic_path: str,
 ) -> str:
@@ -560,7 +560,7 @@ Please check the file path and try again."""
 
 
 @mcp.tool()
-@with_current_schematics("pcb_path")
+@with_schematic_versions("pcb_path")
 async def run_drc(
     pcb_path: str,
 ) -> str:
@@ -731,7 +731,7 @@ Please check the file path and try again."""
 
 
 @mcp.tool()
-@with_current_schematics("schematic_path")
+@with_schematic_versions("schematic_path")
 async def get_erc_violations(
     schematic_path: str,
     severity: str = "",
@@ -819,7 +819,7 @@ No violations match the specified filter.{notes_text}{unannotated_text}"""
 
 
 @mcp.tool()
-@with_current_schematics("pcb_path")
+@with_schematic_versions("pcb_path")
 async def get_drc_violations(
     pcb_path: str,
     violation_type: str = "",
@@ -890,7 +890,7 @@ No violations match the specified filter."""
 
 
 @mcp.tool()
-@with_current_schematics("schematic_path")
+@with_schematic_versions("schematic_path")
 async def export_erc_report(
     schematic_path: str,
     output_path: str = "",
@@ -977,7 +977,7 @@ The ERC report has been successfully exported to the specified location.{_notes_
 
 
 @mcp.tool()
-@with_current_schematics("pcb_path")
+@with_schematic_versions("pcb_path")
 async def export_drc_report(
     pcb_path: str,
     output_path: str = "",

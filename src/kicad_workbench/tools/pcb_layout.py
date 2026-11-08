@@ -20,7 +20,7 @@ from ..utils.kicad_cli import decode_output, run_kicad_cli
 from ..utils.kicad_lock import check_board_not_open, write_board, write_with_warning
 from ..utils.kicad_python import KicadPythonError, board_text
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
-from ..utils.schematic_upgrade import with_current_schematics
+from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 
 # The largest coordinate of KiCad: 2**31 - 1 nm.
@@ -50,7 +50,7 @@ def _version_warning(board_version: int, kicad: str, schematic_version: int) -> 
 
 
 @mcp.tool()
-@with_current_schematics("schematic_path")
+@with_schematic_versions("schematic_path")
 async def setup_pcb_layout(
     schematic_path: str,
     width: float = 100.0,

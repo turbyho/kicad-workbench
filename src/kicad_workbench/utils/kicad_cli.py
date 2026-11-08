@@ -49,8 +49,8 @@ from .sch_hierarchy import (
 )
 
 _cached_exe: str | None = None
-# The version of kicad-cli in one tool call (utils/schematic_upgrade.py sets it): the
-# conversion of the files and the tool use one version, and kicad-cli runs one time.
+# The version of kicad-cli in one tool call (utils/schematic_versions.py sets it): the
+# check of the file versions and the tool use one version, and kicad-cli runs one time.
 _call_version: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "kicad_cli_call_version", default=None
 )

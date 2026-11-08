@@ -36,7 +36,7 @@ from ..utils.sch_hierarchy import (
     AmbiguousRootError,
     schematic_project_file,
 )
-from ..utils.schematic_upgrade import with_current_schematics
+from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 
 _RENDER_SIDES = {"top", "bottom", "left", "right", "front", "back"}
@@ -245,7 +245,7 @@ def _export_svgs(source: Path, keep: set[str] | None) -> list[tuple[str, bytes]]
 
 
 @mcp.tool()
-@with_current_schematics("schematic_path")
+@with_schematic_versions("schematic_path")
 async def export_schematic_svg(
     schematic_path: str,
     output_dir: str = "",

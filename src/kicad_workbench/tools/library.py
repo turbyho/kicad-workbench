@@ -76,7 +76,7 @@ from ..utils.sch_hierarchy import (
     netlist_root,
     schematic_project_file,
 )
-from ..utils.schematic_upgrade import with_current_schematics
+from ..utils.schematic_versions import with_schematic_versions
 from ..utils.svg_image import (
     Plan,
     RegionError,
@@ -1841,7 +1841,7 @@ async def _check_schematic(schematic_path: str, references: list[str] | None) ->
 
 
 @mcp.tool()
-@with_current_schematics("schematic_path")
+@with_schematic_versions("schematic_path")
 async def check_schematic_pin_pad_mapping(
     schematic_path: str, references: list[str] | None = None
 ) -> str:

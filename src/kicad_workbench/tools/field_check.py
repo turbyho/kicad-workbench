@@ -48,7 +48,7 @@ from ..utils.kicad_bom import (
 )
 from ..utils.kicad_cli import KicadCliError, get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
-from ..utils.schematic_upgrade import with_current_schematics
+from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
 from .library import NO_KICAD_CLI
@@ -330,7 +330,7 @@ async def _check(schematic_path: str) -> str:
 
 
 @mcp.tool()
-@with_current_schematics("schematic_path")
+@with_schematic_versions("schematic_path")
 async def check_symbol_fields(schematic_path: str) -> str:
     """Check the MPNs of the symbols: the fields Value, MPN, Value_Confirmed and MPN_Confirmed.
 

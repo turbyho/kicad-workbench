@@ -175,6 +175,7 @@ class TestRefusal:
 
     def test_no_kicad_version(self, tmp_path, fake_pcbnew):
         fake_pcbnew["kicad"] = "unknown"
+        fake_pcbnew["cli"] = "10.0.6"  # installed_kicad_problem refuses "unknown"
         sch = write_schematic(tmp_path, 20260306)
         result = setup(sch)
         assert result.startswith("❌ pcbnew did not give the KiCad version"), result

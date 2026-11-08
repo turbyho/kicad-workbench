@@ -31,9 +31,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from fastmcp.utilities.types import Image
+
 from ..errors import WorkbenchError
 from ..parsers.kicad_versions import (
-    KICAD8,
     RELEASES,
     Release,
     footprint_version,
@@ -43,6 +44,7 @@ from ..parsers.kicad_versions import (
 )
 from ..parsers.sexpr import parse
 from .kicad_cli import (
+    installed_kicad_problem,
     kicad_cli_version_sync,
     no_kicad_message,
     reset_call_version,
@@ -122,7 +124,8 @@ def _installed_kicad() -> str:
 
 def _written_version(kicad: str, kind: str = "schematic") -> Written:
     """Return the version of a file kind ("schematic" or "board") that the installed
-    KiCad writes.
+    KiCad writes. A version that installed_kicad_problem refuses (no major number, a
+    KiCad before KiCad 8) gives FileVersionError.
 
     Each release of a major version writes one schematic version
     (SEXPR_SCHEMATIC_FILE_VERSION of eeschema/sch_file_versions.h: 20231120 in 8.0.0 to
@@ -132,14 +135,9 @@ def _written_version(kicad: str, kind: str = "schematic") -> Written:
     rules of a nightly build only for the nightly builds after the newest release
     (10.99, branch master): such a build writes a newer version than that release.
     """
+    if problem := installed_kicad_problem(kicad):
+        raise FileVersionError(problem)
     numbers = version_numbers(kicad)
-    if numbers is None:
-        raise FileVersionError(f"The version {kicad!r} of kicad-cli has no major number.")
-    if numbers[0] < 8:
-        raise FileVersionError(
-            f"KiCad {kicad} is older than KiCad {KICAD8.name}, the minimum of this server. "
-            "Install KiCad 8 or later."
-        )
     release = kicad_release(kicad)
     if release is not None:
         return Written(getattr(release, kind), True, release)
@@ -369,12 +367,38 @@ def check_schematic_versions(path: Path, write: bool) -> FileVersions:
     return FileVersions(kicad, "\n\n".join(lines))
 
 
-def _with_warnings(result: str, warnings: list[str]) -> str:
-    """Put the warnings of a check before the text of a tool, or after it when the text
-    is an error: an error starts with "❌" (CLAUDE.md rule 7)."""
-    if result.startswith("❌"):
-        return "\n\n".join([result, *warnings])
-    return "\n\n".join([*warnings, result])
+ToolOutput = str | Image | list[str | Image]
+
+
+def _with_warnings(result: ToolOutput, warnings: list[str]) -> ToolOutput:
+    """Put the warnings of a check before the output of a tool: before its text (after
+    it when the text is an error: an error starts with "❌", CLAUDE.md rule 7), before
+    the first text of a list (render_library_item), or before an image (render_pcb).
+
+    Raises:
+        TypeError: There are warnings, and the tool gave an other type of output. The
+            warnings have no place in it: a tool with a structured output needs its
+            own rule.
+    """
+    if isinstance(result, str):
+        if not warnings:
+            return result
+        text = "\n\n".join(warnings)
+        if result.startswith("❌"):
+            return f"{result}\n\n{text}"
+        return f"{text}\n\n{result}"
+    if isinstance(result, list) and all(isinstance(item, (str, Image)) for item in result):
+        if not warnings:
+            return result
+        text = "\n\n".join(warnings)
+        if result and isinstance(result[0], str):
+            return [f"{text}\n\n{result[0]}", *result[1:]]
+        return [text, *result]
+    if isinstance(result, Image):
+        return ["\n\n".join(warnings), result] if warnings else result
+    if not warnings:
+        return result
+    raise TypeError(f"The output of the tool has the type {type(result).__name__}.")
 
 
 def with_schematic_versions(argument: str, write: bool = False) -> Callable:
@@ -420,9 +444,7 @@ def _with_check(check: str, argument: str, write: bool, what: str) -> Callable:
             finally:
                 if token is not None:
                     reset_call_version(token)
-            if checked.warning and isinstance(result, str):
-                return _with_warnings(result, [checked.warning])
-            return result
+            return _with_warnings(result, [checked.warning] if checked.warning else [])
 
         return wrapper
 
@@ -694,16 +716,6 @@ def with_library_versions(function: Callable) -> Callable:
             warnings = _library_warnings.get()
         finally:
             _library_warnings.reset(token)
-        if not warnings:
-            return result
-        if isinstance(result, str):
-            return _with_warnings(result, warnings)
-        if isinstance(result, list):
-            # A tool that gives images (render_library_item): the text comes first.
-            text = "\n\n".join(warnings)
-            if result and isinstance(result[0], str):
-                return [f"{text}\n\n{result[0]}", *result[1:]]
-            return [text, *result]
-        return result
+        return _with_warnings(result, warnings or [])
 
     return wrapper

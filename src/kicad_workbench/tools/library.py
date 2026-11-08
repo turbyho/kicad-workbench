@@ -50,7 +50,7 @@ from ..utils.kicad_cli import (
     decode_output,
     export_with_kicad_cli,
     get_kicad_version,
-    no_kicad_message,
+    installed_kicad_problem,
     run_kicad_cli_sync,
 )
 from ..utils.kicad_python import KicadPythonError, check_same_kicad
@@ -153,8 +153,8 @@ async def _rows(kind: str, project_path: str) -> tuple[list[LibraryRow], list[st
     if kind not in _KINDS:
         raise InputError(f"The kind {kind!r} is not 'symbol' or 'footprint'.")
     version = await get_kicad_version()
-    if version is None:
-        raise InputError(no_kicad_message())
+    if kicad_problem := installed_kicad_problem(version):
+        raise InputError(kicad_problem)
     rows, problems = await asyncio.to_thread(
         lambda: library_rows(kind, version, project_file(project_path))
     )
@@ -598,8 +598,8 @@ async def _get_symbol(lib_id: str, project_path: str) -> str:
     if not library_name or not symbol_name:
         return _SYMBOL_ID_ERROR.format(lib_id)
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
 
     try:
         chain, row, problems, info = await asyncio.to_thread(
@@ -1001,8 +1001,8 @@ async def _get_footprint(lib_id: str, project_path: str) -> str:
     if not library_name or not footprint_name:
         return _FOOTPRINT_ID_ERROR.format(lib_id)
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
 
     try:
         project, row, problems, file, info = await _read_footprint(
@@ -1248,8 +1248,8 @@ async def _check_pin_pad_mapping(symbol_id: str, footprint_id: str, project_path
     if not library_name or not symbol_name:
         return _SYMBOL_ID_ERROR.format(symbol_id)
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
     try:
         chain, row, problems, info = await asyncio.to_thread(
             _read_symbol, library_name, symbol_name, kicad, project_path
@@ -1902,8 +1902,8 @@ async def _check_schematic(schematic_path: str, references: list[str] | None) ->
     if path.suffix != ".kicad_sch" or not path.is_file():
         return f"❌ No schematic file (.kicad_sch) at {schematic_path}."
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
     found = await schematic_footprints(path, kicad, references)
     if isinstance(found, str):
         return found
@@ -2156,8 +2156,8 @@ async def _render(
     if not library_name or not item_name:
         return (_SYMBOL_ID_ERROR if item_type == "symbol" else _FOOTPRINT_ID_ERROR).format(lib_id)
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
 
     def find() -> tuple[
         LibraryRow, list[str], tuple[list[LibrarySymbol], SymbolInfo] | Exception | None

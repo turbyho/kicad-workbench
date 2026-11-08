@@ -252,6 +252,7 @@ _CHECKS_OF_THE_CODE = {
     ("parsers/annotation.py", "check_annotation", "ValueError"),
     ("parsers/sexpr.py", "edited", "ValueError"),
     ("utils/file_versions.py", "_with_check", "NameError"),
+    ("utils/file_versions.py", "_with_warnings", "TypeError"),
 }
 
 

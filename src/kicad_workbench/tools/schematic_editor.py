@@ -74,7 +74,7 @@ from ..utils.file_versions import (
     with_library_versions,
     with_schematic_versions,
 )
-from ..utils.kicad_cli import kicad_cli_version_sync, no_kicad_message
+from ..utils.kicad_cli import installed_kicad_problem, kicad_cli_version_sync
 from ..utils.kicad_lock import writable_schematic_version, write_schematic, write_with_warning
 from ..utils.kicad_project import (
     PRO_SUFFIX,
@@ -1120,8 +1120,8 @@ def _add_component_from_library_sync(
         definition = "already in lib_symbols"
     else:
         kicad = kicad_cli_version_sync()
-        if kicad is None:
-            return f"❌ Cannot add component {lib_id}: {no_kicad_message()}"
+        if kicad_problem := installed_kicad_problem(kicad):
+            return f"❌ Cannot add component {lib_id}: {kicad_problem}"
         found = _library_definition(project, library_name, symbol_name, kicad, version)
         if isinstance(found, str):
             return found

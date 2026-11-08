@@ -393,3 +393,23 @@ class TestEnglishSettings:
         assert "Found" in text and "Nalezeno" not in text, text
         violations = json.loads(report.read_text(encoding="utf-8"))["sheets"][0]["violations"]
         assert violations and all(v["description"].isascii() for v in violations), violations
+
+
+@pytest.mark.parametrize(
+    "version, start",
+    [
+        (None, "KiCad is not installed"),
+        ("", "KiCad is not installed"),
+        ("unknown", "The version 'unknown' of kicad-cli has no major number."),
+        ("7.0.11", "KiCad 7.0.11 is older than KiCad 8, the minimum of this server."),
+    ],
+)
+def test_installed_kicad_problem(monkeypatch, version, start):
+    monkeypatch.setattr(kicad_cli, "_version_problem", None)
+    problem = kicad_cli.installed_kicad_problem(version)
+    assert problem is not None and problem.startswith(start), problem
+
+
+@pytest.mark.parametrize("version", ["8.0.0", "9.0.9", "10.0.6", "10.99.0"])
+def test_installed_kicad_with_no_problem(version):
+    assert kicad_cli.installed_kicad_problem(version) is None

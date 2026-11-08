@@ -47,7 +47,7 @@ from ..utils.kicad_bom import (
     unit_check_lines,
     variant_label,
 )
-from ..utils.kicad_cli import KicadCliError, get_kicad_version, no_kicad_message
+from ..utils.kicad_cli import KicadCliError, get_kicad_version, installed_kicad_problem
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
@@ -235,8 +235,8 @@ async def _check(schematic_path: str) -> str:
     if path.suffix != ".kicad_sch" or not path.is_file():
         return f"❌ The schematic {path} does not exist or is not a .kicad_sch file."
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
     major = bom_rules(kicad)
     try:
         kicad_major(kicad)  # the references of the symbols after the load

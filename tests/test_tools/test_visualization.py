@@ -13,10 +13,39 @@ from kicad_workbench.tools.visualization import (
 )
 
 
-class _FakeResult:
-    def __init__(self, returncode=0, stderr=b""):
-        self.returncode = returncode
-        self.stderr = stderr
+class _ExportRun:
+    """A kicad-cli that writes the file of --output (or no file)."""
+
+    def __init__(self, content=b"PNG", code=0, write=True, stderr=b"", stdout=b""):
+        self.content, self.code, self.write = content, code, write
+        self.stderr, self.stdout = stderr, stdout
+        self.calls = []
+        self.english = []
+
+    def __call__(self, args, timeout=60.0, english=False):
+        self.calls.append(args)
+        self.english.append(english)
+        if self.write:
+            Path(args[args.index("--output") + 1]).write_bytes(self.content)
+        result = _FakeRun(self.code, self.stderr)
+        result.stdout = self.stdout
+        return result
+
+
+def _no_run(*args, **kwargs):
+    pytest.fail("kicad-cli must not run")
+
+
+@pytest.fixture
+def cli(monkeypatch):
+    """Set the kicad-cli of export_with_kicad_cli (utils/kicad_cli.py)."""
+    from kicad_workbench.utils import kicad_cli
+
+    def set_run(run):
+        monkeypatch.setattr(kicad_cli, "run_kicad_cli_sync", run)
+        return run
+
+    return set_run
 
 
 @pytest.fixture
@@ -33,23 +62,89 @@ def sch_file(tmp_path):
     return f
 
 
+@pytest.mark.usefixtures("kicad_version")
 class TestRenderPcb:
-    def test_args_include_input_file(self, monkeypatch, pcb_file, tmp_path):
-        """Regression: the input file MUST be the last positional arg — an
-        earlier version omitted it and kicad-cli failed with rc=1."""
-        captured = {}
+    def test_kicad_8_has_no_render(self, monkeypatch, cli, pcb_file):
+        """kicad-cli 8.0.9 has no "pcb render" (its "pcb" has only drc and export)."""
+        from kicad_workbench.utils import kicad_cli
 
-        async def fake(args, timeout=60.0):
-            captured["args"] = args
-            return _FakeResult()
+        monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "8.0.9")
+        cli(_no_run)
+        result = asyncio.run(render_pcb(str(pcb_file)))
+        assert result.startswith("❌ render_pcb needs KiCad 9 or later: kicad-cli 8.0.9"), result
 
-        monkeypatch.setattr(visualization, "run_kicad_cli", fake)
+    @pytest.mark.file_versions
+    def test_a_kicad_8_board_with_kicad_8(self, monkeypatch, cli, tmp_path):
+        """The version check of the board (KiCad 8 writes 20240108) passes, and the
+        tool gives the step for KiCad 9."""
+        from kicad_workbench.utils import file_versions, kicad_cli
+
+        board = tmp_path / "b.kicad_pcb"
+        board.write_text('(kicad_pcb (version 20240108) (generator "pcbnew"))\n', encoding="utf-8")
+        monkeypatch.setattr(file_versions, "kicad_cli_version_sync", lambda: "8.0.9")
+        monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "8.0.9")
+        cli(_no_run)
+        result = asyncio.run(render_pcb(str(board)))
+        assert result.startswith("❌ render_pcb needs KiCad 9 or later: kicad-cli 8.0.9"), result
+        assert "⚠️" not in result
+
+    def test_an_old_image_is_not_the_result(self, cli, pcb_file, tmp_path):
+        """kicad-cli exits with 0 and writes no file: the image of an earlier render
+        is not the result, and the tool does not change it."""
+        cli(_ExportRun(write=False))
         out = tmp_path / "r.png"
-        result = asyncio.run(render_pcb(str(pcb_file), side="top", output_path=str(out)))
-        assert captured["args"][0:2] == ["pcb", "render"]
-        assert captured["args"][-1] == str(pcb_file)
-        assert "--side" in captured["args"]
-        assert isinstance(result, object)  # Image or str, not an exception
+        out.write_bytes(b"old image")
+        result = asyncio.run(render_pcb(str(pcb_file), output_path=str(out)))
+        assert isinstance(result, str) and result.startswith("❌ PCB render failed"), result
+        assert out.read_bytes() == b"old image"
+
+    def test_the_error_of_kicad_cli(self, cli, pcb_file):
+        cli(_ExportRun(code=1, write=False, stderr=b"Failed to load board"))
+        result = asyncio.run(render_pcb(str(pcb_file)))
+        assert result == (
+            "❌ PCB render failed: kicad-cli stopped with the exit code 1: Failed to load board"
+        ), result
+
+    def test_args_and_the_image(self, cli, pcb_file, tmp_path):
+        """The input file is the last argument. kicad-cli writes into a temporary
+        folder in English, and the tool saves the image in the output file."""
+        run = cli(_ExportRun(content=b"new image"))
+        out = tmp_path / "r.png"
+        result = asyncio.run(render_pcb(str(pcb_file), side="bottom", output_path=str(out)))
+        args = run.calls[0]
+        assert args[0:2] == ["pcb", "render"] and run.english == [True]
+        target = Path(args[args.index("--output") + 1])
+        assert target.name == "output.png"
+        assert target.parent != out.parent and not target.parent.exists()
+        assert args[args.index("--side") + 1] == "bottom"
+        assert args[-1] == str(pcb_file)
+        assert isinstance(result, visualization.Image) and result.data == b"new image"
+        assert result.to_image_content().mimeType == "image/png"
+        assert out.read_bytes() == b"new image"
+
+    @pytest.mark.parametrize("name", ["r.jpg", "r.JPEG"])
+    def test_a_jpeg_image(self, cli, pcb_file, tmp_path, name):
+        """command_pcb_render.cpp (KiCad 9 and 10) writes a JPEG for a file name that
+        ends with .jpg or .jpeg (in lower case)."""
+        run = cli(_ExportRun(content=b"jpeg data"))
+        out = tmp_path / name
+        result = asyncio.run(render_pcb(str(pcb_file), output_path=str(out)))
+        target = Path(run.calls[0][run.calls[0].index("--output") + 1])
+        assert target.suffix == out.suffix.lower()
+        assert isinstance(result, visualization.Image)
+        assert result.to_image_content().mimeType == "image/jpeg"
+        assert out.read_bytes() == b"jpeg data"
+
+    def test_the_default_output_file(self, cli, pcb_file):
+        cli(_ExportRun())
+        asyncio.run(render_pcb(str(pcb_file), side="left"))
+        assert (pcb_file.parent / "board_render_left.png").read_bytes() == b"PNG"
+
+    def test_an_output_file_of_an_other_type(self, cli, pcb_file, tmp_path):
+        cli(_no_run)
+        result = asyncio.run(render_pcb(str(pcb_file), output_path=str(tmp_path / "r.kicad_pcb")))
+        assert result.startswith("❌ The output file"), result
+        assert "must have the extension .png or .jpg or .jpeg" in result
 
     def test_rejects_invalid_side(self, pcb_file):
         result = asyncio.run(render_pcb(str(pcb_file), side="diagonal"))
@@ -63,52 +158,95 @@ class TestRenderPcb:
         result = asyncio.run(render_pcb(str(tmp_path / "nope.kicad_pcb")))
         assert isinstance(result, str) and "not found" in result
 
-    def test_rotate_appended_before_input(self, monkeypatch, pcb_file, tmp_path):
-        captured = {}
-
-        async def fake(args, timeout=60.0):
-            captured["args"] = args
-            return _FakeResult()
-
-        monkeypatch.setattr(visualization, "run_kicad_cli", fake)
+    def test_rotate(self, cli, pcb_file, tmp_path):
+        run = cli(_ExportRun())
         asyncio.run(
             render_pcb(str(pcb_file), output_path=str(tmp_path / "r.png"), rotate="-60,0,30")
         )
-        args = captured["args"]
-        assert args[-3:-1] == ["--rotate", "-60,0,30"]
+        args = run.calls[0]
+        assert args[args.index("--rotate") + 1] == "-60,0,30"
         assert args[-1] == str(pcb_file)
 
 
 class TestExportStep:
-    def test_args_include_input_file(self, monkeypatch, pcb_file, tmp_path):
-        captured = {}
-
-        async def fake(args, timeout=60.0):
-            captured["args"] = args
-            return _FakeResult()
-
-        monkeypatch.setattr(visualization, "run_kicad_cli", fake)
+    def test_args_and_the_file(self, cli, pcb_file, tmp_path):
+        run = cli(_ExportRun(content=b"ISO-10303-21;"))
         out = tmp_path / "b.step"
-        # create the file so the success path sees it
-        out.write_bytes(b"ISO-10303-21;")
         result = asyncio.run(export_pcb_3d(str(pcb_file), output_path=str(out)))
-        assert captured["args"][0:4] == ["pcb", "export", "step", "--output"]
-        assert captured["args"][-1] == str(pcb_file)
-        assert "✅" in result
+        args = run.calls[0]
+        assert args[0:4] == ["pcb", "export", "step", "--force"] and run.english == [True]
+        assert args[-1] == str(pcb_file) and "--board-only" not in args
+        assert result.startswith("✅") and f"**Output:** {out}" in result
+        assert result.endswith("## Messages of kicad-cli\n\n```\n(no messages)\n```")
+        assert out.read_bytes() == b"ISO-10303-21;"
 
-    def test_board_only_inserted_before_input(self, monkeypatch, pcb_file, tmp_path):
-        captured = {}
-
-        async def fake(args, timeout=60.0):
-            captured["args"] = args
-            return _FakeResult()
-
-        monkeypatch.setattr(visualization, "run_kicad_cli", fake)
+    def test_board_only(self, cli, pcb_file, tmp_path):
+        run = cli(_ExportRun(content=b"ISO-10303-21;"))
         out = tmp_path / "b.step"
-        out.write_bytes(b"ISO-10303-21;")
         asyncio.run(export_pcb_3d(str(pcb_file), output_path=str(out), board_only=True))
-        assert captured["args"][-2] == "--board-only"
-        assert captured["args"][-1] == str(pcb_file)
+        assert "--board-only" in run.calls[0] and run.calls[0][-1] == str(pcb_file)
+
+    def test_an_old_model_is_not_the_result(self, cli, pcb_file, tmp_path):
+        cli(_ExportRun(write=False))
+        out = tmp_path / "b.step"
+        out.write_bytes(b"old model")
+        result = asyncio.run(export_pcb_3d(str(pcb_file), output_path=str(out)))
+        assert result.startswith("❌ STEP export failed: kicad-cli stopped with the exit code 0")
+        assert out.read_bytes() == b"old model"
+
+    def test_a_message_with_no_reason(self, cli, pcb_file, tmp_path):
+        """The line after the message is the reason only when it is a reason of
+        EXPORTER_STEP::buildFootprint3DShapes."""
+        stdout = b"Could not add 3D model for R1.\nCould not add 3D model for R2.\n"
+        cli(_ExportRun(content=b"ISO-10303-21;", stdout=stdout))
+        result = asyncio.run(export_pcb_3d(str(pcb_file), output_path=str(tmp_path / "b.step")))
+        assert "- R1: kicad-cli gave no reason\n- R2: kicad-cli gave no reason" in result
+
+    def test_a_warning_of_the_save_is_no_success(self, cli, monkeypatch, pcb_file, tmp_path):
+        """CLAUDE.md rule 7: no "✅" when a step after the save failed."""
+        cli(_ExportRun(content=b"ISO-10303-21;"))
+        monkeypatch.setattr(visualization, "save_files", lambda files: ["The flush failed."])
+        result = asyncio.run(export_pcb_3d(str(pcb_file), output_path=str(tmp_path / "b.step")))
+        assert result.startswith("⚠️ STEP 3D model exported, with a warning of the save."), result
+        assert "⚠️ The flush failed." in result
+
+    @pytest.mark.parametrize("word", ["to", "for"])  # KiCad 8, KiCad 9 and 10
+    def test_the_models_that_kicad_cli_did_not_add(self, cli, pcb_file, tmp_path, word):
+        """EXPORTER_STEP::buildFootprint3DShapes gives a warning for each model that it
+        did not add. The tool gives these models, and no "✅". The messages of kicad-cli
+        have no line that names the temporary file (export_with_kicad_cli)."""
+        run = _ExportRun(content=b"ISO-10303-21;")
+
+        def with_messages(args, timeout=60.0, english=False):
+            target = args[args.index("--output") + 1]
+            run.stdout = (
+                f"Build STEP data\n\nCould not add 3D model {word} R1.\n"
+                "File not found: ${KICAD8_3DMODEL_DIR}/R.3dshapes/R_0805.wrl\n"
+                f"Could not add 3D model {word} U1.\nOpenCASCADE error: bad shape\n"
+                f"STEP file '{target}' created."  # no line break at the end
+            ).encode()
+            run.stderr = b"Error on stderr\n"
+            return run(args, timeout, english)
+
+        cli(with_messages)
+        result = asyncio.run(export_pcb_3d(str(pcb_file), output_path=str(tmp_path / "b.step")))
+        assert result.startswith("⚠️ STEP 3D model exported, with no 3D model"), result
+        assert "no 3D model for 2 item(s)" in result
+        assert "- R1: File not found: ${KICAD8_3DMODEL_DIR}/R.3dshapes/R_0805.wrl" in result
+        assert "- U1: OpenCASCADE error: bad shape" in result
+        assert result.endswith(
+            f"```\nBuild STEP data\nCould not add 3D model {word} R1.\n"
+            "File not found: ${KICAD8_3DMODEL_DIR}/R.3dshapes/R_0805.wrl\n"
+            f"Could not add 3D model {word} U1.\nOpenCASCADE error: bad shape\n"
+            "Error on stderr\n```"
+        ), result
+
+    @pytest.mark.parametrize("name", ["b.png", "board.kicad_pcb"])
+    def test_an_output_file_of_an_other_type(self, cli, pcb_file, name):
+        cli(_no_run)
+        result = asyncio.run(export_pcb_3d(str(pcb_file), output_path=str(pcb_file.parent / name)))
+        assert "must have the extension .step or .stp" in result, result
+        assert pcb_file.read_text(encoding="utf-8") == "(kicad_pcb (version 20240130))"
 
 
 class _SvgRun:
@@ -129,10 +267,12 @@ class _SvgRun:
 
 
 class _FakeRun:
-    def __init__(self, returncode):
+    def __init__(self, returncode, stderr=None):
         self.returncode = returncode
         self.stdout = b""
-        self.stderr = b"" if returncode == 0 else b"Error: cannot load"
+        if stderr is None:
+            stderr = b"" if returncode == 0 else b"Error: cannot load"
+        self.stderr = stderr
 
 
 ROOT_UUID = "11111111-1111-1111-1111-111111111111"

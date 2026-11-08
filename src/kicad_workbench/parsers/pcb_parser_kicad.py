@@ -66,10 +66,10 @@ class PCBFootprint:
 
     reference: str
     value: str
-    library: str
+    footprint_id: str
     position: tuple[float, float]
     rotation: float
-    pads_count: int
+    pad_count: int
     layer: str
     properties: dict[str, str] = field(default_factory=dict)
 
@@ -168,9 +168,6 @@ class PCBParserKiCad:
         footprints = []
         for fp in self.board.GetFootprints():
             pos = fp.GetPosition()
-            fpid = fp.GetFPID()
-            library = fpid.GetLibItemName() if fpid.IsValid() else ""
-
             properties: dict[str, str] = {}
             for key in ("Reference", "Value", "Footprint", "Datasheet"):
                 try:
@@ -180,16 +177,19 @@ class PCBParserKiCad:
                 except Exception:
                     pass
 
-            footprints.append(PCBFootprint(
-                reference=fp.GetReference(),
-                value=fp.GetValue(),
-                library=library,
-                position=self._pos_mm(pos),
-                rotation=fp.GetOrientation().AsDegrees(),
-                pads_count=fp.GetPadCount(),
-                layer=_canonicalize_layer(fp.GetLayerName()),
-                properties=properties,
-            ))
+            footprints.append(
+                PCBFootprint(
+                    reference=fp.GetReference(),
+                    value=fp.GetValue(),
+                    # The text of the board file: LIB_ID::Format.
+                    footprint_id=fp.GetFPIDAsString(),
+                    position=self._pos_mm(pos),
+                    rotation=fp.GetOrientation().AsDegrees(),
+                    pad_count=fp.GetPadCount(),  # all pads, also NPTH
+                    layer=_canonicalize_layer(fp.GetLayerName()),
+                    properties=properties,
+                )
+            )
         return footprints
 
     def get_footprint_by_reference(self, reference: str) -> PCBFootprint | None:

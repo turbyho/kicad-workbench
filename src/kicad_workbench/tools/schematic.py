@@ -20,9 +20,10 @@ from ..parsers.schematic_parser import (
 from ..parsers.sheet_list import EMPTY_REASONS
 from ..server import mcp
 from ..utils.file_versions import with_schematic_versions
-from ..utils.kicad_cli import get_kicad_version, no_kicad_message
+from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.tool_errors import error_answer
+from .library import cell
 from .netlist import NetlistError, netlist_of
 
 
@@ -104,8 +105,8 @@ async def components_of_project(sch_path: Path, kicad: str | None) -> list[Schem
         InputError: The version of KiCad is not known.
     """
     kicad = kicad or await get_kicad_version()
-    if kicad is None:
-        raise InputError(no_kicad_message())
+    if kicad_problem := installed_kicad_problem(kicad):
+        raise InputError(kicad_problem)
     return await asyncio.to_thread(project_components, sch_path, kicad)
 
 
@@ -158,29 +159,30 @@ async def list_schematic_components(
     Args:
         file_path: A .kicad_sch file of the project.
         filter_type: Optional start of the references, for example "R", "C" or
-            "U". The tool makes the filter upper case, not the references.
+            "U" (no difference of case).
         filter_value: Optional text in the Value field (no difference of case).
         filter_dnp: Optional: True gives only the DNP components, False only the
             components that are not DNP.
 
     Returns:
-        A table of the components: reference, value, footprint, the name of the
-        library symbol (with no library name), and the sheet (more than one sheet
-        path) and the flags DNP and In BOM (when a component has one).
+        A table of the components: reference, value, footprint, library ID, and
+        the sheet (more than one sheet path) and the flags DNP and In BOM (when a
+        component has one).
     """
     try:
         path = Path(file_path)
         if not path.is_file():
             return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
-        if kicad is None:
-            return f"❌ {no_kicad_message()}"
+        if kicad_problem := installed_kicad_problem(kicad):
+            return f"❌ {kicad_problem}"
         placed, problems = await asyncio.to_thread(placed_components, path, kicad)
         sheets = {item.sheet for item in placed}
 
         # Apply filters
         if filter_type:
-            placed = [p for p in placed if p.component.reference.startswith(filter_type.upper())]
+            prefix = filter_type.upper()
+            placed = [p for p in placed if p.component.reference.upper().startswith(prefix)]
 
         if filter_value:
             placed = [p for p in placed if filter_value.lower() in p.component.value.lower()]
@@ -199,8 +201,8 @@ async def list_schematic_components(
         has_not_in_bom = any(not c.flags.get("in_bom", True) for c in components)
 
         # Format output
-        header = "| Reference | Value | Footprint | Library |"
-        separator = "|-----------|-------|-----------|---------|"
+        header = "| Reference | Value | Footprint | Library ID |"
+        separator = "|-----------|-------|-----------|------------|"
         if len(sheets) > 1:
             header += " Sheet |"
             separator += "-------|"
@@ -218,9 +220,11 @@ async def list_schematic_components(
 
         for item in placed:
             comp = item.component
-            footprint = comp.footprint or "-"
-            library = comp.library_id.split(":")[-1] if ":" in comp.library_id else comp.library_id
-            row = f"| {comp.reference} | {comp.value} | {footprint} | {library} |"
+            footprint = cell(comp.footprint or "-")
+            row = (
+                f"| {cell(comp.reference)} | {cell(comp.value)} | {footprint} "
+                f"| {cell(comp.library_id)} |"
+            )
             if len(sheets) > 1:
                 row += f" {item.sheet} |"
             if has_dnp or has_not_in_bom:
@@ -284,8 +288,8 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         if not path.is_file():
             return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
-        if kicad is None:
-            return f"❌ {no_kicad_message()}"
+        if kicad_problem := installed_kicad_problem(kicad):
+            return f"❌ {kicad_problem}"
         # The reference is a reference of the project: its units can be in an other
         # file or sheet path than file_path.
         placed, problems = await asyncio.to_thread(placed_components, path, kicad, True)
@@ -377,8 +381,7 @@ async def search_symbols(
             or "library".
 
     Returns:
-        A table of the components that match: reference, value and the name of
-        the library symbol (the search uses the full library ID).
+        A table of the components that match: reference, value and library ID.
     """
     try:
         path = Path(file_path)
@@ -400,8 +403,8 @@ async def search_symbols(
         except re.error as e:
             return f"❌ The pattern {pattern!r} is not a regular expression: {e}"
         kicad = await get_kicad_version()
-        if kicad is None:
-            return f"❌ {no_kicad_message()}"
+        if kicad_problem := installed_kicad_problem(kicad):
+            return f"❌ {kicad_problem}"
         placed, problems = await asyncio.to_thread(placed_components, path, kicad)
 
         def texts(comp: SchematicComponent) -> list[str]:
@@ -422,17 +425,20 @@ async def search_symbols(
             f"# Search Results: '{pattern}'",
             f"Found {len(components)} matching component(s)",
             "",
-            "| Reference | Value | Library |",
-            "|-----------|-------|---------|",
+            "| Reference | Value | Library ID |",
+            "|-----------|-------|------------|",
         ]
 
         for comp in components[:50]:  # Limit to 50 results
-            library = comp.library_id.split(":")[-1] if ":" in comp.library_id else comp.library_id
-            lines.append(f"| {comp.reference} | {comp.value} | {library} |")
+            lines.append(
+                f"| {cell(comp.reference)} | {cell(comp.value)} | {cell(comp.library_id)} |"
+            )
 
         if len(components) > 50:
             lines.append(f"\n... and {len(components) - 50} more")
 
+        # The problems of the hierarchy: the references can be not complete.
+        lines += ["", *_problem_lines(problems)] if problems else []
         return "\n".join(lines)
 
     except Exception as e:
@@ -464,9 +470,9 @@ async def list_schematic_nets(
         if not Path(file_path).is_file():
             return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
-        if kicad is None:
+        if kicad_problem := installed_kicad_problem(kicad):
             # The field rules come from the installed KiCad (kicad_fields).
-            return f"❌ {no_kicad_message()}"
+            return f"❌ {kicad_problem}"
         nets = await asyncio.to_thread(lambda: SchematicParser(file_path, kicad).get_nets())
 
         # Filter for power nets if requested
@@ -567,8 +573,8 @@ async def get_schematic_info(file_path: str) -> str:
         if not path.is_file():
             return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
-        if kicad is None:
-            return f"❌ {no_kicad_message()}"
+        if kicad_problem := installed_kicad_problem(kicad):
+            return f"❌ {kicad_problem}"
         def read():
             parser = SchematicParser(file_path, kicad)
             placed, screens, problems = placed_components_and_files(path, kicad)

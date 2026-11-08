@@ -59,7 +59,7 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   connections across sheets.
 - **Netlist.** The netlist of kicad-cli, and the connections of each pin.
 - **Boards.** Footprints, tracks, vias and zones, the statistics and the design rules
-  (through `pcbnew`), a 3D view as PNG, and the STEP and Gerber exports.
+  (through `pcbnew`), a 3D view as PNG or JPEG, and the STEP and Gerber exports.
 - **Checks.** ERC (with the annotation check of the ERC dialog, which kicad-cli does
   not run) and DRC through kicad-cli, the pin and pad check of "Update PCB from
   Schematic", and the links to the libraries and the 3D models.

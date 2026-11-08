@@ -49,7 +49,7 @@ from ..utils.kicad_bom import (
     unit_check_lines,
     variant_label,
 )
-from ..utils.kicad_cli import CliExport, KicadCliError, get_kicad_version, no_kicad_message
+from ..utils.kicad_cli import CliExport, KicadCliError, get_kicad_version, installed_kicad_problem
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.tool_errors import error_answer
@@ -484,8 +484,8 @@ async def _export_bom(
             "of the default variant)."
         )
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
     major = bom_rules(kicad)
     if (variant or all_variants) and major < 10:
         return f"❌ kicad-cli of KiCad {kicad} has no variants. KiCad 10 and later have them."

@@ -42,7 +42,7 @@ from ..utils.kicad_cli import (
     KicadCliError,
     decode_output,
     get_kicad_version,
-    no_kicad_message,
+    installed_kicad_problem,
     run_kicad_cli_sync,
 )
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
@@ -484,8 +484,8 @@ async def _board_part(board: Path, kicad: str) -> _Part:
 
 async def _check_links(project_path: str) -> str:
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
     project = await asyncio.to_thread(project_file, project_path)
     if project is None:
         return "❌ Give the project: a .kicad_pro, .kicad_sch or .kicad_pcb file, or its directory."

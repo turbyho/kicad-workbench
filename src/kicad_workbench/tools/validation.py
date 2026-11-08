@@ -34,6 +34,7 @@ from ..utils.kicad_cli import (
     cli_root,
     decode_output,
     get_kicad_version,
+    installed_kicad_problem,
     run_kicad_cli,
 )
 from ..utils.kicad_project import (
@@ -217,11 +218,8 @@ async def _annotation_errors(root: Path) -> tuple[ErcAnnotation | None, list[str
     schematic editor runs it before the other checks (parsers/annotation.py).
     """
     version = await get_kicad_version()
-    if version is None:
-        return None, [
-            "⚠️ The version of KiCad is not known: the result has no annotation check of "
-            "the ERC dialog."
-        ]
+    if kicad_problem := installed_kicad_problem(version):
+        return None, [f"⚠️ The result has no annotation check of the ERC dialog: {kicad_problem}"]
     try:
         project = await asyncio.to_thread(schematic_project_file, root)
         check = await asyncio.to_thread(erc_violations, project, version)

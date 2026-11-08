@@ -67,7 +67,7 @@ from ..parsers.symbol_info import letter_reference
 from ..parsers.unit_fields import is_confirmed_field, is_mpn_confirmed_field
 from ..server import mcp
 from ..utils.file_versions import with_schematic_versions
-from ..utils.kicad_cli import get_kicad_version, no_kicad_message
+from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
 from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
 from ..utils.library_tables import kicad_environment
@@ -714,8 +714,8 @@ async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) ->
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
     kicad = await get_kicad_version()
-    if kicad is None:
-        return f"❌ {no_kicad_message()}"
+    if kicad_problem := installed_kicad_problem(kicad):
+        return f"❌ {kicad_problem}"
     try:
         kicad_major(kicad)
     except InputError as e:

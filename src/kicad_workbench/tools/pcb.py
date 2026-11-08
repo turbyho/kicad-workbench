@@ -6,12 +6,12 @@ import asyncio
 import functools
 
 from ..errors import WorkbenchError
-from ..parsers.kicad_versions import version_numbers
 from ..server import mcp
 from ..utils import kicad_cli
 from ..utils.file_versions import with_board_versions
 from ..utils.kicad_python import KicadPythonError, check_same_kicad
 from ..utils.tool_errors import error_answer
+from .library import cell
 
 
 class PcbnewImportError(WorkbenchError):
@@ -76,11 +76,8 @@ def _board_tool(limits: str):
                 return f"❌ {e}"
             # The installed KiCad is the KiCad of kicad-cli (CLAUDE.md rule 4).
             kicad = await kicad_cli.get_kicad_version()
-            numbers = version_numbers(kicad) if kicad else None
-            if numbers is None:
-                return f"❌ {kicad_cli.no_kicad_message()}"
-            if numbers[0] < 8:
-                return f"❌ KiCad {kicad} is older than KiCad 8, the minimum of this server."
+            if problem := kicad_cli.installed_kicad_problem(kicad):
+                return f"❌ {problem}"
             if not text_reader:
                 # The pcbnew of the server process reads the board.
                 try:
@@ -143,50 +140,30 @@ async def list_pcb_footprints(
     """
     try:
         parser = _get_parser(file_path)
+        # The two readers give the same fields: the library ID as the board file
+        # has it (LIB_ID::Format), and the number of all pads (FOOTPRINT::GetPadCount).
+        footprints = parser.get_footprints()
+        if filter_layer:
+            footprints = [f for f in footprints if f.layer == filter_layer]
 
-        if _is_pcbnew(parser):
-            footprints = parser.get_footprints()
-            if filter_layer:
-                footprints = [f for f in footprints if f.layer == filter_layer]
+        if not footprints:
+            return "No footprints found."
 
-            if not footprints:
-                return "No footprints found."
-
-            lines = [
-                f"# Footprints in {file_path}",
-                f"Total: {len(footprints)} footprint(s)",
-                "",
-                "| Reference | Value | Library | Layer | Position | Rotation | Pads |",
-                "|-----------|-------|---------|-------|----------|----------|------|",
-            ]
-            for fp in footprints:
-                pos_str = f"({fp.position[0]:.2f}, {fp.position[1]:.2f})"
-                lines.append(
-                    f"| {fp.reference} | {fp.value} | {fp.library} | {fp.layer} | {pos_str} | {fp.rotation:.1f}° | {fp.pads_count} |"
-                )
-            return "\n".join(lines)
-        else:
-            footprints = parser.get_footprints()
-            if filter_layer:
-                footprints = [f for f in footprints if f.layer == filter_layer]
-
-            if not footprints:
-                return "No footprints found."
-
-            lines = [
-                f"# Footprints in {file_path}",
-                f"Total: {len(footprints)} footprint(s)",
-                "",
-                "| Reference | Value | Footprint | Layer | Position | Rotation | Pads |",
-                "|-----------|-------|-----------|-------|----------|----------|------|",
-            ]
-            for fp in footprints:
-                fp_name = fp.footprint_id.split(":")[-1] if ":" in fp.footprint_id else fp.footprint_id
-                pos_str = f"({fp.position[0]:.2f}, {fp.position[1]:.2f})"
-                lines.append(
-                    f"| {fp.reference} | {fp.value} | {fp_name} | {fp.layer} | {pos_str} | {fp.rotation:.1f}° | {fp.pad_count} |"
-                )
-            return "\n".join(lines)
+        lines = [
+            f"# Footprints in {file_path}",
+            f"Total: {len(footprints)} footprint(s)",
+            "",
+            "| Reference | Value | Library ID | Layer | Position | Rotation | Pads |",
+            "|-----------|-------|------------|-------|----------|----------|------|",
+        ]
+        for fp in footprints:
+            pos_str = f"({fp.position[0]:.2f}, {fp.position[1]:.2f})"
+            lines.append(
+                f"| {cell(fp.reference)} | {cell(fp.value)} | {cell(fp.footprint_id)} "
+                f"| {fp.layer} | {pos_str} "
+                f"| {fp.rotation:.1f}° | {fp.pad_count} |"
+            )
+        return "\n".join(lines)
 
     except Exception as e:
         return error_answer(e, "Error parsing PCB")

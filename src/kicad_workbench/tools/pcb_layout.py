@@ -17,7 +17,12 @@ from ..parsers.sexpr import SExprError, parse
 from ..server import mcp
 from ..utils.file_stamp import FileStamp, file_stamp
 from ..utils.file_versions import with_board_versions, with_schematic_versions
-from ..utils.kicad_cli import decode_output, get_kicad_version, no_kicad_message, run_kicad_cli
+from ..utils.kicad_cli import (
+    decode_output,
+    get_kicad_version,
+    installed_kicad_problem,
+    run_kicad_cli,
+)
 from ..utils.kicad_lock import check_board_not_open, write_board, write_with_warning
 from ..utils.kicad_python import KicadPythonError, board_text, check_same_kicad
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
@@ -115,8 +120,8 @@ async def setup_pcb_layout(
         stamp, version = checked
 
         cli = await get_kicad_version()
-        if cli is None:
-            return f"❌ {no_kicad_message()}"
+        if kicad_problem := installed_kicad_problem(cli):
+            return f"❌ {kicad_problem}"
         try:
             pcb_content, kicad = await board_text(pcb_path.name, sch_path.stem, (w, h))
             check_same_kicad(kicad, "the Python with pcbnew", cli)

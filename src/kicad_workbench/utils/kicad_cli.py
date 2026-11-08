@@ -89,6 +89,24 @@ def no_kicad_message() -> str:
     )
 
 
+def installed_kicad_problem(kicad: str | None) -> str | None:
+    """Return why a tool cannot work with the installed KiCad, or None. kicad is the
+    version of kicad_cli_version_sync: None gives no_kicad_message, a version with no
+    major number or a KiCad before KiCad 8 (the minimum) gives its own message. Each
+    check of the minimum version uses this function."""
+    if not kicad:
+        return no_kicad_message()
+    numbers = version_numbers(kicad)
+    if numbers is None:
+        return f"The version {kicad!r} of kicad-cli has no major number."
+    if numbers[0] < 8:
+        return (
+            f"KiCad {kicad} is older than KiCad 8, the minimum of this server. "
+            f"Tell the user: {INSTALL_KICAD}."
+        )
+    return None
+
+
 class KicadCliError(WorkbenchError):
     """kicad-cli cannot run, did not stop in time, or did not write its output. The
     message tells why."""

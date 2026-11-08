@@ -14,6 +14,7 @@ inline instead of just a path.
 
 import asyncio
 import collections
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,15 +23,18 @@ from pathlib import Path
 from fastmcp.utilities.types import Image
 
 from ..errors import InputError
+from ..parsers.kicad_versions import version_numbers
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, save_files
 from ..utils.file_versions import with_board_versions, with_schematic_versions
 from ..utils.kicad_cli import (
+    KicadCliError,
     cli_root,
     cli_sheet_paths,
     decode_output,
+    export_with_kicad_cli,
     get_kicad_version,
-    run_kicad_cli,
+    installed_kicad_problem,
     run_kicad_cli_sync,
 )
 from ..utils.sch_hierarchy import (
@@ -41,6 +45,50 @@ from ..utils.tool_errors import error_answer
 
 _RENDER_SIDES = {"top", "bottom", "left", "right", "front", "back"}
 _RENDER_QUALITIES = {"basic", "high", "user", "job_settings"}
+# The image files of "pcb render" (command_pcb_render.cpp of KiCad 9 and 10: the output
+# file name, in lower case, ends with .png, .jpg or .jpeg), and their image format.
+_RENDER_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
+
+
+def _output_problem(out: Path, suffixes: tuple[str, ...]) -> str | None:
+    """Return why the tool must not write its output file, or None. The extension
+    must be one of suffixes: thus the output is never a KiCad file (also not the
+    board)."""
+    if out.suffix.lower() not in suffixes:
+        return f"The output file {out} must have the extension {' or '.join(suffixes)}."
+    return None
+
+
+# The message of EXPORTER_STEP::buildFootprint3DShapes for a 3D model that it did not
+# add: "Could not add 3D model to <reference>." (KiCad 8) or "... for <reference>."
+# (KiCad 9 and 10), then the reason on the next line ("File not found: <path>" or
+# "OpenCASCADE error: <text>"). The CLI reporter writes warnings and other messages
+# to stdout with no mark of the severity (CLI_REPORTER::Report), thus only the text
+# shows the warning.
+_NO_MODEL = re.compile(r"^Could not add 3D model (?:to|for) (.+)\.$")
+_NO_MODEL_REASONS = ("File not found: ", "OpenCASCADE error: ")
+
+
+def _models_not_added(messages: list[str]) -> list[str]:
+    """Return the 3D models that the STEP export did not add, from the messages of
+    kicad-cli (CliExport.messages): "<reference>: <reason>"."""
+    found = []
+    for i, line in enumerate(messages):
+        if match := _NO_MODEL.match(line):
+            reason = messages[i + 1] if i + 1 < len(messages) else ""
+            if not reason.startswith(_NO_MODEL_REASONS):
+                reason = "kicad-cli gave no reason"
+            found.append(f"{match.group(1)}: {reason}")
+    return found
+
+
+def _save_output(out: Path, data: bytes) -> list[str] | str:
+    """Save the output file (file_save.save_files): the warnings, or the error."""
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return save_files([(out, data)])
+    except (OSError, SaveFilesError) as e:
+        return f"❌ The tool cannot write {out}: {e}"
 
 
 @mcp.tool()
@@ -53,8 +101,8 @@ async def render_pcb(
     height: int = 900,
     quality: str = "basic",
     rotate: str = "",
-) -> Image | str:
-    """Render a 3D view of a board as a PNG image with kicad-cli (KiCad 9 or later).
+) -> Image | str | list[str | Image]:
+    """Render a 3D view of a board as an image with kicad-cli (KiCad 9 or later).
 
     The image has the board and the 3D models of the footprints: a footprint with no
     3D model has no body in the image. Use the image for a visual review of the layout.
@@ -63,8 +111,8 @@ async def render_pcb(
         pcb_path: The .kicad_pcb file.
         side: The side of the camera: "top" (default), "bottom", "left", "right",
             "front" or "back".
-        output_path: Optional PNG file. Default: <board>_render_<side>.png next to
-            the board.
+        output_path: Optional image file: .png, or .jpg or .jpeg for a JPEG image.
+            Default: <board>_render_<side>.png next to the board.
         width: The width of the image in pixels (default 1600).
         height: The height of the image in pixels (default 900).
         quality: "basic" (default, fast), "high" (ray tracing, slower), "user" or
@@ -73,7 +121,8 @@ async def render_pcb(
             "-30,0,25".
 
     Returns:
-        The image, or an error.
+        The image, or an error. A warning (an older board, a step of the save)
+        comes before the image.
     """
     try:
         pcb = Path(pcb_path)
@@ -86,37 +135,36 @@ async def render_pcb(
                 f"❌ Invalid quality '{quality}'. Options: {', '.join(sorted(_RENDER_QUALITIES))}"
             )
 
-        out = Path(output_path) if output_path else pcb.parent / f"{pcb.stem}_render_{side}.png"
-        out.parent.mkdir(parents=True, exist_ok=True)
-
-        args = [
-            "pcb",
-            "render",
-            "--output",
-            str(out),
-            "--side",
-            side,
-            "--width",
-            str(width),
-            "--height",
-            str(height),
-            "--quality",
-            quality,
-        ]
-        if rotate:
-            args += ["--rotate", rotate]
-        args.append(str(pcb))
-
-        result = await run_kicad_cli(args, timeout=180)
-
-        if result.returncode != 0 or not out.exists():
-            stderr = decode_output(result.stderr).strip()
+        # kicad-cli has "pcb render" from KiCad 9: the "pcb" of kicad-cli 8.0.9 has only
+        # drc and export (spike/kicad-versions/pcb_render_check.py).
+        kicad = await get_kicad_version()
+        if problem := installed_kicad_problem(kicad):
+            return f"❌ {problem}"
+        if version_numbers(kicad)[0] < 9:
             return (
-                f"❌ PCB render failed (kicad-cli rc={result.returncode}):\n\n"
-                f"{stderr or '(no stderr, and no output file produced)'}"
+                f'❌ render_pcb needs KiCad 9 or later: kicad-cli {kicad} has no "pcb render". '
+                "Tell the user: install KiCad 9 or later for a 3D view. With KiCad 8, "
+                "export_pcb_3d gives a STEP model."
             )
 
-        return Image(path=str(out))
+        out = Path(output_path) if output_path else pcb.parent / f"{pcb.stem}_render_{side}.png"
+        suffix = out.suffix.lower()
+        if problem := _output_problem(out, tuple(_RENDER_FORMATS)):
+            return f"❌ {problem}"
+        command = ["pcb", "render", "--side", side, "--width", str(width)]
+        command += ["--height", str(height), "--quality", quality]
+        command += ["--rotate", rotate] if rotate else []
+        try:
+            made = await asyncio.to_thread(
+                export_with_kicad_cli, command, pcb, f"output{suffix}", 180
+            )
+        except KicadCliError as e:
+            return f"❌ PCB render failed: {e}"
+        saved = await asyncio.to_thread(_save_output, out, made.data)
+        if isinstance(saved, str):
+            return saved
+        image = Image(data=made.data, format=_RENDER_FORMATS[suffix])
+        return [f"⚠️ {warning}" for warning in saved] + [image] if saved else image
     except FileNotFoundError as e:  # kicad-cli is not there
         return f"❌ {e}"
     except Exception as e:
@@ -132,15 +180,19 @@ async def export_pcb_3d(
 ) -> str:
     """Export a board as a STEP 3D model with kicad-cli, for mechanical CAD.
 
-    The model has the board and the 3D models of its footprints.
+    The model has the board and the 3D models of its footprints. kicad-cli does not
+    add a 3D model that it cannot find or read: the tool then gives a warning with the
+    footprints and the reason. Tell the user about each such footprint.
 
     Args:
         pcb_path: The .kicad_pcb file.
-        output_path: Optional .step file. Default: <board>.step next to the board.
+        output_path: Optional .step or .stp file. Default: <board>.step next to the
+            board.
         board_only: True gives only the board, with no models of the footprints.
 
     Returns:
-        The path and the size of the STEP file.
+        The path and the size of the STEP file, a warning for each 3D model that is
+        not in the file, and the messages of kicad-cli.
     """
     try:
         pcb = Path(pcb_path)
@@ -148,29 +200,49 @@ async def export_pcb_3d(
             return f"❌ PCB file not found: {pcb_path}"
 
         out = Path(output_path) if output_path else pcb.parent / f"{pcb.stem}.step"
-        out.parent.mkdir(parents=True, exist_ok=True)
-
-        args = ["pcb", "export", "step", "--output", str(out), "--force", str(pcb)]
-        if board_only:
-            args.insert(-1, "--board-only")
-
-        result = await run_kicad_cli(args, timeout=300)
-
-        if result.returncode != 0 or not out.exists():
-            stderr = decode_output(result.stderr).strip()
-            return (
-                f"❌ STEP export failed (kicad-cli rc={result.returncode}):\n\n"
-                f"{stderr or '(no stderr, and no output file produced)'}"
+        if problem := _output_problem(out, (".step", ".stp")):
+            return f"❌ {problem}"
+        command = ["pcb", "export", "step", "--force"]
+        command += ["--board-only"] if board_only else []
+        try:
+            made = await asyncio.to_thread(
+                export_with_kicad_cli, command, pcb, f"output{out.suffix.lower()}", 300
             )
-
-        size_mb = out.stat().st_size / (1024 * 1024)
-        return f"""✅ STEP 3D model exported.
+        except KicadCliError as e:
+            return f"❌ STEP export failed: {e}"
+        saved = await asyncio.to_thread(_save_output, out, made.data)
+        if isinstance(saved, str):
+            return saved
+        notes = "".join(f"\n\n⚠️ {warning}" for warning in saved)
+        missing = _models_not_added(made.messages)
+        if missing:
+            notes += (
+                f"\n\n⚠️ The STEP file has no 3D model for {len(missing)} item(s): kicad-cli "
+                "did not add them. Tell the user: correct the 3D model paths of these "
+                "footprints (check_library_links gives the 3D models of the board and their "
+                "state).\n" + "\n".join(f"- {item}" for item in missing)
+            )
+        size_mb = len(made.data) / (1024 * 1024)
+        messages = "\n".join(made.messages) or "(no messages)"
+        if missing:
+            head = "⚠️ STEP 3D model exported, with no 3D model of some items."
+        elif saved:
+            head = "⚠️ STEP 3D model exported, with a warning of the save."
+        else:
+            head = "✅ STEP 3D model exported."
+        return f"""{head}
 
 **PCB:** {pcb_path}
 **Output:** {out}
 **Size:** {size_mb:.1f} MB
 
-Import into Fusion 360 / SolidWorks / FreeCAD for enclosure design."""
+Import it into a mechanical CAD program (for example FreeCAD) for the enclosure.{notes}
+
+## Messages of kicad-cli
+
+```
+{messages}
+```"""
     except FileNotFoundError as e:  # kicad-cli is not there
         return f"❌ {e}"
     except Exception as e:
@@ -236,7 +308,8 @@ def _export_svgs(source: Path, keep: set[str] | None) -> list[tuple[str, bytes]]
             return f"❌ kicad-cli did not stop in {_SVG_TIMEOUT:g} s."
         svgs = sorted(directory.glob("*.svg"))
         if result.returncode != 0 or not svgs:
-            output = decode_output(result.stdout + result.stderr).strip()
+            # A line break between the two streams: the last line of stdout can have none.
+            output = (decode_output(result.stdout) + "\n" + decode_output(result.stderr)).strip()
             return (
                 f"❌ kicad-cli wrote no SVG file (exit code {result.returncode}):\n\n"
                 f"{output or '(no output)'}"

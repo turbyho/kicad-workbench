@@ -252,7 +252,7 @@ def test_no_kicad_is_an_error(tmp_path, monkeypatch):
 def test_kicad_7_and_unknown_versions(tmp_path, monkeypatch):
     folder = hier(tmp_path)
     for kicad, text in (
-        ("7.0.11", "older than KiCad 8.0, the minimum"),
+        ("7.0.11", "older than KiCad 8, the minimum of this server. Tell the user: install"),
         ("11.99.0", "a nightly build with no known file versions"),
         ("9.99.0", "a nightly build with no known file versions"),
         ("8.99.0", "a nightly build with no known file versions"),
@@ -432,16 +432,20 @@ async def test_the_library_warnings_of_a_tool_call():
         file_versions.record_library_warnings(["⚠️ inner"])
         return "inner text"
 
+    from fastmcp.utilities.types import Image
+
+    image = Image(data=b"PNG", format="png")
+
     @file_versions.with_library_versions
     async def images() -> list:
         file_versions.record_library_warnings(["⚠️ a", "⚠️ a", "⚠️ b"])
-        return ["text", b"image"]
+        return ["text", image]
 
     @file_versions.with_library_versions
     async def outer() -> str:
         return await inner()
 
-    assert await images() == ["⚠️ a\n\n⚠️ b\n\ntext", b"image"]
+    assert await images() == ["⚠️ a\n\n⚠️ b\n\ntext", image]
     assert await outer() == "⚠️ inner\n\ninner text"
     file_versions.record_library_warnings(["⚠️ outside a tool call"])  # no error
 
@@ -458,3 +462,21 @@ async def test_an_error_of_the_tool_comes_before_the_warnings(tmp_path, monkeypa
     out = await file_versions.with_library_versions(tool)(str(folder / "root.kicad_sch"))
     assert out.startswith("❌ The tool failed.\n\n⚠️ The schematic files"), out
     assert out.endswith("\n\n⚠️ library")
+
+
+def test_the_warnings_and_each_type_of_output():
+    """_with_warnings: a text, a list of texts and images, an image; other types are a
+    defect of the tool."""
+    from fastmcp.utilities.types import Image
+
+    image = Image(data=b"PNG", format="png")
+    warn = ["⚠️ A", "⚠️ B"]
+    assert file_versions._with_warnings("text", warn) == "⚠️ A\n\n⚠️ B\n\ntext"
+    assert file_versions._with_warnings("❌ error", warn) == "❌ error\n\n⚠️ A\n\n⚠️ B"
+    assert file_versions._with_warnings(["t", image], warn) == ["⚠️ A\n\n⚠️ B\n\nt", image]
+    assert file_versions._with_warnings([image], warn) == ["⚠️ A\n\n⚠️ B", image]
+    assert file_versions._with_warnings(image, warn) == ["⚠️ A\n\n⚠️ B", image]
+    assert file_versions._with_warnings(image, []) is image
+    assert file_versions._with_warnings({"a": 1}, []) == {"a": 1}
+    with pytest.raises(TypeError, match="dict"):
+        file_versions._with_warnings({"a": 1}, warn)

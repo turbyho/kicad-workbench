@@ -38,7 +38,7 @@ class PCBFootprint:
             layer=data.get("layer", "F.Cu"),
             position=position,
             rotation=rotation,
-            pad_count=len(data.get("pads", [])),
+            pad_count=data.get("pad_count", 0),
         )
 
 
@@ -198,7 +198,6 @@ class PCBParser:
                     "y": at.number(1, 0.0) if at else 0.0,
                     "rotation": at.number(2, 0.0) if at else 0.0,
                 },
-                "pads": [],
                 "pad_count": len(footprint.children("pad")),
             })
         return footprints

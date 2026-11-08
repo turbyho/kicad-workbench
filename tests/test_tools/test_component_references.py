@@ -9,6 +9,7 @@ references and units of placed_instances (view "cli", as the netlist).
 """
 
 import asyncio
+import shutil
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from kicad_workbench.parsers import sheet_list
 from kicad_workbench.tools import schematic
 
 from .test_symbol_fields import symbol, write_project
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 @pytest.fixture
@@ -49,8 +52,8 @@ def run(coroutine):
 def test_a_sheet_used_two_times_gives_two_references(project):
     result = run(schematic.list_schematic_components(str(project / "sub.kicad_sch")))
     assert "Total: 2 component(s)" in result, result
-    assert "| U5 | LM358 | - | LM358 | /A/ |" in result
-    assert "| U6 | LM358 | - | LM358 | /B/ |" in result
+    assert "| U5 | LM358 | - | A:LM358 | /A/ |" in result
+    assert "| U6 | LM358 | - | A:LM358 | /B/ |" in result
 
 
 def test_the_reference_of_the_instance(project):
@@ -68,7 +71,7 @@ def test_the_info_counts_the_references_of_each_sheet_path(project):
 def test_search_by_field(project):
     sub = str(project / "sub.kicad_sch")
     result = run(schematic.search_symbols(sub, "U6", "reference"))
-    assert "| U6 | LM358 | LM358 |" in result and "U5" not in result, result
+    assert "| U6 | LM358 | A:LM358 |" in result and "U5" not in result, result
     result = run(schematic.search_symbols(sub, "U6", "value"))
     assert result.startswith("No components found matching pattern: U6"), result
     result = run(schematic.search_symbols(sub, "(", "all"))
@@ -92,6 +95,20 @@ def test_no_kicad_version(project, monkeypatch):
     result = run(schematic.list_schematic_components(str(project / "sub.kicad_sch")))
     assert result.startswith("❌ KiCad is not installed"), result
     assert "Tell the user: install KiCad 8 or later" in result
+
+
+def test_kicad_7_is_an_error(project, monkeypatch):
+    """The tool has the minimum version of the server (installed_kicad_problem)."""
+
+    async def version():
+        return "7.0.11"
+
+    monkeypatch.setattr(schematic, "get_kicad_version", version)
+    result = run(schematic.list_schematic_components(str(project / "sub.kicad_sch")))
+    assert result.startswith(
+        "❌ KiCad 7.0.11 is older than KiCad 8, the minimum of this server. "
+        "Tell the user: install KiCad 8 or later"
+    ), result
 
 
 @pytest.fixture
@@ -232,3 +249,32 @@ def test_the_info_gives_the_expanded_file_and_loads_a_file_one_time(tmp_path, mo
     gone = tmp_path / "sheets" / "gone.kicad_sch"
     assert f"- S1: ${{DIR}}/gone.kicad_sch = {gone} (the file is not there" in result, result
     assert loads.count("gone.kicad_sch") == 1
+
+
+@pytest.mark.usefixtures("kicad_version")
+def test_the_type_filter_has_no_difference_of_case(tmp_path):
+    """KiCad allows a reference with lower case letters ("u1"): the filter "U" finds it."""
+    sch = tmp_path / "board.kicad_sch"
+    shutil.copy(FIXTURES / "example_schematic.kicad_sch", sch)
+    text = sch.read_text(encoding="utf-8").replace('"R1"', '"r1"')
+    sch.write_text(text, encoding="utf-8")
+    result = asyncio.run(schematic.list_schematic_components(str(sch), filter_type="r"))
+    assert "| r1 |" in result and "| R2 |" in result, result
+
+
+def test_a_value_with_a_bar_is_one_cell(tmp_path, monkeypatch):
+    """A "|" or a line break of a field does not add a column to the tables."""
+
+    async def version():
+        return "10.0.6"
+
+    monkeypatch.setattr(schematic, "get_kicad_version", version)
+    sch = tmp_path / "board.kicad_sch"
+    shutil.copy(FIXTURES / "example_schematic.kicad_sch", sch)
+    text = sch.read_text(encoding="utf-8").replace('"Value" "10k"', '"Value" "10k|1%\\n0805"')
+    sch.write_text(text, encoding="utf-8")
+    listed = asyncio.run(schematic.list_schematic_components(str(sch)))
+    found = asyncio.run(schematic.search_symbols(str(sch), "10k"))
+    for result in (listed, found):
+        row = next(line for line in result.splitlines() if line.startswith("| R1 "))
+        assert "| 10k\\|1% 0805 |" in row, row

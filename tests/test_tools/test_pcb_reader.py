@@ -121,6 +121,41 @@ def test_pcbnew_answers_have_no_warning(tool, kwargs):
     assert "pcbnew not available" not in result and not result.startswith("❌"), result
 
 
+def _board_with_a_library(tmp_path: Path) -> Path:
+    """The example board, with the library nickname in the ID of R1."""
+    text = BOARD.read_text(encoding="utf-8")
+    old = '(footprint "R_0805_2012Metric"'
+    board = tmp_path / "b.kicad_pcb"
+    new = '(footprint "Resistor_SMD:R_0805_2012Metric"'
+    board.write_text(text.replace(old, new, 1), encoding="utf-8")
+    return board
+
+
+def _footprint_rows(result: str) -> list[str]:
+    return [line for line in result.splitlines() if line.startswith(("| R1 ", "| R2 "))]
+
+
+def test_text_reader_gives_the_library_id_and_the_pads(no_pcbnew, tmp_path):
+    rows = _footprint_rows(run("list_pcb_footprints", _board_with_a_library(tmp_path)))
+    assert [row.split(" | ")[2] for row in rows] == [
+        "Resistor_SMD:R_0805_2012Metric",
+        "R_0805_2012Metric",
+    ]
+    assert all(row.endswith("| 2 |") for row in rows), rows
+
+
+@pytest.mark.skipif(not _pcbnew_installed(), reason="pcbnew is not installed")
+def test_the_two_readers_give_the_same_footprints(tmp_path, monkeypatch, kicad_version):
+    """pcbnew (LIB_ID::Format, FOOTPRINT::GetPadCount) is the specification of the text
+    reader."""
+    board = _board_with_a_library(tmp_path)
+    with_pcbnew = _footprint_rows(run("list_pcb_footprints", board))
+    pcb._pcbnew_importable.cache_clear()
+    monkeypatch.setitem(sys.modules, "pcbnew", None)
+    assert _footprint_rows(run("list_pcb_footprints", board)) == with_pcbnew
+    assert len(with_pcbnew) == 2
+
+
 @pytest.mark.parametrize("tool, kwargs", TOOLS)
 def test_a_board_that_pcbnew_of_kicad_8_cannot_read(monkeypatch, tool, kwargs):
     def load_board(path):
@@ -173,3 +208,11 @@ def test_a_pcbnew_that_cannot_be_imported(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     result = run("get_pcb_statistics", BOARD)
     assert result == "❌ The import of pcbnew failed: SystemError: wx version mismatch"
+
+
+def test_a_value_with_a_bar_is_one_cell(no_pcbnew, tmp_path):
+    board = tmp_path / "b.kicad_pcb"
+    text = BOARD.read_text(encoding="utf-8")
+    board.write_text(text.replace('"Value" "10k"', '"Value" "10k|1%"', 1), encoding="utf-8")
+    rows = _footprint_rows(run("list_pcb_footprints", board))
+    assert "| R1 | 10k\\|1% | R_0805_2012Metric |" in rows[0], rows

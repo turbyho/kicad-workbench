@@ -2,11 +2,10 @@
 
 Centralizes two concerns that every kicad-cli call site needs:
 
-1. Locating the executable. On Windows, KiCad's installer does NOT add its
-   bin directory to PATH, so a bare "kicad-cli" only works if the user
-   patched PATH by hand. We fall back to the detected install location
-   (``find_kicad_install``), where kicad-cli sits next to the versioned
-   ``share/kicad`` directory.
+1. Locating the executable (find_kicad_cli): the path of KICAD_CLI, then PATH,
+   then the standard install folder of KiCad (kicad_version.standard_kicad_cli).
+   On Windows, the installer of KiCad does not add its bin folder to PATH: the
+   server then uses the newest version folder that has kicad-cli.
 2. Running it off the asyncio event loop. All MCP tools are ``async def``;
    calling ``subprocess.run`` inline blocks the whole server for the duration
    of an ERC/DRC/export (up to minutes), so callers must use the async
@@ -38,7 +37,7 @@ from .kicad_project import (
     top_level_sheets,
 )
 from .kicad_text import read_kicad_json
-from .kicad_version import find_kicad_install
+from .kicad_version import standard_kicad_cli
 from .library_tables import kicad_settings_dir
 from .sch_hierarchy import (
     SheetPath,
@@ -68,19 +67,50 @@ NO_KICAD = (
 _version_problem: str | None = None
 
 
+def kicad_cli_override_problem() -> str | None:
+    """Return why the path of the environment variable KICAD_CLI is not a kicad-cli, or
+    None. A path that is not a file is an error of the user: find_kicad_cli does not
+    use an other kicad-cli then (an other KiCad would give other rules)."""
+    return override_problem(
+        "KICAD_CLI",
+        "the path of kicad-cli of KiCad 8 or later",
+        "to use the kicad-cli of PATH",
+    )
+
+
+def override_problem(variable: str, value: str, without: str) -> str | None:
+    """Return why the path of an environment variable (KICAD_CLI, KICAD_PYTHON) is not
+    a file, or None. The finder does not use a different program then.
+
+    Args:
+        variable: The name of the variable.
+        value: What the path must be, for the message.
+        without: What the server does with no variable, for the message.
+    """
+    override = os.environ.get(variable)
+    if override and not Path(override).is_file():
+        return (
+            f"The environment variable {variable} gives {override}, but this path is not "
+            f"a file. Tell the user: correct {variable} ({value}), or remove it {without}."
+        )
+    return None
+
+
 class KicadNotFoundError(FileNotFoundError):
-    """kicad-cli was not found: KiCad is not installed (the message is NO_KICAD)."""
+    """kicad-cli was not found: KiCad is not installed (NO_KICAD), or the path of
+    KICAD_CLI is not a file (kicad_cli_override_problem)."""
 
     def __init__(self) -> None:
-        super().__init__(NO_KICAD)
+        super().__init__(kicad_cli_override_problem() or NO_KICAD)
 
 
 def no_kicad_message() -> str:
     """Return the answer of a tool when kicad_cli_version_sync gave no version: NO_KICAD
-    when kicad-cli was not found, else the reason of the failure of kicad-cli (KiCad is
-    installed: an install does not help). The function does not run kicad-cli again."""
+    when kicad-cli was not found (or the problem of KICAD_CLI), else the reason of the
+    failure of kicad-cli (KiCad is installed: an install does not help). The function
+    does not run kicad-cli again."""
     if _version_problem is None:
-        return NO_KICAD
+        return kicad_cli_override_problem() or NO_KICAD
     return (
         f"kicad-cli did not give its version: {_version_problem}. The tool needs the "
         'version of the installed KiCad. Tell the user: run "kicad-cli version" to check '
@@ -115,13 +145,13 @@ class KicadCliError(WorkbenchError):
 def find_kicad_cli() -> str | None:
     """Locate the kicad-cli executable.
 
-    Resolution order:
-    1. ``KICAD_CLI`` environment variable (explicit user override).
-    2. ``shutil.which("kicad-cli")`` (PATH lookup — default on Linux/macOS
-       and on Windows installs whose bin dir was added to PATH).
-    3. Known KiCad install locations via ``find_kicad_install()``.
+    The order of the search:
+    1. The environment variable KICAD_CLI. When it has a path that is not a file,
+       the function gives None (kicad_cli_override_problem): no other kicad-cli.
+    2. The kicad-cli of PATH (shutil.which).
+    3. The kicad-cli of the standard install folder (standard_kicad_cli).
 
-    Returns the executable path, or None when KiCad cannot be found.
+    Returns the path of kicad-cli, or None when it is not found.
     """
     global _cached_exe
     if _cached_exe is not None:
@@ -130,7 +160,9 @@ def find_kicad_cli() -> str | None:
         _cached_exe = None  # KiCad was removed or moved while the server runs
 
     override = os.environ.get("KICAD_CLI")
-    if override and Path(override).is_file():
+    if override:
+        if not Path(override).is_file():
+            return None
         _cached_exe = override
         return _cached_exe
 
@@ -139,23 +171,10 @@ def find_kicad_cli() -> str | None:
         _cached_exe = found
         return _cached_exe
 
-    install = find_kicad_install()
-    if install:
-        install_path, _version = install
-        exe_name = "kicad-cli.exe" if os.name == "nt" else "kicad-cli"
-        # Windows: <install>/bin/kicad-cli.exe
-        # macOS: install_path is .../Contents/SharedSupport, the binary is
-        #        in the sibling MacOS directory.
-        # Linux: distro packages put kicad-cli on PATH, which step 2 found.
-        candidates = [
-            install_path / "bin" / exe_name,
-            install_path.parent / "MacOS" / "kicad-cli",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                _cached_exe = str(candidate)
-                return _cached_exe
-
+    standard = standard_kicad_cli()
+    if standard is not None:
+        _cached_exe = str(standard)
+        return _cached_exe
     return None
 
 

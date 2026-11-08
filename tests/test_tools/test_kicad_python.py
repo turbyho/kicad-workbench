@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from kicad_workbench.utils import kicad_python
+from kicad_workbench.utils import kicad_python, kicad_version
 from kicad_workbench.utils.kicad_python import find_kicad_python
 
 from .locale_env import can_name, non_utf8_env, run_python
@@ -15,47 +15,81 @@ class TestFindKicadPython:
     def _reset(self, monkeypatch):
         monkeypatch.setattr(kicad_python, "_cached_python", None)
         monkeypatch.delenv("KICAD_PYTHON", raising=False)
+        monkeypatch.delenv("KICAD_CLI", raising=False)
         monkeypatch.setattr(kicad_python.importlib.util, "find_spec", lambda name: None)
 
     def test_env_override_wins(self, monkeypatch, tmp_path):
         fake = tmp_path / "python.exe"
         fake.write_bytes(b"")
         monkeypatch.setenv("KICAD_PYTHON", str(fake))
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: None)
+        monkeypatch.setattr(kicad_python, "find_kicad_cli", lambda: pytest.fail("cli"))
         assert find_kicad_python() == str(fake)
+
+    def test_a_wrong_override_is_an_error(self, monkeypatch, tmp_path):
+        wrong = tmp_path / "none"
+        monkeypatch.setenv("KICAD_PYTHON", str(wrong))
+        monkeypatch.setattr(kicad_python.importlib.util, "find_spec", lambda name: object())
+        assert find_kicad_python() is None
+        assert kicad_python.no_kicad_python_message().startswith(
+            f"The environment variable KICAD_PYTHON gives {wrong}, but this path is not a file."
+        )
 
     def test_current_interpreter_when_pcbnew_importable(self, monkeypatch):
         monkeypatch.setattr(kicad_python.importlib.util, "find_spec", lambda name: object())
         assert find_kicad_python() == sys.executable
 
-    def test_windows_bundled_python(self, monkeypatch, tmp_path):
-        exe = tmp_path / "bin" / "python.exe"
-        exe.parent.mkdir()
-        exe.write_bytes(b"")
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: (tmp_path, "10.0"))
-        assert find_kicad_python() == str(exe)
-
-    def test_macos_bundled_python(self, monkeypatch, tmp_path):
-        contents = tmp_path / "KiCad.app" / "Contents"
-        shared_support = contents / "SharedSupport"
-        shared_support.mkdir(parents=True)
-        exe = (
-            contents
-            / "Frameworks"
-            / "Python.framework"
-            / "Versions"
-            / "Current"
-            / "bin"
-            / "python3"
+    def test_windows_python_of_the_kicad_cli(self, monkeypatch, tmp_path):
+        """The Python of the installation of kicad-cli: the same KiCad."""
+        cli = tmp_path / "9.0" / "bin" / "kicad-cli.exe"
+        cli.parent.mkdir(parents=True)
+        (cli.parent / "python.exe").write_bytes(b"")
+        monkeypatch.setattr(
+            kicad_python, "kicad_python_of", lambda c: kicad_version.kicad_python_of(c, "win32")
         )
-        exe.parent.mkdir(parents=True)
-        exe.write_bytes(b"")
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: (shared_support, "macos"))
-        assert find_kicad_python() == str(exe)
+        monkeypatch.setattr(kicad_python, "find_kicad_cli", lambda: str(cli))
+        assert find_kicad_python() == str(cli.parent / "python.exe")
 
-    def test_nothing_found(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(kicad_python, "find_kicad_install", lambda: None)
+    def test_macos_python_of_the_kicad_cli(self, monkeypatch, tmp_path):
+        contents = tmp_path / "KiCad.app" / "Contents"
+        cli = contents / "MacOS" / "kicad-cli"
+        cli.parent.mkdir(parents=True)
+        exe = contents / "Frameworks" / "Python.framework" / "Versions" / "Current" / "bin"
+        exe.mkdir(parents=True)
+        (exe / "python3").write_bytes(b"")
+        monkeypatch.setattr(
+            kicad_python, "kicad_python_of", lambda c: kicad_version.kicad_python_of(c, "darwin")
+        )
+        monkeypatch.setattr(kicad_python, "find_kicad_cli", lambda: str(cli))
+        assert find_kicad_python() == str(exe / "python3")
+
+    def test_linux_python_of_the_prefix(self, tmp_path):
+        """<prefix>/bin/kicad-cli: the Python of the prefix. A start script with a different
+        name (a second installation) has no known Python."""
+        cli = tmp_path / "bin" / "kicad-cli"
+        cli.parent.mkdir()
+        cli.write_bytes(b"")
+        assert kicad_version.kicad_python_of(cli, "linux") == [tmp_path / "bin" / "python3"]
+        script = tmp_path / "bin" / "kicad-cli-nightly"
+        script.write_bytes(b"")
+        assert kicad_version.kicad_python_of(script, "linux") == []
+
+    def test_a_removed_python_in_the_cache(self, monkeypatch, tmp_path):
+        """KiCad was removed while the server runs: the cache gives no file."""
+        gone = tmp_path / "python.exe"
+        monkeypatch.setattr(kicad_python, "_cached_python", str(gone))
+        monkeypatch.setattr(kicad_python, "find_kicad_cli", lambda: None)
         assert find_kicad_python() is None
+
+    def test_no_kicad_cli_gives_no_python(self, monkeypatch):
+        monkeypatch.setattr(kicad_python, "find_kicad_cli", lambda: None)
+        assert find_kicad_python() is None
+
+    def test_the_message_of_a_wrong_kicad_cli(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("KICAD_CLI", str(tmp_path / "none"))
+        monkeypatch.setattr(kicad_python, "find_kicad_cli", lambda: None)
+        assert kicad_python.no_kicad_python_message().startswith(
+            "The environment variable KICAD_CLI gives"
+        )
 
 
 class TestRunKicadPython:

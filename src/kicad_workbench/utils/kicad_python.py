@@ -21,8 +21,14 @@ from pathlib import Path
 
 from ..errors import WorkbenchError
 from ..parsers.kicad_versions import version_numbers
-from .kicad_cli import INSTALL_KICAD, find_kicad_cli, fs_encoding
-from .kicad_version import find_kicad_install
+from .kicad_cli import (
+    INSTALL_KICAD,
+    find_kicad_cli,
+    fs_encoding,
+    kicad_cli_override_problem,
+    override_problem,
+)
+from .kicad_version import kicad_python_of
 
 
 class KicadPythonError(WorkbenchError):
@@ -35,8 +41,12 @@ def no_kicad_python_message() -> str:
     """Return the answer of a tool that needs pcbnew, when no Python of KiCad was found:
     the step to install KiCad, or only the step KICAD_PYTHON when KiCad is installed
     (kicad-cli was found)."""
+    if problem := kicad_python_override_problem():
+        return problem
     exe = find_kicad_cli()
     if exe is None:
+        if problem := kicad_cli_override_problem():
+            return problem
         return (
             "The Python of KiCad (with the module pcbnew) was not found: KiCad is not "
             f"installed. The tool needs KiCad 8 or later. Tell the user: {INSTALL_KICAD}, "
@@ -49,24 +59,41 @@ def no_kicad_python_message() -> str:
     )
 
 
+def kicad_python_override_problem() -> str | None:
+    """Return why the path of the environment variable KICAD_PYTHON is not a file, or
+    None (kicad_cli.override_problem)."""
+    return override_problem(
+        "KICAD_PYTHON",
+        "the Python of KiCad, which can import pcbnew",
+        "to use the Python of the KiCad of kicad-cli",
+    )
+
+
 def find_kicad_python() -> str | None:
     """Locate a Python interpreter that can import pcbnew.
 
-    Resolution order:
-    1. ``KICAD_PYTHON`` environment variable (explicit user override).
-    2. The current interpreter, when pcbnew is importable in this process.
-    3. KiCad's bundled interpreter next to the detected install.
-    4. Linux: the system python3, which distro KiCad packages install
-       pcbnew for (only when a KiCad install was detected).
+    The order of the search:
+    1. The environment variable KICAD_PYTHON. When it has a path that is not a
+       file, the function gives None (no_kicad_python_message tells it): no other
+       Python.
+    2. The Python of the server process, when it can import pcbnew.
+    3. The Python of the installation of the kicad-cli of the server
+       (find_kicad_cli, kicad_version.kicad_python_of): the Python of the same
+       KiCad (check_same_kicad compares the two).
 
-    Returns the interpreter path, or None when none can be found.
+    Returns the path of the Python, or None when it is not found.
     """
     global _cached_python
+    # The cached Python must still be there (KiCad can change while the server runs).
     if _cached_python is not None:
-        return _cached_python
+        if Path(_cached_python).is_file():
+            return _cached_python
+        _cached_python = None
 
     override = os.environ.get("KICAD_PYTHON")
-    if override and Path(override).is_file():
+    if override:
+        if not Path(override).is_file():
+            return None
         _cached_python = override
         return _cached_python
 
@@ -74,24 +101,13 @@ def find_kicad_python() -> str | None:
         _cached_python = sys.executable
         return _cached_python
 
-    install = find_kicad_install()
-    if install:
-        install_path, _version = install
-        # Windows: install_path is <...>/KiCad/<version>.
-        # macOS: install_path is .../Contents/SharedSupport.
-        contents = install_path.parent
-        candidates = [
-            install_path / "bin" / "python.exe",
-            contents / "Frameworks" / "python3",
-            contents / "Frameworks" / "Python.framework" / "Versions" / "Current" / "bin" / "python3",
-        ]
-        if sys.platform.startswith("linux"):
-            candidates.append(Path("/usr/bin/python3"))
-        for candidate in candidates:
-            if candidate.is_file():
-                _cached_python = str(candidate)
-                return _cached_python
-
+    cli = find_kicad_cli()
+    if cli is None:
+        return None
+    for candidate in kicad_python_of(Path(cli)):
+        if candidate.is_file():
+            _cached_python = str(candidate)
+            return _cached_python
     return None
 
 

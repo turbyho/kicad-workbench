@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_workbench.utils import kicad_cli
+from kicad_workbench.utils import kicad_cli, kicad_version
 from kicad_workbench.utils.kicad_cli import (
     KicadCliError,
     decode_output,
@@ -35,58 +35,84 @@ class TestFindKicadCli:
         fake = tmp_path / "kicad-cli.exe"
         fake.write_bytes(b"")
         monkeypatch.setenv("KICAD_CLI", str(fake))
-        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: None)
+        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: pytest.fail("PATH"))
         assert find_kicad_cli() == str(fake)
 
-    def test_env_override_ignored_when_file_missing(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("KICAD_CLI", str(tmp_path / "does-not-exist"))
-        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: None)
+    def test_a_wrong_override_is_an_error(self, monkeypatch, tmp_path):
+        """A KICAD_CLI that is not a file gives no kicad-cli: the kicad-cli of PATH can be
+        of an other KiCad, with other rules."""
+        wrong = tmp_path / "does-not-exist"
+        monkeypatch.setenv("KICAD_CLI", str(wrong))
+        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: "/usr/bin/kicad-cli")
         assert find_kicad_cli() is None
+        message = f"The environment variable KICAD_CLI gives {wrong}, but this path is not a file."
+        with pytest.raises(kicad_cli.KicadNotFoundError) as error:
+            run_kicad_cli_sync(["version"])
+        assert str(error.value).startswith(message)
+        monkeypatch.setattr(kicad_cli, "_version_problem", None)
+        assert kicad_cli.no_kicad_message().startswith(message)
+        assert kicad_cli.installed_kicad_problem(None).startswith(message)
+
+    def test_an_empty_override_is_no_override(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("KICAD_CLI", "")
+        on_path = tmp_path / "kicad-cli"
+        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: str(on_path))
+        assert find_kicad_cli() == str(on_path)
 
     def test_path_lookup(self, monkeypatch, tmp_path):
         on_path = tmp_path / "kicad-cli"
         monkeypatch.setattr(
             kicad_cli.shutil, "which", lambda name: str(on_path) if name == "kicad-cli" else None
         )
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: None)
+        monkeypatch.setattr(kicad_cli, "standard_kicad_cli", lambda: pytest.fail("standard"))
         assert find_kicad_cli() == str(on_path)
 
-    def test_install_dir_fallback_windows_layout(self, monkeypatch, tmp_path):
-        """bin/kicad-cli(.exe) next to the detected share/kicad directory."""
-        # The wrapper looks for kicad-cli.exe only on Windows; the bare name
-        # elsewhere. Mirror that so the test exercises the branch its platform
-        # actually uses (the CI matrix covers both).
-        exe_name = "kicad-cli.exe" if sys.platform == "win32" else "kicad-cli"
-        exe = tmp_path / "bin" / exe_name
-        exe.parent.mkdir()
-        exe.write_bytes(b"")
+    def test_the_standard_folder(self, monkeypatch, tmp_path):
+        exe = tmp_path / "kicad-cli"
         monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: (tmp_path, "10.0"))
+        monkeypatch.setattr(kicad_cli, "standard_kicad_cli", lambda: exe)
         assert find_kicad_cli() == str(exe)
-
-    def test_install_dir_fallback_macos_layout(self, monkeypatch, tmp_path):
-        """macOS: install_path is .../SharedSupport, binary in sibling MacOS/."""
-        contents = tmp_path / "KiCad.app" / "Contents"
-        shared_support = contents / "SharedSupport"
-        shared_support.mkdir(parents=True)
-        exe = contents / "MacOS" / "kicad-cli"
-        exe.parent.mkdir(parents=True)
-        exe.write_bytes(b"")
-        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: (shared_support, "macos"))
-        assert find_kicad_cli() == str(exe)
-
-    def test_install_dir_without_binary_not_found(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: (tmp_path, "10.0"))
-        assert find_kicad_cli() is None
 
     def test_nothing_found_returns_none(self, monkeypatch):
         monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: None)
+        monkeypatch.setattr(kicad_cli, "standard_kicad_cli", lambda: None)
         assert find_kicad_cli() is None
+        assert str(kicad_cli.KicadNotFoundError()) == kicad_cli.NO_KICAD
+
+
+class TestStandardKicadCli:
+    def test_windows_takes_the_newest_folder_with_kicad_cli(self, monkeypatch, tmp_path):
+        """A newer version folder with no kicad-cli (a partial installation) does not
+        count. The folder is "KiCad" in the folder of ProgramFiles."""
+        kicad = tmp_path / "KiCad"
+        for version, cli in (("8.0", True), ("9.0", True), ("10.0", False), ("nightly", True)):
+            (kicad / version / "share" / "kicad").mkdir(parents=True)
+            if cli:
+                (kicad / version / "bin").mkdir()
+                (kicad / version / "bin" / "kicad-cli.exe").write_bytes(b"")
+        monkeypatch.setenv("ProgramFiles", str(tmp_path))
+        found = kicad_version.standard_kicad_cli("win32")
+        assert found == kicad / "9.0" / "bin" / "kicad-cli.exe"
+
+    def test_windows_with_no_kicad_folder(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ProgramFiles", str(tmp_path))
+        assert kicad_version.standard_kicad_cli("win32") is None
+
+    def test_windows_default_program_files(self, monkeypatch):
+        monkeypatch.delenv("ProgramFiles", raising=False)
+        assert kicad_version.windows_kicad_folder() == Path("C:/Program Files/KiCad")
+
+    def test_macos(self, monkeypatch, tmp_path):
+        app = tmp_path / "KiCad.app"
+        monkeypatch.setattr(kicad_version, "MACOS_KICAD", app)
+        assert kicad_version.standard_kicad_cli("darwin") is None
+        cli = app / "Contents" / "MacOS" / "kicad-cli"
+        cli.parent.mkdir(parents=True)
+        cli.write_bytes(b"")
+        assert kicad_version.standard_kicad_cli("darwin") == cli
+
+    def test_linux_has_no_standard_folder(self):
+        assert kicad_version.standard_kicad_cli("linux") is None
 
 
 class TestRunKicadCli:
@@ -114,7 +140,7 @@ class TestRunKicadCli:
         monkeypatch.setattr(kicad_cli, "_cached_exe", str(gone))
         gone.unlink()
         monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
-        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: None)
+        monkeypatch.setattr(kicad_cli, "standard_kicad_cli", lambda: None)
         assert find_kicad_cli() is None
         with pytest.raises(kicad_cli.KicadNotFoundError):
             run_kicad_cli_sync(["version"])

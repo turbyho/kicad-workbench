@@ -4,7 +4,16 @@ import os
 import sys
 from pathlib import Path
 
-_cached_install: tuple[Path, str] | None = None
+# The application of macOS. The folder of the KiCad installations of Windows is
+# "KiCad" in the Program Files folder of the system (windows_kicad_folder).
+MACOS_KICAD = Path("/Applications/KiCad/KiCad.app")
+
+
+def windows_kicad_folder() -> Path:
+    """Return the folder of the KiCad installations of Windows: "KiCad" in the folder of
+    the environment variable ProgramFiles (the default folder of the installer of KiCad),
+    else in "C:/Program Files"."""
+    return Path(os.environ.get("ProgramFiles") or "C:/Program Files") / "KiCad"
 
 
 def _parse_version(version_str: str) -> tuple[int, ...]:
@@ -15,50 +24,68 @@ def _parse_version(version_str: str) -> tuple[int, ...]:
         return (0,)
 
 
-def find_kicad_install() -> tuple[Path, str] | None:
-    """Find the installed KiCad directory and version string.
+def standard_kicad_cli(platform: str | None = None) -> Path | None:
+    """Return the kicad-cli of the standard install folder of KiCad, or None.
 
-    Scans known install locations, preferring the newest version.
+    - Windows: "bin/kicad-cli.exe" of the newest version folder in
+      windows_kicad_folder that has it. A version folder with no kicad-cli (a
+      removed or a partial installation) does not count.
+    - macOS: "Contents/MacOS/kicad-cli" of "/Applications/KiCad/KiCad.app".
+    - Linux: none. The package of the distribution puts kicad-cli into PATH.
 
-    Returns:
-        (install_path, version_string) or None if not found
+    Args:
+        platform: The value of sys.platform (default: the system).
     """
-    global _cached_install
-    if _cached_install is not None:
-        return _cached_install
-
-    # Windows: C:/Program Files/KiCad/{version}/
-    win_base = Path("C:/Program Files/KiCad")
-    if win_base.is_dir():
+    platform = platform or sys.platform
+    if platform == "win32":
         try:
-            version_dirs = sorted(
-                [d for d in win_base.iterdir() if d.is_dir()],
+            folders = sorted(
+                (d for d in windows_kicad_folder().iterdir() if d.is_dir()),
                 key=lambda d: _parse_version(d.name),
                 reverse=True,
             )
-            for vd in version_dirs:
-                if (vd / "share" / "kicad").is_dir():
-                    _cached_install = (vd, vd.name)
-                    return _cached_install
         except OSError:
-            pass
-
-    # macOS: single app bundle
-    mac_base = Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport")
-    if mac_base.is_dir():
-        _cached_install = (mac_base, "macos")
-        return _cached_install
-
-    # Linux: standard paths
-    for linux_base in [
-        Path("/usr/share/kicad"),
-        Path("/usr/local/share/kicad"),
-    ]:
-        if linux_base.is_dir():
-            _cached_install = (linux_base, "linux")
-            return _cached_install
-
+            return None
+        for folder in folders:
+            cli = folder / "bin" / "kicad-cli.exe"
+            if cli.is_file():
+                return cli
+        return None
+    if platform == "darwin":
+        cli = MACOS_KICAD / "Contents" / "MacOS" / "kicad-cli"
+        return cli if cli.is_file() else None
     return None
+
+
+def kicad_python_of(cli: Path, platform: str | None = None) -> list[Path]:
+    """Return the places of the Python of KiCad in the installation of a kicad-cli,
+    in the order of the search.
+
+    - Windows: "python.exe" in the folder of kicad-cli ("<install>/bin").
+    - macOS: the Python of the frameworks of the application bundle.
+    - Linux: "python3" next to kicad-cli, for a kicad-cli "<prefix>/bin/kicad-cli"
+      (symbolic links resolved): the KiCad package of the distribution installs
+      pcbnew for the Python of its prefix ("/usr/bin/python3" for
+      "/usr/bin/kicad-cli"). For a different program (for example a start script
+      "kicad-cli-nightly") the Python is not known: the user gives it in
+      KICAD_PYTHON.
+
+    Args:
+        platform: The value of sys.platform (default: the system).
+    """
+    platform = platform or sys.platform
+    if platform == "win32":
+        return [Path(os.path.abspath(cli)).parent / "python.exe"]
+    if platform == "darwin":
+        frameworks = _osx_bundle_root(cli) / "Contents" / "Frameworks"
+        return [
+            frameworks / "python3",
+            frameworks / "Python.framework" / "Versions" / "Current" / "bin" / "python3",
+        ]
+    real = cli.resolve()
+    if real.name != "kicad-cli" or real.parent.name != "bin":
+        return []
+    return [real.parent / "python3"]
 
 
 def _osx_bundle_root(program: Path) -> Path:

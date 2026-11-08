@@ -13,13 +13,13 @@ mcp = FastMCP(
 
     - Schematics: components, nets, symbols, the sheet hierarchy, the netlist.
     - Boards: footprints, tracks, nets, statistics.
-    - Checks: ERC and DRC of kicad-cli, the pin and pad checks, the library links.
+    - Checks: ERC and DRC of kicad-cli, the pin conflicts of the netlist, the pin and
+      pad checks, the library links.
     - Libraries: the library tables, the search, symbols and footprints, PNG images.
     - BOM: the BOM of kicad-cli, and the check of the confirmed MPNs.
     - Edits: symbols, wires, labels, the fields of placed symbols, new projects and
       boards.
     - Exports: SVG, 3D view, STEP, Gerber.
-    - Firmware (heuristic): pin functions, buses, device tree sources.
 
     An error starts with "❌", a warning with "⚠️". When a tool gives a step for the
     user (for example the conversion of a file in KiCad, or the install of KiCad),
@@ -35,7 +35,6 @@ mcp.add_middleware(VersionNotes())
 # Import and register tools
 from .tools import (  # noqa: F401, E402
     bom,
-    device_tree,
     field_check,
     hierarchical_analysis,
     library,

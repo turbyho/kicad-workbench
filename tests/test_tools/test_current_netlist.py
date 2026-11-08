@@ -1,4 +1,4 @@
-"""Tests of the netlist of the pin, device tree, hierarchy and search tools.
+"""Tests of the netlist of the pin conflict, hierarchy and search tools.
 
 The tools read the netlist that kicad-cli writes now (netlist.current_netlist).
 They used a netlist file that they found next to the sheet, or in the temporary

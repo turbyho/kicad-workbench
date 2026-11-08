@@ -22,9 +22,6 @@ it. It tells when a result can be incomplete. We compare these rules with KiCad 
 - **BOM and parts.** The agent makes the BOM as kicad-cli makes it (also for each
   variant of KiCad 10), checks the MPN fields of the symbols, and writes the
   confirmed fields into the schematic.
-- **Firmware.** The agent gets the pin functions of a microcontroller, the I2C and
-  SPI devices and the regulators, and a device tree source as a start for the
-  firmware.
 
 Status: in development (version 0.1). The tools work and have tests. The interfaces
 can change.
@@ -64,7 +61,8 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   Gerber exports.
 - **Checks.** ERC (with the annotation check of the ERC dialog, which kicad-cli does
   not run) and DRC through kicad-cli, the pin and pad check of "Update PCB from
-  Schematic", and the links to the libraries and the 3D models.
+  Schematic", the pin conflicts of the netlist, and the links to the libraries and
+  the 3D models.
 - **Libraries.** The library tables of KiCad and of the project, a search as in the
   choosers of KiCad, the content of symbols and footprints, and PNG images.
 - **BOM.** The BOM of kicad-cli with the fields, the groups, the DNP filter and the
@@ -80,8 +78,6 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   older schematic or board, because KiCad saves an edit of it in its own version. A
   file of a newer version than the installed KiCad is an error, as in KiCad: the
   output tells the user to install a newer KiCad.
-- **Firmware.** Pin functions, pin conflicts, I2C and SPI devices, regulators (a
-  heuristic), and device tree sources for STM32F4, ESP32 and nRF52.
 - **Parts registry.** A search in an open registry of KiCad parts
   ([PartReel](https://partreel.com)), and the download of their symbols and
   footprints (on request also their 3D models).
@@ -131,8 +127,6 @@ Ask the agent in natural language, and give the path of the schematic or the boa
 
 > Show the footprint `Package_SO:SOIC-8_3.9x4.9mm_P1.27mm` as an image.
 
-> Which pins of the STM32 have I2C and SPI functions?
-
 The agent selects the tools. Close the files in KiCad before the agent edits them:
 KiCad does not read a change to a file that it has open.
 
@@ -144,7 +138,6 @@ KiCad does not read a change to a file that it has open.
 | [docs/tools.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/tools.md) | All tools, with their arguments and limits |
 | [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/datasheet-lens.md) | The datasheets of a project with datasheet-lens: BOM, confirmed MPNs, checks against the datasheet |
 | [docs/editing.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/editing.md) | The schematic edits: the rules of KiCad that they use, and their limits |
-| [docs/firmware.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/firmware.md) | Pin functions, peripherals and device tree sources, and the limits of these tools |
 | [docs/development.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/development.md) | Development setup, tests, rules for code and text |
 
 ## Development

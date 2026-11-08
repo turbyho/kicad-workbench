@@ -86,7 +86,7 @@ as a fact with its page.
 
 | Work | kicad-workbench gives | datasheet-lens gives |
 |---|---|---|
-| Pins of a symbol | `get_library_symbol`, `check_pin_pad_mapping`, `analyze_pin_functions`, `trace_netlist_connection` | The pin table of the datasheet |
+| Pins of a symbol | `get_library_symbol`, `check_pin_pad_mapping`, `get_symbol_details`, `trace_netlist_connection` | The pin table of the datasheet |
 | A footprint | `get_library_footprint` (pads, size, courtyard), `render_library_item` (images) | The package drawing |
 | The circuit | Nets, ERC, the pins and the values of the symbols | Absolute maximum ratings, logic levels, the application circuit |
 | A part with no library item | `search_library_symbols`, `search_library_footprints` | Search links for symbols, footprints and 3D models |

@@ -555,8 +555,8 @@ class TestToolsWithTwoRoots:
         result = asyncio.run(run_erc(str(sub)))
         assert result.startswith("❌") and "more than one root schematic" in result
 
-    def test_pin_analysis(self, sub):
-        from kicad_workbench.tools.pin_analysis import analyze_pin_functions
+    def test_pin_conflicts(self, sub):
+        from kicad_workbench.tools.pin_analysis import detect_pin_conflicts
 
-        result = asyncio.run(analyze_pin_functions(str(sub)))
+        result = asyncio.run(detect_pin_conflicts(str(sub)))
         assert "more than one root schematic" in result

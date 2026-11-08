@@ -1,6 +1,6 @@
 # Tools
 
-The server has 59 tools. Each tool returns Markdown text (the image tools also return
+The server has 51 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -17,8 +17,8 @@ an older version than the installed KiCad gives a warning with the step for the 
 and an edit tool refuses an older schematic (the README, "File versions"). The search
 tools give no item of a library file that the installed KiCad cannot read (a newer
 file). Some tools use heuristics: they find a
-function from a net name, a component type from its value or reference, or a
-differential pair from the names of two nets. These tools are marked "heuristic"
+component type from its value or reference, or a differential pair from the names
+of two nets. These tools are marked "heuristic"
 below. Use their result as a start for a review, not as a fact.
 
 ## Schematics
@@ -58,7 +58,7 @@ The netlist of kicad-cli is the most exact source for the connections. Use it be
 the schematic tools when the connection is important.
 
 The netlist tools above read the file of `generate_netlist`: make it again after a
-change of the schematic. The pin, device tree, hierarchy and search tools, and
+change of the schematic. The pin conflict tool, the hierarchy and search tools, and
 `get_symbol_details`, make the netlist with kicad-cli at each call. Thus they always
 give the current state of the schematic, and they need kicad-cli. For a large
 project, each call takes some seconds.
@@ -109,7 +109,6 @@ a save in KiCad 8 or later.
 | `check_pin_pad_mapping(symbol_lib_id, footprint_lib_id?, project_path?)` | The same check for one library symbol and one footprint |
 | `check_library_links(project_path)` | The links of a project to its libraries: the library checks of ERC and DRC, the footprints of the schematic, and the 3D models (as the STEP export finds them) |
 | `detect_pin_conflicts(schematic_path)` | Nets with more than one output or driver pin (errors), nets with one pin (warnings), and pins with no connection (information). The pin types come from the netlist |
-| `validate_pin_configuration(schematic_path)` | Pin conflicts before a device tree generation (heuristic, see [firmware.md](firmware.md)) |
 
 ## Libraries
 
@@ -159,21 +158,6 @@ KiCad has open. See [editing.md](editing.md).
 | `render_pcb(pcb_path, side?, output_path?, width?, height?, quality?, rotate?)` | A 3D view of the board as PNG, made by kicad-cli |
 | `export_pcb_3d(pcb_path, output_path?, board_only?)` | A STEP model of the board, made by kicad-cli |
 | `export_gerber(pcb_path, output_dir?)` | Gerber and drill files, made by kicad-cli |
-
-## Firmware
-
-These tools are heuristic. See [firmware.md](firmware.md) for the supported
-microcontrollers and the limits.
-
-| Tool | What it does |
-|---|---|
-| `analyze_pin_functions(schematic_path, reference?)` | The pins of each component (or of one reference), with a function from the net name (I2C, SPI, UART, GPIO), and the family of a microcontroller |
-| `extract_pinmux_config(schematic_path, component_type?)` | The peripheral of each pin of a microcontroller |
-| `extract_gpio_config(schematic_path, soc_family?)` | The GPIO pins, with port and bit (STM32) |
-| `extract_i2c_devices(schematic_path)` | The I2C buses and the devices on them |
-| `extract_spi_devices(schematic_path)` | The SPI buses and the devices on them |
-| `extract_power_domains(schematic_path)` | The power nets and the regulators |
-| `generate_device_tree(schematic_path, target_soc?, output_path?)` | A device tree source (.dts) for `stm32f4`, `esp32` or `nrf52` |
 
 ## Parts registry
 

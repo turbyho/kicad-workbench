@@ -146,11 +146,8 @@ class TestNetlistErrorsOfTheTools:
             f"❌ The server cannot make the netlist of {sch}: kicad-cli stopped with the exit code 1: cannot load"
         )
 
-    @pytest.mark.parametrize(
-        "tool", ["analyze_pin_functions", "detect_pin_conflicts", "extract_pinmux_config"]
-    )
-    def test_pin_tools(self, sch, tool):
-        result = asyncio.run(getattr(pin_analysis, tool)(str(sch)))
+    def test_pin_conflicts(self, sch):
+        result = asyncio.run(pin_analysis.detect_pin_conflicts(str(sch)))
         assert result.startswith(
             f"❌ The server cannot make the netlist of {sch}: kicad-cli stopped"
         )

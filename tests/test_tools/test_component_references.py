@@ -133,8 +133,6 @@ def test_symbols_that_are_not_annotated_are_not_one_component(unannotated):
     result = run(schematic.get_schematic_info(str(unannotated)))
     # U? two times, and U3 (two units, one component).
     assert "**Total Components:** 3" in result, result
-    components = schematic.project_components(unannotated, "10.0.6")
-    assert sorted(c.reference for c in components) == ["U3", "U?", "U?"]
 
 
 def test_the_details_of_a_reference_that_is_not_annotated(unannotated):

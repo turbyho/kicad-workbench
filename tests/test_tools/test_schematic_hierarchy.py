@@ -49,7 +49,7 @@ class TestMergeDuplicateReferences:
 
     def test_pins_with_one_number_and_other_names_stay(self):
         # Unit A and unit B have a pin "5" with an other name: a pin number on two
-        # nets (BaseNames needs the two library pins).
+        # nets. The merge keeps the two library pins.
         u1a = self._comp("U1", [{"number": "5", "name": "PA0", "base_name": "PA0"}])
         u1b = self._comp("U1", [{"number": "5", "name": "PB1", "base_name": "PB1"}])
         pins = merge_units([u1a, u1b])[0].pins

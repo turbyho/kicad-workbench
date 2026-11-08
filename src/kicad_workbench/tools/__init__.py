@@ -5,7 +5,6 @@ Core KiCad operations - simplified and focused.
 
 from . import (
     bom,
-    device_tree,
     field_check,
     hierarchical_analysis,
     library,
@@ -32,7 +31,6 @@ __all__ = [
     "pcb",
     "pcb_layout",
     "netlist",
-    "device_tree",
     "hierarchical_analysis",
     "pin_analysis",
     "schematic_search",

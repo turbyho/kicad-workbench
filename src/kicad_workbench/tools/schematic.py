@@ -9,7 +9,6 @@ from pathlib import Path
 from ..errors import InputError
 from ..parsers.annotation import ref_des_prefix
 from ..parsers.kicad_fields import with_field_rules_note
-from ..parsers.netlist_parser import NetlistNode
 from ..parsers.sch_instances import SchematicFile, placed_instances
 from ..parsers.schematic_parser import (
     SchematicComponent,
@@ -86,54 +85,6 @@ def placed_components_and_files(
         if component is not None:
             result.append(_Placed(component, item.sheet.shown, item.file, item.has_library_symbol))
     return result, screens, problems
-
-
-def project_components(sch_path: Path, kicad: str) -> list[SchematicComponent]:
-    """Return the components of the project, one for each reference: the units of a
-    reference are one component (the pins of all units, the fields of the first
-    unit: merge_units), with the references and units of KiCad
-    (placed_components). The function blocks: run it off the event loop."""
-    placed, _problems = placed_components(sch_path, kicad, project_wide=True)
-    return merge_units([item.component for item in placed])
-
-
-async def components_of_project(sch_path: Path, kicad: str | None) -> list[SchematicComponent]:
-    """project_components off the event loop. kicad: the version of KiCad (of the
-    netlist); None: the version of kicad-cli.
-
-    Raises:
-        InputError: The version of KiCad is not known.
-    """
-    kicad = kicad or await get_kicad_version()
-    if kicad_problem := installed_kicad_problem(kicad):
-        raise InputError(kicad_problem)
-    return await asyncio.to_thread(project_components, sch_path, kicad)
-
-
-class BaseNames:
-    """The names of the library pins of a component for the nodes of the netlist.
-
-    The netlist gives the shown name (with the alternate), the schematic model gives
-    the name of the library pin ("base_name", SchematicParser._component_pins).
-    """
-
-    def __init__(self, component: SchematicComponent | None) -> None:
-        """component: The component of the project (project_components), or None."""
-        self._pins: dict[str, list[dict]] = {}
-        for pin in component.pins if component is not None else []:
-            self._pins.setdefault(str(pin.get("number", "")), []).append(pin)
-
-    def of(self, node: NetlistNode) -> str:
-        """Return the name of the library pin of a node, or "" when it is not known.
-
-        A pin number of more than one library pin: the pin whose shown name is the
-        name of the node.
-        """
-        pins = self._pins.get(node.number, [])
-        if len(pins) > 1:
-            pins = [pin for pin in pins if pin.get("name", "") == node.name] or pins
-        names = {pin.get("base_name", pin.get("name", "")) for pin in pins}
-        return names.pop() if len(names) == 1 else ""
 
 
 def _problem_lines(problems: list[str]) -> list[str]:

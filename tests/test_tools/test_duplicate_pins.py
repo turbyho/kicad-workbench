@@ -13,10 +13,8 @@ import asyncio
 import pytest
 
 from kicad_workbench.errors import InputError
-from kicad_workbench.parsers.netlist_parser import NetlistNode, NetlistParser
-from kicad_workbench.parsers.schematic_parser import SchematicComponent
-from kicad_workbench.tools import device_tree, netlist, pin_analysis
-from kicad_workbench.tools.schematic import BaseNames
+from kicad_workbench.parsers.netlist_parser import NetlistParser
+from kicad_workbench.tools import netlist, pin_analysis
 
 
 def netlist_xml(a_type: str = "passive", nc_same_net: bool = False) -> str:
@@ -126,31 +124,6 @@ def test_the_netlist_tools(tmp_path, pin):
     assert "U1.2 (/NA, /NB, /NC)" in result
 
 
-def test_the_base_name_of_a_node():
-    # Two library pins with the number 2: the node name selects the pin.
-    component = SchematicComponent(
-        "U1",
-        "D",
-        "Lib:D",
-        pins=[
-            {"number": "2", "name": "PA1", "base_name": "PA1"},
-            {"number": "2", "name": "SPI_SCK", "base_name": "PB2"},
-            {"number": "3", "name": "PC3", "base_name": "PC3"},
-        ],
-    )
-    names = BaseNames(component)
-
-    def node(number: str, name: str) -> NetlistNode:
-        return NetlistNode("U1", number, "/N", name, "passive")
-
-    assert names.of(node("2", "SPI_SCK")) == "PB2"
-    assert names.of(node("2", "PA1")) == "PA1"
-    assert names.of(node("3", "X")) == "PC3"
-    # Two pins and no name that selects one: the base name is not known.
-    assert names.of(node("2", "X")) == ""
-    assert BaseNames(None).of(node("2", "PA1")) == ""
-
-
 def test_duplicate_references_give_an_annotation_warning():
     # Two symbols "U1" (an annotation error): the nodes of the two symbols are not
     # two pins with one number.
@@ -168,51 +141,3 @@ def test_duplicate_references_give_an_annotation_warning():
 def test_a_net_with_no_name():
     with pytest.raises(InputError, match="has a net with no name"):
         NetlistParser.from_bytes(b'<export><nets><net code="1"/></nets></export>')
-
-
-def test_the_pins_of_the_analysis(tmp_path, monkeypatch):
-    # One row for each pin (number, name and type) with all its nets.
-    netlist_parser = parser()
-
-    async def current_netlist(path):
-        return netlist_parser
-
-    async def components(path, kicad):
-        return [SchematicComponent("U1", "D", "Lib:D"), SchematicComponent("U2", "X", "Lib:X")]
-
-    monkeypatch.setattr(pin_analysis, "current_netlist", current_netlist)
-    monkeypatch.setattr(pin_analysis, "components_of_project", components)
-    path = tmp_path / "a.kicad_sch"
-    path.write_text("", encoding="utf-8")
-    result = asyncio.run(pin_analysis.analyze_pin_functions(str(path), "U1"))
-    assert "**Total Pins Analyzed:** 5" in result, result
-    assert "| U1 | C (2) | passive | /NC |" in result
-    assert "U1.2 (/NA, /NB, /NC)" in result
-
-
-def test_the_device_tree(tmp_path, monkeypatch):
-    # Pin 2 of the MCU on two GPIO nets: one GPIO pin, and a warning, no check mark.
-    text = (
-        "<export><design><tool>Eeschema 10.0.7</tool></design><components>"
-        '<comp ref="U1"><value>STM32F407</value></comp></components><nets>'
-        '<net code="1" name="/GPIO_A"><node ref="U1" pin="2" pinfunction="A_2" '
-        'pintype="bidirectional"/></net>'
-        '<net code="2" name="/GPIO_B"><node ref="U1" pin="2" pinfunction="B_2" '
-        'pintype="bidirectional"/></net></nets></export>'
-    )
-    netlist_parser = NetlistParser.from_bytes(text.encode())
-
-    async def current_netlist(path):
-        return netlist_parser
-
-    async def components(path, kicad):
-        return [SchematicComponent("U1", "STM32F407", "Lib:U")]
-
-    monkeypatch.setattr(netlist, "current_netlist", current_netlist)
-    monkeypatch.setattr(device_tree, "components_of_project", components)
-    path = tmp_path / "a.kicad_sch"
-    path.write_text("", encoding="utf-8")
-    result = asyncio.run(device_tree.generate_device_tree(str(path)))
-    assert result.startswith("⚠️ **Device Tree Generated Successfully**"), result
-    assert "- **GPIO Pins:** 1" in result
-    assert "U1.2 (/GPIO_A, /GPIO_B)" in result

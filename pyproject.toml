@@ -82,6 +82,7 @@ only-include = [
     "tests",
     "docs",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "pyproject.toml",
     "requirements.txt",

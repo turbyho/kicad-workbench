@@ -139,6 +139,7 @@ KiCad does not read a change to a file that it has open.
 | [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/datasheet-lens.md) | The datasheets of a project with datasheet-lens: BOM, confirmed MPNs, checks against the datasheet |
 | [docs/editing.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/editing.md) | The schematic edits: the rules of KiCad that they use, and their limits |
 | [docs/development.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/development.md) | Development setup, tests, rules for code and text |
+| [CHANGELOG.md](https://github.com/turbyho/kicad-workbench/blob/main/CHANGELOG.md) | The changes of each release |
 
 ## Development
 

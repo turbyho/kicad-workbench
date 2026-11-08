@@ -48,13 +48,13 @@ from ..utils.kicad_bom import (
     unit_check_lines,
     variant_label,
 )
-from ..utils.kicad_cli import CliExport, KicadCliError, get_kicad_version
+from ..utils.kicad_cli import CliExport, KicadCliError, get_kicad_version, no_kicad_message
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
-from .library import NO_KICAD_CLI, cell
+from .library import cell
 
 DEFAULT_FIELDS = ("Reference", "Value", "Footprint", "Datasheet", "${QUANTITY}", "${DNP}", "*")
 # IsGeneratedField of KiCad: a field name that is one text variable.
@@ -485,7 +485,7 @@ async def _export_bom(
         )
     kicad = await get_kicad_version()
     if kicad is None:
-        return f"❌ {NO_KICAD_CLI}"
+        return f"❌ {no_kicad_message()}"
     major = bom_rules(kicad)
     if (variant or all_variants) and major < 10:
         return f"❌ kicad-cli of KiCad {kicad} has no variants. KiCad 10 and later have them."

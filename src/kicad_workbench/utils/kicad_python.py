@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 
 from ..errors import WorkbenchError
-from .kicad_cli import fs_encoding
+from .kicad_cli import INSTALL_KICAD, find_kicad_cli, fs_encoding
 from .kicad_version import find_kicad_install
 
 
@@ -30,6 +30,22 @@ class KicadPythonError(WorkbenchError):
 
 
 _cached_python: str | None = None
+def no_kicad_python_message() -> str:
+    """Return the answer of a tool that needs pcbnew, when no Python of KiCad was found:
+    the step to install KiCad, or only the step KICAD_PYTHON when KiCad is installed
+    (kicad-cli was found)."""
+    exe = find_kicad_cli()
+    if exe is None:
+        return (
+            "The Python of KiCad (with the module pcbnew) was not found: KiCad is not "
+            f"installed. The tool needs KiCad 8 or later. Tell the user: {INSTALL_KICAD}, "
+            "or give the Python of KiCad in the environment variable KICAD_PYTHON."
+        )
+    return (
+        f"The Python of KiCad (with the module pcbnew) was not found, but KiCad is "
+        f"installed (kicad-cli {exe}). Tell the user: give the Python of KiCad (a Python "
+        "that can import pcbnew) in the environment variable KICAD_PYTHON."
+    )
 
 
 def find_kicad_python() -> str | None:
@@ -92,10 +108,7 @@ def run_kicad_python_sync(
     """
     exe = find_kicad_python()
     if exe is None:
-        raise FileNotFoundError(
-            "No Python with KiCad's pcbnew module was found. Install KiCad or set "
-            "the KICAD_PYTHON environment variable to KiCad's python executable."
-        )
+        raise FileNotFoundError(no_kicad_python_message())
     # stdin is the MCP stdio transport; the child must not inherit it.
     stdin = {"stdin": subprocess.DEVNULL} if input is None else {"input": input}
     return subprocess.run(

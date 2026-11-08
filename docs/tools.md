@@ -74,9 +74,11 @@ no power symbols and no symbol with no library symbol.
 
 ## Boards
 
-These tools import `pcbnew` in the server process. Without `pcbnew`, they read the
-board file as text, with no design rules and no board outline, and each answer
-has the warning "pcbnew not available" (see [installation.md](installation.md)).
+These tools import `pcbnew` in the server process. Without `pcbnew` (but with KiCad
+installed), they read the board file as text, with no design rules and no board
+outline, and each answer has the warning "pcbnew not available" (see
+[installation.md](installation.md)). With no KiCad, they give the error "KiCad is not
+installed".
 When `pcbnew` cannot read the board (for example a board of a newer KiCad), the
 tools give an error: the text reader does not know the rules of such a board. The
 text reader reads only the boards of KiCad 8 to 10; an older board needs `pcbnew`, or

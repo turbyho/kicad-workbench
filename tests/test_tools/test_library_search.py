@@ -629,7 +629,8 @@ class TestListLibraries:
 
         monkeypatch.setattr(library_tools, "get_kicad_version", no_version)
         out = await library_tools.list_libraries("symbol")
-        assert out.startswith("❌ kicad-cli was not found")
+        assert out.startswith("❌ KiCad is not installed")
+        assert "Tell the user: install KiCad 8 or later" in out
 
 
 class TestSearchTools:

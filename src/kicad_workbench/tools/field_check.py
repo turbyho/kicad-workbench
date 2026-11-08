@@ -46,12 +46,11 @@ from ..utils.kicad_bom import (
     unit_check_lines,
     variant_label,
 )
-from ..utils.kicad_cli import KicadCliError, get_kicad_version
+from ..utils.kicad_cli import KicadCliError, get_kicad_version, no_kicad_message
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
-from .library import NO_KICAD_CLI
 
 # The fields of the BOM: "*" adds each field of the symbols (MPN, Value_Confirmed,
 # MPN_Confirmed).
@@ -237,7 +236,7 @@ async def _check(schematic_path: str) -> str:
         return f"❌ The schematic {path} does not exist or is not a .kicad_sch file."
     kicad = await get_kicad_version()
     if kicad is None:
-        return f"❌ {NO_KICAD_CLI}"
+        return f"❌ {no_kicad_message()}"
     major = bom_rules(kicad)
     try:
         kicad_major(kicad)  # the references of the symbols after the load

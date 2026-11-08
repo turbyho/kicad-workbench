@@ -29,6 +29,7 @@ from ..server import mcp
 from ..utils.file_save import save_files
 from ..utils.kicad_cli import (
     KicadCliError,
+    KicadNotFoundError,
     cli_root,
     decode_output,
     get_kicad_version,
@@ -538,17 +539,9 @@ ERC check completed but failed to parse report.
 
 You can manually inspect the report file or re-run ERC in KiCad GUI.{subsheet_note}"""
 
+    except KicadNotFoundError as e:
+        return f"❌ {e}"
     except FileNotFoundError as e:
-        # Distinguish kicad-cli missing (raised by subprocess) from a missing
-        # schematic file (already checked at the top of the function).
-        if "kicad-cli" in str(e):
-            return f"""❌ **kicad-cli Not Found**
-
-**Schematic:** {schematic_path}
-
-KiCad's command-line tool (kicad-cli) could not be located on PATH or in the
-detected KiCad install directory. Install KiCad 8 or later (https://www.kicad.org/),
-or point the KICAD_CLI environment variable at the kicad-cli executable."""
         return f"""❌ **File Not Found**
 
 **Schematic:** {schematic_path}
@@ -720,6 +713,8 @@ DRC check completed but failed to parse report.
 
 You can manually inspect the report file or re-run DRC in KiCad GUI."""
 
+    except KicadNotFoundError as e:
+        return f"❌ {e}"
     except FileNotFoundError:
         return f"""❌ **File Not Found**
 

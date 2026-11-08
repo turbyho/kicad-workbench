@@ -170,10 +170,19 @@ class TestRefusal:
         assert result.startswith("❌ pcbnew could not create the board:"), result
         assert "ImportError: pcbnew" in result
 
-    def test_no_python_with_pcbnew(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("cli", [None, "/usr/bin/kicad-cli"])
+    def test_no_python_with_pcbnew(self, tmp_path, monkeypatch, cli):
         monkeypatch.setattr(kicad_python, "find_kicad_python", lambda: None)
+        monkeypatch.setattr(kicad_python, "find_kicad_cli", lambda: cli)
         result = setup(write_schematic(tmp_path, 20260306))
-        assert result.startswith("❌ No Python with KiCad's pcbnew module was found."), result
+        assert result.startswith("❌ The Python of KiCad (with the module pcbnew)"), result
+        if cli is None:
+            assert "KiCad is not installed" in result
+            assert "Tell the user: install KiCad 8 or later" in result
+        else:
+            # KiCad is installed: an install does not help.
+            assert f"KiCad is installed (kicad-cli {cli})" in result
+            assert "install KiCad" not in result and "KICAD_PYTHON" in result
 
     def test_timeout(self, tmp_path, monkeypatch):
         def run(args, timeout=120.0, input=None):

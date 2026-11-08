@@ -30,6 +30,7 @@ from pathlib import Path
 from ..errors import InputError
 from ..parsers.kicad_versions import Release, kicad_release, version_triple
 from .file_save import AfterSaveError, save_file
+from .kicad_cli import no_kicad_message
 from .kicad_text import write_kicad_text
 from .library_tables import KicadEnvironment, expand, kicad_documents_dir
 
@@ -94,10 +95,7 @@ def rules(kicad_version: str | None) -> Rules:
         NewProjectError: The version is not known, or it is a development build.
     """
     if not kicad_version:
-        raise NewProjectError(
-            "kicad-cli gave no version (it is not found, or it failed). The server makes a "
-            "project with the rules of the installed KiCad version."
-        )
+        raise NewProjectError(no_kicad_message())
     triple = version_triple(kicad_version)
     release = kicad_release(kicad_version)
     if triple is None or release is None or triple < (8, 0, 0) or triple > NEWEST_RELEASE:

@@ -33,7 +33,13 @@ from ..parsers.check_report_parser import (
 from ..parsers.kicad_versions import version_numbers
 from ..parsers.sexpr import SExprError
 from ..server import mcp
-from ..utils.kicad_cli import KicadCliError, decode_output, get_kicad_version, run_kicad_cli_sync
+from ..utils.kicad_cli import (
+    KicadCliError,
+    decode_output,
+    get_kicad_version,
+    no_kicad_message,
+    run_kicad_cli_sync,
+)
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.library_tables import (
     LibraryTableError,
@@ -48,7 +54,6 @@ from ..utils.schematic_settings import rule_severities, unknown_severity_reason
 from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from .library import (
-    NO_KICAD_CLI,
     SchematicFootprints,
     annotation_lines,
     annotation_sentences,
@@ -476,7 +481,7 @@ async def _board_part(board: Path, kicad: str) -> _Part:
 async def _check_links(project_path: str) -> str:
     kicad = await get_kicad_version()
     if kicad is None:
-        return f"❌ {NO_KICAD_CLI}"
+        return f"❌ {no_kicad_message()}"
     project = await asyncio.to_thread(project_file, project_path)
     if project is None:
         return "❌ Give the project: a .kicad_pro, .kicad_sch or .kicad_pcb file, or its directory."

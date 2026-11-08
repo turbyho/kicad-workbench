@@ -4,6 +4,7 @@ import asyncio
 import json
 import locale
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -98,6 +99,46 @@ class TestRunKicadCli:
         monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: None)
         with pytest.raises(FileNotFoundError):
             asyncio.run(run_kicad_cli(["version"]))
+
+    def test_not_found_is_kicad_not_found_error(self, monkeypatch):
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: None)
+        with pytest.raises(kicad_cli.KicadNotFoundError) as error:
+            run_kicad_cli_sync(["version"])
+        assert str(error.value) == kicad_cli.NO_KICAD
+        assert "Tell the user: install KiCad 8 or later" in kicad_cli.NO_KICAD
+
+    def test_a_removed_kicad_cli_in_the_cache(self, monkeypatch, tmp_path):
+        """KiCad was removed while the server runs: the cache gives no file."""
+        gone = tmp_path / "kicad-cli"
+        gone.write_text("", encoding="utf-8")
+        monkeypatch.setattr(kicad_cli, "_cached_exe", str(gone))
+        gone.unlink()
+        monkeypatch.setattr(kicad_cli.shutil, "which", lambda name: None)
+        monkeypatch.setattr(kicad_cli, "find_kicad_install", lambda: None)
+        assert find_kicad_cli() is None
+        with pytest.raises(kicad_cli.KicadNotFoundError):
+            run_kicad_cli_sync(["version"])
+
+    def test_the_message_of_a_kicad_cli_that_fails(self, monkeypatch):
+        """kicad-cli is there but gives no version: the message gives the reason, not
+        the step to install KiCad."""
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
+        monkeypatch.setattr(
+            kicad_cli,
+            "run_kicad_cli_sync",
+            lambda args, timeout: subprocess.CompletedProcess(args, 2, b"", b"no display"),
+        )
+        assert kicad_cli.kicad_cli_version_sync() is None
+        message = kicad_cli.no_kicad_message()
+        assert message.startswith(
+            f"kicad-cli did not give its version: {sys.executable} gave the exit code 2: "
+            "no display."
+        )
+        assert "install KiCad" not in message
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: None)
+        monkeypatch.setattr(kicad_cli, "run_kicad_cli_sync", run_kicad_cli_sync)
+        assert kicad_cli.kicad_cli_version_sync() is None
+        assert kicad_cli.no_kicad_message() == kicad_cli.NO_KICAD
 
     def test_runs_executable_off_event_loop(self, monkeypatch):
         """End-to-end subprocess execution using the current interpreter."""

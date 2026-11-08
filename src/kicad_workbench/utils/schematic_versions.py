@@ -35,7 +35,12 @@ from ..parsers.kicad_versions import (
     kicad_release,
     version_numbers,
 )
-from .kicad_cli import kicad_cli_version_sync, reset_call_version, set_call_version
+from .kicad_cli import (
+    kicad_cli_version_sync,
+    no_kicad_message,
+    reset_call_version,
+    set_call_version,
+)
 from .kicad_project import (
     PRO_SUFFIX,
     SCH_SUFFIX,
@@ -46,12 +51,6 @@ from .kicad_project import (
 from .kicad_text import read_as_kicad
 from .sch_hierarchy import AmbiguousRootError, file_versions_of_load, schematic_project_file
 from .tool_errors import error_answer
-
-NO_KICAD = (
-    "kicad-cli was not found, thus the installed KiCad is not known. The server reads "
-    "and writes the schematic files as the installed KiCad does. Install KiCad 8 or "
-    "later, or give the path of kicad-cli in the environment variable KICAD_CLI."
-)
 
 
 class SchematicVersionError(WorkbenchError):
@@ -103,7 +102,7 @@ def _installed_kicad() -> str:
     """Return the version of the installed KiCad (kicad-cli version)."""
     version = kicad_cli_version_sync()
     if not version:
-        raise SchematicVersionError(NO_KICAD)
+        raise SchematicVersionError(no_kicad_message())
     return version
 
 

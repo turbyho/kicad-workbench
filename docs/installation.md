@@ -4,13 +4,18 @@
 
 - KiCad 8, 9 or 10, with kicad-cli. The server finds kicad-cli in the standard
   install folder of KiCad and in `PATH`. The environment variable `KICAD_CLI` gives a
-  different path.
+  different path. With no KiCad (no kicad-cli, and no `pcbnew` in the server
+  process), each tool that works with KiCad files gives an error that tells the user
+  to install KiCad 8 or later. When kicad-cli is there but does not give its version,
+  the error gives the reason. Only the tools of the parts registry and the tools that
+  read a netlist file work with no KiCad.
 - Python 3.10 or later.
 - A Python that can import the module `pcbnew` of KiCad, for the board tools
   (`list_pcb_footprints`, `get_pcb_statistics`, `find_tracks_by_net`,
   `analyze_pcb_nets`, `analyze_pcb_signal_integrity`, `analyze_pcb_power_integrity`).
-  These tools import `pcbnew` in the server process. Without it, they read the board
-  file as text: they give no design rules and no board outline.
+  These tools import `pcbnew` in the server process. Without it (but with KiCad
+  installed), they read the board file as text: they give no design rules and no
+  board outline.
 
 Other tools also use `pcbnew`: `get_library_footprint`, `check_pin_pad_mapping`,
 `check_schematic_pin_pad_mapping`, `check_library_links` and
@@ -239,8 +244,9 @@ text. Install the server into a Python with `pcbnew`.
 
 ### kicad-cli not found
 
-Install KiCad in its standard folder, add the folder of kicad-cli to `PATH`, or set
-`KICAD_CLI`. The standard folders:
+The tools give the error "KiCad is not installed". Install KiCad in its standard
+folder, add the folder of kicad-cli to `PATH`, or set `KICAD_CLI`. The standard
+folders:
 
 - Windows: `C:\Program Files\KiCad\<version>\bin\kicad-cli.exe`
 - macOS: `/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli`

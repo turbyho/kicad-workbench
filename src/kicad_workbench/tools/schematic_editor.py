@@ -67,7 +67,7 @@ from ..parsers.sexpr import (
 from ..parsers.sheet_list import kiid, kiid_path
 from ..server import mcp
 from ..utils.file_stamp import FileStamp, read_for_write_stamped
-from ..utils.kicad_cli import kicad_cli_version_sync
+from ..utils.kicad_cli import kicad_cli_version_sync, no_kicad_message
 from ..utils.kicad_lock import writable_schematic_version, write_schematic, write_with_warning
 from ..utils.kicad_project import (
     PRO_SUFFIX,
@@ -1117,10 +1117,7 @@ def _add_component_from_library_sync(
     else:
         kicad = kicad_cli_version_sync()
         if kicad is None:
-            return (
-                f"❌ Cannot add component {lib_id}: kicad-cli was not found, thus the KiCad "
-                "version and its library tables are not known."
-            )
+            return f"❌ Cannot add component {lib_id}: {no_kicad_message()}"
         found = _library_definition(project, library_name, symbol_name, kicad, version)
         if isinstance(found, str):
             return found

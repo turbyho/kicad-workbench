@@ -56,6 +56,39 @@ _call_version: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+# The step for the user when KiCad is not installed (also kicad_python.py).
+INSTALL_KICAD = "install KiCad 8 or later (https://www.kicad.org/download/)"
+# The answer of a tool that needs KiCad, when kicad-cli was not found.
+NO_KICAD = (
+    "KiCad is not installed: kicad-cli was not found. The tool works with the KiCad files "
+    "as the installed KiCad does, thus it needs KiCad 8 or later. Tell the user: "
+    f"{INSTALL_KICAD}, or give the path of kicad-cli in the environment variable KICAD_CLI."
+)
+# Why the last run of `kicad-cli version` gave no version (no_kicad_message).
+_version_problem: str | None = None
+
+
+class KicadNotFoundError(FileNotFoundError):
+    """kicad-cli was not found: KiCad is not installed (the message is NO_KICAD)."""
+
+    def __init__(self) -> None:
+        super().__init__(NO_KICAD)
+
+
+def no_kicad_message() -> str:
+    """Return the answer of a tool when kicad_cli_version_sync gave no version: NO_KICAD
+    when kicad-cli was not found, else the reason of the failure of kicad-cli (KiCad is
+    installed: an install does not help). The function does not run kicad-cli again."""
+    if _version_problem is None:
+        return NO_KICAD
+    return (
+        f"kicad-cli did not give its version: {_version_problem}. The tool needs the "
+        'version of the installed KiCad. Tell the user: run "kicad-cli version" to check '
+        "the installation of KiCad, or give the path of a kicad-cli that works in the "
+        "environment variable KICAD_CLI."
+    )
+
+
 class KicadCliError(WorkbenchError):
     """kicad-cli cannot run, did not stop in time, or did not write its output. The
     message tells why."""
@@ -74,7 +107,9 @@ def find_kicad_cli() -> str | None:
     """
     global _cached_exe
     if _cached_exe is not None:
-        return _cached_exe
+        if Path(_cached_exe).is_file():
+            return _cached_exe
+        _cached_exe = None  # KiCad was removed or moved while the server runs
 
     override = os.environ.get("KICAD_CLI")
     if override and Path(override).is_file():
@@ -294,15 +329,12 @@ def run_kicad_cli_sync(
     Raises KicadCliError when an argument is not ASCII and no locale lets
     kicad-cli decode it as this process encodes it (see child_ctype()).
 
-    Raises FileNotFoundError when kicad-cli cannot be located, so callers can
-    distinguish "KiCad not installed" from a failed run.
+    Raises KicadNotFoundError (a FileNotFoundError) when kicad-cli cannot be
+    located, so callers can distinguish "KiCad not installed" from a failed run.
     """
     exe = find_kicad_cli()
     if exe is None:
-        raise FileNotFoundError(
-            "kicad-cli not found in PATH or known KiCad install locations. "
-            "Install KiCad 8 or later, or set the KICAD_CLI environment variable."
-        )
+        raise KicadNotFoundError()
     if sys.platform != "win32" and child_ctype() is None and not all(a.isascii() for a in args):
         raise KicadCliError(
             "kicad-cli cannot read a file path that is not ASCII on this system. "
@@ -312,7 +344,7 @@ def run_kicad_cli_sync(
         )
     env = kicad_cli_env(english)
     if not english:
-        return subprocess.run([exe] + args, capture_output=True, timeout=timeout, env=env)
+        return _run(exe, args, timeout, env)
     # The thread that runs this function owns the directory: a cancel of the tool
     # call does not stop kicad-cli.
     with tempfile.TemporaryDirectory(
@@ -327,7 +359,23 @@ def run_kicad_cli_sync(
             raise KicadCliError(f"The settings of KiCad cannot be copied for kicad-cli: {e}") from e
         env = dict(os.environ if env is None else env)
         env["KICAD_CONFIG_HOME"] = settings
+        return _run(exe, args, timeout, env)
+
+
+def _run(
+    exe: str, args: list[str], timeout: float, env: dict[str, str] | None
+) -> subprocess.CompletedProcess:
+    """Run kicad-cli. A kicad-cli that the system cannot find now (KiCad was removed
+    after find_kicad_cli) is KicadNotFoundError, when no other kicad-cli is found."""
+    try:
         return subprocess.run([exe] + args, capture_output=True, timeout=timeout, env=env)
+    except FileNotFoundError:
+        if Path(exe).is_file():
+            raise
+        other = find_kicad_cli()
+        if other is None:
+            raise KicadNotFoundError() from None
+        return subprocess.run([other] + args, capture_output=True, timeout=timeout, env=env)
 
 
 @dataclass(frozen=True)
@@ -405,16 +453,30 @@ def kicad_cli_version_sync() -> str | None:
     """Return the version of kicad-cli (e.g. "10.0.6"), or None if unknown. No
     cache between tool calls: KiCad can change while the server runs (one run takes
     about 0.1 s). In a tool call, the version of set_call_version."""
+    global _version_problem
     known = _call_version.get()
     if known is not None:
         return known
     try:
         result = run_kicad_cli_sync(["version"], timeout=30)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except KicadNotFoundError:
+        _version_problem = None
         return None
-    if result.returncode != 0:
+    except subprocess.TimeoutExpired:
+        _version_problem = f"{find_kicad_cli()} did not stop in 30 s"
         return None
-    return decode_output(result.stdout).strip() or None
+    except (OSError, KicadCliError) as e:
+        _version_problem = f"{find_kicad_cli()}: {e}"
+        return None
+    version = decode_output(result.stdout).strip()
+    if result.returncode != 0 or not version:
+        messages = decode_output(result.stdout + result.stderr).strip()
+        _version_problem = f"{find_kicad_cli()} gave the exit code {result.returncode}" + (
+            f": {messages}" if messages else ""
+        )
+        return None
+    _version_problem = None
+    return version
 
 
 async def get_kicad_version() -> str | None:

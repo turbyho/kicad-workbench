@@ -5,7 +5,9 @@ from __future__ import annotations
 import functools
 
 from ..errors import WorkbenchError
+from ..parsers.kicad_versions import version_numbers
 from ..server import mcp
+from ..utils import kicad_cli
 from ..utils.tool_errors import error_answer
 
 
@@ -40,7 +42,13 @@ TEXT_READER_WARNING = (
 
 def _board_tool(limits: str):
     """A board tool: with no pcbnew, its answer gets TEXT_READER_WARNING and the
-    limits of the text reader for this tool (each answer that is not an error)."""
+    limits of the text reader for this tool (each answer that is not an error).
+
+    The text reader is only for an installed KiCad 8 or later whose pcbnew the server
+    process cannot import (for example the Python of KiCad on Windows). With no KiCad
+    (kicad-cli gives no version), the tool gives the error of no_kicad_message: the
+    tools work with the files as the installed KiCad does.
+    """
 
     def decorator(function):
         @functools.wraps(function)
@@ -49,6 +57,13 @@ def _board_tool(limits: str):
                 text_reader = not _pcbnew_importable()
             except PcbnewImportError as e:
                 return f"❌ {e}"
+            if text_reader:
+                kicad = await kicad_cli.get_kicad_version()
+                numbers = version_numbers(kicad) if kicad else None
+                if numbers is None:
+                    return f"❌ {kicad_cli.no_kicad_message()}"
+                if numbers[0] < 8:
+                    return f"❌ KiCad {kicad} is older than KiCad 8, the minimum of this server."
             result = await function(*args, **kwargs)
             if text_reader and not result.startswith("❌"):
                 result += f"\n\n{TEXT_READER_WARNING}{limits}."

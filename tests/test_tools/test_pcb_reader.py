@@ -1,7 +1,8 @@
 """Tests of the reader of the board tools (tools/pcb.py).
 
 The tools read the board with pcbnew when the server can import it. Only then:
-the text reader, with a warning. When pcbnew cannot read the board, the tools
+the text reader, with a warning, when KiCad is installed (kicad-cli); with no KiCad,
+an error that tells the user to install KiCad. When pcbnew cannot read the board, the tools
 give an error: pcbnew of KiCad 8 raises OSError (IO_ERROR), pcbnew of KiCad 9
 and 10 give None (checked with 8.0.9, 9.0.9 and 10.0.6).
 """
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.tools import pcb
+from kicad_workbench.utils import kicad_cli
 
 BOARD = Path(__file__).resolve().parent.parent / "fixtures" / "example_pcb.kicad_pcb"
 TOOLS = [
@@ -40,8 +42,10 @@ def import_check():
 
 @pytest.fixture
 def no_pcbnew(monkeypatch):
-    # A None entry in sys.modules makes "import pcbnew" raise ImportError.
+    # A None entry in sys.modules makes "import pcbnew" raise ImportError. KiCad is
+    # installed (kicad-cli), but the process cannot import its pcbnew.
     monkeypatch.setitem(sys.modules, "pcbnew", None)
+    monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: "/usr/bin/kicad-cli")
 
 
 def fake_pcbnew(monkeypatch, load_board, version="10.0.6"):
@@ -56,6 +60,16 @@ def test_text_reader_with_a_warning(no_pcbnew, tool, kwargs):
     result = run(tool, BOARD, **kwargs)
     assert result.count("pcbnew not available") == 1, result
     assert not result.startswith("❌")
+
+
+@pytest.mark.parametrize("tool, kwargs", TOOLS)
+def test_no_kicad_is_an_error(no_pcbnew, monkeypatch, tool, kwargs):
+    """With no KiCad, the text reader does not read the board: the tools work with the
+    files as the installed KiCad does."""
+    monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: None)
+    result = run(tool, BOARD, **kwargs)
+    assert result.startswith("❌ KiCad is not installed"), result
+    assert "Tell the user: install KiCad 8 or later" in result
 
 
 def test_the_limits_of_each_tool(no_pcbnew):

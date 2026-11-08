@@ -180,7 +180,8 @@ class TestRefusal:
 
         monkeypatch.setattr(schematic_editor, "kicad_cli_version_sync", no_version)
         result = add(write_schematic(libs["board"], 20260306))
-        assert result.startswith("❌ Cannot add component Device:R: kicad-cli was not found")
+        assert result.startswith("❌ Cannot add component Device:R: KiCad is not installed")
+        assert "Tell the user: install KiCad 8 or later" in result
 
 
 class TestPins:

@@ -90,7 +90,8 @@ def test_no_kicad_version(project, monkeypatch):
 
     monkeypatch.setattr(schematic, "get_kicad_version", version)
     result = run(schematic.list_schematic_components(str(project / "sub.kicad_sch")))
-    assert result.startswith("❌ The version of KiCad is not known"), result
+    assert result.startswith("❌ KiCad is not installed"), result
+    assert "Tell the user: install KiCad 8 or later" in result
 
 
 @pytest.fixture

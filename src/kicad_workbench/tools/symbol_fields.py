@@ -66,7 +66,7 @@ from ..parsers.sheet_list import screens_by_file
 from ..parsers.symbol_info import letter_reference
 from ..parsers.unit_fields import is_confirmed_field, is_mpn_confirmed_field
 from ..server import mcp
-from ..utils.kicad_cli import get_kicad_version
+from ..utils.kicad_cli import get_kicad_version, no_kicad_message
 from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
 from ..utils.library_tables import kicad_environment
@@ -715,10 +715,7 @@ async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) ->
         return f"❌ {e}. Give the root schematic of the project."
     kicad = await get_kicad_version()
     if kicad is None:
-        return (
-            "❌ The version of KiCad is not known (kicad-cli does not run): the references of "
-            "the symbols depend on it. Install KiCad or set KICAD_CLI."
-        )
+        return f"❌ {no_kicad_message()}"
     try:
         kicad_major(kicad)
     except InputError as e:

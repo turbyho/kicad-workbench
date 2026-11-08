@@ -19,16 +19,11 @@ from ..parsers.schematic_parser import (
 )
 from ..parsers.sheet_list import EMPTY_REASONS
 from ..server import mcp
-from ..utils.kicad_cli import get_kicad_version
+from ..utils.kicad_cli import get_kicad_version, no_kicad_message
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
-from ..utils.schematic_versions import NO_KICAD, with_schematic_versions
+from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from .netlist import NetlistError, netlist_of
-
-_NO_VERSION = (
-    "❌ The version of KiCad is not known (kicad-cli does not run): the references of the "
-    "symbols of each sheet path depend on it. Install KiCad or set KICAD_CLI."
-)
 
 
 @dataclass
@@ -110,7 +105,7 @@ async def components_of_project(sch_path: Path, kicad: str | None) -> list[Schem
     """
     kicad = kicad or await get_kicad_version()
     if kicad is None:
-        raise InputError(_NO_VERSION.removeprefix("❌ "))
+        raise InputError(no_kicad_message())
     return await asyncio.to_thread(project_components, sch_path, kicad)
 
 
@@ -175,7 +170,7 @@ async def list_schematic_components(
             return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
         if kicad is None:
-            return _NO_VERSION
+            return f"❌ {no_kicad_message()}"
         placed, problems = await asyncio.to_thread(placed_components, path, kicad)
         sheets = {item.sheet for item in placed}
 
@@ -285,7 +280,7 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
             return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
         if kicad is None:
-            return _NO_VERSION
+            return f"❌ {no_kicad_message()}"
         # The reference is a reference of the project: its units can be in an other
         # file or sheet path than file_path.
         placed, problems = await asyncio.to_thread(placed_components, path, kicad, True)
@@ -399,7 +394,7 @@ async def search_symbols(
             return f"❌ The pattern {pattern!r} is not a regular expression: {e}"
         kicad = await get_kicad_version()
         if kicad is None:
-            return _NO_VERSION
+            return f"❌ {no_kicad_message()}"
         placed, problems = await asyncio.to_thread(placed_components, path, kicad)
 
         def texts(comp: SchematicComponent) -> list[str]:
@@ -457,7 +452,7 @@ async def list_schematic_nets(
         kicad = await get_kicad_version()
         if kicad is None:
             # The field rules come from the installed KiCad (kicad_fields).
-            return f"❌ {NO_KICAD}"
+            return f"❌ {no_kicad_message()}"
         nets = await asyncio.to_thread(lambda: SchematicParser(file_path, kicad).get_nets())
 
         # Filter for power nets if requested
@@ -559,7 +554,7 @@ async def get_schematic_info(file_path: str) -> str:
             return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
         if kicad is None:
-            return _NO_VERSION
+            return f"❌ {no_kicad_message()}"
         def read():
             parser = SchematicParser(file_path, kicad)
             placed, screens, problems = placed_components_and_files(path, kicad)

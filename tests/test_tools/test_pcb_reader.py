@@ -41,11 +41,15 @@ def import_check():
 
 
 @pytest.fixture
-def no_pcbnew(monkeypatch):
-    # A None entry in sys.modules makes "import pcbnew" raise ImportError. KiCad is
-    # installed (kicad-cli), but the process cannot import its pcbnew.
+def pcbnew_not_importable(monkeypatch):
+    # A None entry in sys.modules makes "import pcbnew" raise ImportError.
     monkeypatch.setitem(sys.modules, "pcbnew", None)
-    monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: "/usr/bin/kicad-cli")
+
+
+@pytest.fixture
+def no_pcbnew(pcbnew_not_importable, kicad_version):
+    """KiCad is installed (kicad-cli gives a version), but the process cannot import
+    its pcbnew."""
 
 
 def fake_pcbnew(monkeypatch, load_board, version="10.0.6", cli=None):
@@ -77,7 +81,7 @@ def test_text_reader_with_a_warning(no_pcbnew, tool, kwargs):
 
 
 @pytest.mark.parametrize("tool, kwargs", TOOLS)
-def test_no_kicad_is_an_error(no_pcbnew, monkeypatch, tool, kwargs):
+def test_no_kicad_is_an_error(pcbnew_not_importable, monkeypatch, tool, kwargs):
     """With no KiCad, the text reader does not read the board: the tools work with the
     files as the installed KiCad does."""
     monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: None)

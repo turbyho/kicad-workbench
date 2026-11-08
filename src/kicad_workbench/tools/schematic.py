@@ -461,6 +461,8 @@ async def list_schematic_nets(
         A table of the nets: name, type and code.
     """
     try:
+        if not Path(file_path).is_file():
+            return f"❌ File not found: {file_path}"
         kicad = await get_kicad_version()
         if kicad is None:
             # The field rules come from the installed KiCad (kicad_fields).

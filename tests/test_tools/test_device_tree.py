@@ -9,7 +9,11 @@ from kicad_workbench.tools import device_tree, pin_analysis
 from kicad_workbench.tools import netlist as netlist_tools
 from kicad_workbench.utils.kicad_cli import CliExport
 
+from .kicad_stub import child_preamble
 from .locale_env import can_name, non_utf8_env, run_python
+
+# The tests give the tools the netlist and the version of KiCad: they need no KiCad.
+pytestmark = pytest.mark.usefixtures("kicad_version")
 
 SCH = '(kicad_sch (version 20250114) (generator "eeschema"))\n'
 NETLIST = '<?xml version="1.0"?>\n<export version="E"><components/><nets/></export>\n'
@@ -78,7 +82,7 @@ def test_text_that_is_not_valid_does_not_empty_the_output(tmp_path, no_kicad):
     assert output.read_text(encoding="utf-8") == "/* old */\n"
 
 
-_IN_LOCALE = """
+_IN_LOCALE_RUN = """
 import asyncio
 from pathlib import Path
 from kicad_workbench.tools import device_tree
@@ -96,6 +100,7 @@ netlist_tools.export_with_kicad_cli = lambda *args: CliExport(netlist.read_bytes
 message = asyncio.run(device_tree.generate_device_tree(str(sch), "stm32f4", str(output)))
 result([message, output.read_bytes().hex() if output.exists() else ""])
 """
+_IN_LOCALE = child_preamble() + _IN_LOCALE_RUN
 
 
 @pytest.mark.parametrize("utf8_mode", [False, True])

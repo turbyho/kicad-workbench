@@ -29,6 +29,7 @@ from kicad_workbench.utils.kicad_text import (
 )
 
 from .installed_kicad import as_installed, installed_device_library
+from .kicad_stub import TEST_KICAD, child_preamble
 
 SCH = """(kicad_sch
 \t(version 20250114)
@@ -53,7 +54,13 @@ SCH = """(kicad_sch
 # Runs in the child process. argv: schematic path, tool name, name as JSON.
 # The name goes as ASCII JSON, because the ASCII locale cannot decode a
 # non-ASCII argument.
-_CHILD = """
+# add_component_from_library needs the libraries of the installed KiCad
+# (_needs_symbols): its child has the version of that KiCad.
+_CHILD_VERSION = (
+    f"(kicad_cli.kicad_cli_version_sync() or {TEST_KICAD!r})"
+    f" if sys.argv[2] == 'add_component_from_library' else {TEST_KICAD!r}"
+)
+_CHILD_RUN = """
 import asyncio, json, locale, sys
 from kicad_workbench.tools import schematic_editor as se
 path, tool, name = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
@@ -67,6 +74,7 @@ else:
     result = asyncio.run(getattr(se, tool)(path, "", "", name, x=60, y=60))
 print(json.dumps({"encoding": locale.getpreferredencoding(False), "result": result}))
 """
+_CHILD = child_preamble(_CHILD_VERSION) + _CHILD_RUN
 
 _needs_symbols = pytest.mark.skipif(
     installed_device_library() is None, reason="the global library table has no library Device"

@@ -17,7 +17,9 @@ import pytest
 
 from kicad_workbench.parsers import c_numbers
 from kicad_workbench.parsers.sub_symbols import sub_symbol_unit
-from kicad_workbench.utils import file_versions
+from kicad_workbench.utils import file_versions, kicad_cli
+
+from .kicad_stub import TEST_KICAD
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +35,15 @@ def _no_file_version_check(request, monkeypatch):
             "check_library_versions",
             lambda kind, libraries, kicad: file_versions.LibraryCheck([], [], set()),
         )
+
+
+@pytest.fixture
+def kicad_version():
+    """The version of the installed KiCad for a test that runs no kicad-cli
+    (kicad_stub.TEST_KICAD as the version of the call, see kicad_stub)."""
+    token = kicad_cli.set_call_version(TEST_KICAD)
+    yield TEST_KICAD
+    kicad_cli.reset_call_version(token)
 
 
 def _long(monkeypatch, bits: int):

@@ -249,7 +249,12 @@ class TestTables:
         assert library_tables._uses_stock_variable(uri, env) is stock
 
     def test_stock_folder_that_is_not_known_on_windows(self, kicad, monkeypatch, tmp_path):
+        from kicad_workbench.utils import kicad_cli
+
         monkeypatch.setattr(library_tables, "_stock_dir", lambda: None)
+        # The test sets the platform of the full process: shutil.which of Windows
+        # cannot run on Linux, thus kicad-cli is a path of the test.
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: "C:/KiCad/bin/kicad-cli.exe")
         monkeypatch.setattr(library_tables.sys, "platform", "win32")
         env = kicad_environment("10.0")
         assert "set KICAD_CLI to kicad-cli.exe" in library_tables._unknown_stock_problem(env)

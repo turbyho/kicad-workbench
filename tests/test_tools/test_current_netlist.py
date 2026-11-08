@@ -218,32 +218,24 @@ def test_the_drc_report_is_stale_after_a_change_of_an_other_top_level_sheet(tmp_
     assert tmp_path / "extra.kicad_sch" in validation._drc_sources(tmp_path / "board.kicad_pcb")
 
 
-def test_the_nets_note_of_the_root_runs_no_kicad_cli(monkeypatch, tmp_path):
+def test_the_nets_note_of_the_root_runs_no_kicad_cli(monkeypatch, tmp_path, kicad_version):
     from kicad_workbench.tools import schematic
 
     root = _two_top_level_sheets(tmp_path)
     # The tool needs only the version of the call (the field rules): with_schematic_versions
-    # sets it, thus no more kicad-cli runs.
+    # sets it, thus no more kicad-cli runs (the fixture kicad_version).
     monkeypatch.setattr(kicad_cli, "run_kicad_cli_sync", lambda *a, **k: pytest.fail("kicad-cli"))
-    token = kicad_cli.set_call_version("10.0.6")
-    try:
-        result = asyncio.run(schematic.list_schematic_nets(str(root)))
-    finally:
-        kicad_cli.reset_call_version(token)
+    result = asyncio.run(schematic.list_schematic_nets(str(root)))
     assert "Note" not in result, result
 
 
-def test_the_nets_note_of_an_other_top_level_sheet(monkeypatch, tmp_path):
+def test_the_nets_note_of_an_other_top_level_sheet(monkeypatch, tmp_path, kicad_version):
     # The note needs no kicad-cli: it names the schematic of the project name.
     from kicad_workbench.tools import schematic
 
     root = _two_top_level_sheets(tmp_path)
     monkeypatch.setattr(kicad_cli, "run_kicad_cli_sync", lambda *a, **k: pytest.fail("kicad-cli"))
-    token = kicad_cli.set_call_version("10.0.6")
-    try:
-        result = asyncio.run(schematic.list_schematic_nets(str(tmp_path / "extra.kicad_sch")))
-    finally:
-        kicad_cli.reset_call_version(token)
+    result = asyncio.run(schematic.list_schematic_nets(str(tmp_path / "extra.kicad_sch")))
     assert (
         "`extra.kicad_sch` is not the root schematic of its project. The nets with no "
         "label need the full hierarchy: they are not here. Use `generate_netlist` on "

@@ -89,6 +89,7 @@ class TestSchematicParser:
         assert any(c.value == "10k" for c in results)
 
 
+@pytest.mark.usefixtures("kicad_version")
 class TestSchematicTools:
     """Test schematic tool functions."""
 
@@ -178,6 +179,7 @@ def test_pins_of_the_netlist_nodes(version, f1, f2):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("kicad_version")
 async def test_symbol_details_with_the_pins_of_the_netlist(example_schematic, monkeypatch):
     from kicad_workbench.utils.kicad_cli import CliExport
 
@@ -188,6 +190,7 @@ async def test_symbol_details_with_the_pins_of_the_netlist(example_schematic, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("kicad_version")
 async def test_symbol_details_with_no_netlist(example_schematic, monkeypatch):
     def no_netlist(*args):
         raise KicadCliError("no kicad-cli")
@@ -198,6 +201,7 @@ async def test_symbol_details_with_no_netlist(example_schematic, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("kicad_version")
 async def test_symbol_details_with_a_netlist_that_is_not_xml(example_schematic, monkeypatch):
     from kicad_workbench.utils.kicad_cli import CliExport
 

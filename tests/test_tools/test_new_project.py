@@ -38,10 +38,15 @@ def write(path: Path, text: str = "x") -> Path:
 
 
 class TestRules:
-    @pytest.mark.parametrize("version", [None, "", "7.0.11", "10.0.8", "10.99.0", "11.0.0"])
+    @pytest.mark.parametrize("version", [None, "", "7.0.11", "10.99.0", "11.0.0", "10.0.1-rc1"])
     def test_versions_with_no_rules(self, version):
         with pytest.raises(np.NewProjectError):
             np.rules(version)
+
+    @pytest.mark.parametrize("version", ["10.0.8", "10.0.7-15-gabc1234", "9.0.10"])
+    def test_a_newer_patch_release_gets_the_newest_verified_rules(self, version):
+        verified = {10: (10, 0, 7), 9: (9, 0, 9)}[int(version.split(".")[0])]
+        assert np.rules(version).version == verified
 
     @pytest.mark.parametrize(
         "version, lock_by_extension, skip_autosave, gitignore, new_stub, writable",

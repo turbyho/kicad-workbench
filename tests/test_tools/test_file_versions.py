@@ -253,10 +253,11 @@ def test_kicad_7_and_unknown_versions(tmp_path, monkeypatch):
     folder = hier(tmp_path)
     for kicad, text in (
         ("7.0.11", "older than KiCad 8, the minimum of this server. Tell the user: install"),
-        ("11.99.0", "a nightly build with no known file versions"),
-        ("9.99.0", "a nightly build with no known file versions"),
-        ("8.99.0", "a nightly build with no known file versions"),
-        ("9.1.0", "a version with no known file versions"),
+        ("11.99.0", "a nightly build that the server has no rules for"),
+        ("9.99.0", "a nightly build that the server has no rules for"),
+        ("8.99.0", "a nightly build that the server has no rules for"),
+        ("9.1.0", "a version that the server has no rules for"),
+        ("10.0.1-rc1", "a release candidate"),
     ):
         installed(monkeypatch, kicad)
         with pytest.raises(Error, match=text):

@@ -27,6 +27,7 @@ from ..parsers.kicad_versions import (
     KICAD9,
     KICAD10,
     KicadFileError,
+    is_verified_nightly,
     kicad_release,
     version_numbers,
     version_triple,
@@ -426,7 +427,7 @@ def _field_rules(kicad: str) -> int:
         return 9
     # The nightly builds 10.99 (branch master) read the fields as KiCad 10
     # (kicad_fields; the server knows the rules of master of 2026-11-02).
-    if release is KICAD10 or version_numbers(kicad) == (10, 99):
+    if release is KICAD10 or is_verified_nightly(kicad):
         return 10
     raise InputError(
         f"The installed KiCad is {kicad}. This server knows the rules of KiCad 8.0, 9.0 "

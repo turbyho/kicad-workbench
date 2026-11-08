@@ -261,7 +261,7 @@ class TestEmptyProject:
         assert result.startswith("❌ KiCad has the schematic open"), result
         assert (out / "blank.kicad_sch").read_text(encoding="utf-8") == "x"
 
-    @pytest.mark.parametrize("version", [None, "7.0.11", "10.0.8", "10.99.0"])
+    @pytest.mark.parametrize("version", [None, "7.0.11", "10.99.0", "11.0.0"])
     def test_a_version_with_no_rules(self, tmp_path, kicad, version):
         kicad(version)
         result = make(tmp_path / "proj")

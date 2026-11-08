@@ -428,7 +428,8 @@ def test_last_alternate_of_a_number_wins():
         ("9.0.4", (9, "library")),
         ("10.0.7", (10, "library")),
         ("10.99.0", (10, "library")),
-        ("10.0.8", None),
+        ("10.0.8", (10, "library")),  # the rules of 10.0.7, the newest verified
+        ("10.1.0", None),
         (None, None),
     ],
 )

@@ -311,7 +311,7 @@ class TestCheckPinPadMapping:
     async def test_unknown_kicad(self, parts, monkeypatch):
         set_version(parts, monkeypatch, "11.0.0")
         out = await library_tools.check_pin_pad_mapping("Device:R2")
-        assert out.startswith("❌ The installed KiCad is 11.0.0.")
+        assert out.startswith("❌ KiCad 11.0.0 is a version that the server has no rules for")
 
     async def test_too_many_stacked_numbers(self, parts):
         (parts["libs"] / "Device.kicad_sym").write_text(
@@ -665,7 +665,7 @@ class TestCheckSchematicPinPadMapping:
     async def test_unknown_kicad(self, board, monkeypatch):
         set_version(board, monkeypatch, "11.0.0")
         out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]))
-        assert out.startswith("❌ The installed KiCad is 11.0.0.")
+        assert out.startswith("❌ KiCad 11.0.0 is a version that the server has no rules for")
         assert "args" not in board["state"]
 
     async def test_top_level_sheet_with_an_other_name(self, board):

@@ -28,9 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import InputError
-from ..parsers.kicad_versions import Release, kicad_release, version_triple
+from ..parsers.kicad_versions import RELEASES, Release, kicad_release, verified_triple
 from .file_save import AfterSaveError, save_file
-from .kicad_cli import no_kicad_message
+from .kicad_cli import installed_kicad_problem, no_kicad_message
 from .kicad_text import write_kicad_text
 from .library_tables import KicadEnvironment, expand, kicad_documents_dir
 
@@ -38,8 +38,6 @@ PROJECT_EXT = ".kicad_pro"
 LEGACY_PROJECT_EXT = ".pro"
 META_DIR = "meta"
 DEFAULT_TEMPLATE = "default"
-# The newest release with rules from the KiCad source.
-NEWEST_RELEASE = (10, 0, 7)
 # Windows: FILE_ATTRIBUTE_HIDDEN and FILE_ATTRIBUTE_READONLY.
 _HIDDEN = 0x2
 _READONLY = 0x1
@@ -92,18 +90,23 @@ def rules(kicad_version: str | None) -> Rules:
     """The rules of the installed KiCad version (kicad-cli version).
 
     Raises:
-        NewProjectError: The version is not known, or it is a development build.
+        NewProjectError: The version is not known, a release candidate or a nightly
+            build (installed_kicad_problem).
     """
     if not kicad_version:
         raise NewProjectError(no_kicad_message())
-    triple = version_triple(kicad_version)
+    if problem := installed_kicad_problem(kicad_version):
+        raise NewProjectError(problem)
+    # A patch release after the newest verified one gets the rules of that one
+    # (verified_triple; the tool call gets the warning of installed_kicad_warning).
+    triple = verified_triple(kicad_version)
     release = kicad_release(kicad_version)
-    if triple is None or release is None or triple < (8, 0, 0) or triple > NEWEST_RELEASE:
+    if triple is None or release is None or triple < (8, 0, 0):
+        newest = RELEASES[-1].verified_name
         raise NewProjectError(
             f"The server has no rules for a new project of KiCad {kicad_version}: it has the "
-            "rules of KiCad 8.0.0 to "
-            f"{'.'.join(map(str, NEWEST_RELEASE))}, from the KiCad source. Create the project "
-            "in KiCad."
+            f"rules of the KiCad releases 8.0.0 to {newest}, from the KiCad source. Create "
+            "the project in KiCad."
         )
     return Rules(triple, release)
 

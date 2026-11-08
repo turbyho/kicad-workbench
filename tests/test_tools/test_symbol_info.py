@@ -375,7 +375,8 @@ class TestTool:
     async def test_installed_kicad_without_rules(self, tables, monkeypatch, version):
         set_version(monkeypatch, version)
         out = await library_tools.get_library_symbol("Device:R")
-        assert out.startswith(f"❌ The installed KiCad is {version}."), out
+        assert out.startswith(f"❌ KiCad {version} is a "), out
+        assert "that the server has no rules for." in out
 
     async def test_nightly_build_of_master(self, tables, monkeypatch):
         (tables["config"] / "10.99").mkdir()

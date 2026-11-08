@@ -11,14 +11,20 @@ import json
 import math
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from ..errors import InputError
 from ..models.types import DRCError, DRCItem, ERCError, ERCItem
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
-from .kicad_versions import kicad_release, version_triple
+from .kicad_versions import (
+    is_verified_nightly,
+    kicad_release,
+    unverified_reason,
+    verified_triple,
+    version_triple,
+)
 from .sch_geometry import Point, node_point
 from .sexpr import SExprError, parse
 
@@ -120,22 +126,36 @@ def erc_report_units(report: dict[str, Any]) -> ErcUnits:
     if numbers is None:
         return ErcUnits(positions=False, note=_NO_RULES.format(version=version or "(no version)"))
     if kicad_release(version) is None:
-        if numbers[0] == 10 and numbers[1] == 99:
+        if is_verified_nightly(version):
             return ErcUnits(
                 note=f"KiCad {version} is a nightly build: the server reads its ERC report with "
                 "the rule of branch master (the values are in mm). A nightly build before the "
                 "correction of KiCad (2026-09) writes them 100 times too small.",
             )
         return ErcUnits(positions=False, note=_NO_RULES.format(version=version))
-    major, _minor, patch = numbers
-    if major == 8 and patch <= 9:
+    # A newer patch release: the rule of the newest verified one (verified_triple), with a
+    # note. The version of a report has only the numbers (GetMajorMinorPatchVersion).
+    major, _minor, patch = verified_triple(version)
+    if reason := unverified_reason(version):
+        used = ".".join(map(str, (major, _minor, patch)))
+        note = (
+            f"The ERC report comes from KiCad {version}, {reason}: the server reads it "
+            f"with the rule of KiCad {used}."
+        )
+        return replace(_erc_units(version, major, patch), note=note)
+    return _erc_units(version, major, patch)
+
+
+def _erc_units(version: str, major: int, patch: int) -> ErcUnits:
+    """The rule of a verified patch release of KiCad 8.0, 9.0 or 10.0 (verified_triple:
+    8.0.0 to 8.0.9, 9.0.0 to 9.0.9, 10.0.0 to 10.0.7). A release with no rule here (a
+    new entry of RELEASES) gives no positions."""
+    if major == 8:
         return ErcUnits("8")
-    if major == 9 and patch <= 9:
+    if major == 9:
         return ErcUnits("9.0.0" if patch <= 3 else "9.0.4")
-    if major == 10 and patch <= 6:
-        return ErcUnits("10.0.0")
-    if major == 10 and patch == 7:
-        return ErcUnits()
+    if major == 10:
+        return ErcUnits("10.0.0") if patch <= 6 else ErcUnits()
     return ErcUnits(positions=False, note=_NO_RULES.format(version=version))
 
 

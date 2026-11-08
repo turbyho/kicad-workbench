@@ -14,7 +14,7 @@ the same; 10.0.7 adds "same_local_global_power". The DRC keys of 10.0.0 to
 10.0.7 are the same.
 """
 
-from .kicad_versions import kicad_release, version_triple
+from .kicad_versions import kicad_release, verified_triple
 
 ERC_KEYS: dict[str, tuple[str, ...]] = {
     "8": (
@@ -433,15 +433,17 @@ def all_pre_keys(kind: str) -> tuple[tuple[str, str], ...]:
 def severity_keys(kind: str, version: str) -> SeverityKeys | None:
     """Return (the keys before the loop, the keys of the loop) of the "erc" or "drc"
     severities of an installed KiCad, or None when the server does not know them
-    (a nightly build, or a release after 10.0.7)."""
+    (a nightly build). A patch release after the newest verified one gets the keys of
+    that one (verified_triple)."""
     release = kicad_release(version)
     if release is None:
         return None
     major = release.name.split(".")[0]
     label = major
     if major == "10":
-        numbers = version_triple(version)
-        if numbers is None or numbers > (10, 0, 7):
+        # The keys of 10.0 depend on the patch release.
+        numbers = verified_triple(version)
+        if numbers is None:
             return None
         label = "10.0.7" if numbers == (10, 0, 7) and kind == "erc" else "10.0.0"
     if kind == "erc":

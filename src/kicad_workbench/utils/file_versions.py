@@ -125,7 +125,7 @@ def _installed_kicad() -> str:
 def _written_version(kicad: str, kind: str = "schematic") -> Written:
     """Return the version of a file kind ("schematic" or "board") that the installed
     KiCad writes. A version that installed_kicad_problem refuses (no major number, a
-    KiCad before KiCad 8) gives FileVersionError.
+    KiCad before KiCad 8, a KiCad with no rules) gives FileVersionError.
 
     Each release of a major version writes one schematic version
     (SEXPR_SCHEMATIC_FILE_VERSION of eeschema/sch_file_versions.h: 20231120 in 8.0.0 to
@@ -137,17 +137,13 @@ def _written_version(kicad: str, kind: str = "schematic") -> Written:
     """
     if problem := installed_kicad_problem(kicad):
         raise FileVersionError(problem)
-    numbers = version_numbers(kicad)
     release = kicad_release(kicad)
     if release is not None:
         return Written(getattr(release, kind), True, release)
+    # A verified nightly build (installed_kicad_problem): it writes a newer version
+    # than the newest release.
     newest = RELEASES[-1]
-    if numbers[1] == 99 and newest.name == f"{numbers[0]}.0":
-        return Written(getattr(newest, kind), False, newest)
-    build = "a nightly build" if numbers[1] == 99 else "a version"
-    raise FileVersionError(
-        f"KiCad {kicad} is {build} with no known file versions: the server has no rules for it."
-    )
+    return Written(getattr(newest, kind), False, newest)
 
 
 def _project_of(path: Path) -> Path | None:

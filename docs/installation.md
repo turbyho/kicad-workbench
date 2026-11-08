@@ -9,8 +9,13 @@
   kicad-cli, each tool that works with KiCad files gives an error that tells the user
   to install KiCad 8 or later, also when the server process can import `pcbnew`. When
   kicad-cli is there but does not give its version, the error gives the reason. A
-  KiCad before KiCad 8, and a KiCad version that the server has no rules for (for
-  example a later major version, or a nightly build other than 10.99), give an error.
+  KiCad before KiCad 8, a KiCad version that the server has no rules for (for example
+  a later major version, or a nightly build other than 10.99), and a release
+  candidate (for example 10.0.1-rc1) give an error. The server compared its rules
+  with KiCad 8.0.9, 9.0.9 and 10.0.7. A newer patch release (for example 10.0.8) and a
+  development build of a release branch get the rules of the newest compared patch
+  release, and each answer has a warning. The server reads the full version from
+  `kicad-cli version --format about`: `kicad-cli version` gives only the numbers.
   Only the tools of the parts registry and the tools that read a netlist file work
   with no KiCad.
 - Python 3.10 or later.

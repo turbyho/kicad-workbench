@@ -1,8 +1,9 @@
-"""File versions of the KiCad releases, and the files that this server reads and changes.
+"""File versions of the KiCad releases, the KiCad versions with known rules, and the
+files that this server reads and changes.
 
-A file is read and changed with the rules of the KiCad version that saved it
-(its (version N)), not with the rules of the installed KiCad. This server reads
-and changes the files of KiCad 8 and later, up to the newest nightly build with
+A file is read as the installed KiCad loads it: the format follows the file version
+(its (version N)) only where the parser of that KiCad branches on it. This server
+reads and changes the files of KiCad 8 and later, up to the newest nightly build with
 known rules. KiCad does not open a file of a newer version.
 
 The file versions are dates (SEXPR_SCHEMATIC_FILE_VERSION,
@@ -20,20 +21,39 @@ from .sub_symbols import sub_symbols
 
 @dataclass(frozen=True)
 class Release:
-    """The file versions that one KiCad release writes."""
+    """The file versions that one KiCad release writes, and its newest patch release
+    that the server compared with real KiCad (the checks of spike/kicad-versions)."""
 
     name: str
     schematic: int
     symbol_library: int
     board: int
+    verified: tuple[int, int, int]
+
+    @property
+    def verified_name(self) -> str:
+        """The newest verified patch release as a text, for example "10.0.7"."""
+        return ".".join(map(str, self.verified))
 
 
 RELEASES = (
-    Release("8.0", 20231120, 20231120, 20240108),
-    Release("9.0", 20250114, 20241209, 20241229),
-    Release("10.0", 20260306, 20251024, 20260206),
+    Release("8.0", 20231120, 20231120, 20240108, (8, 0, 9)),
+    Release("9.0", 20250114, 20241209, 20241229, (9, 0, 9)),
+    Release("10.0", 20260306, 20251024, 20260206, (10, 0, 7)),
 )
 KICAD8, KICAD9, KICAD10 = RELEASES
+# The nightly builds with rules that a check verified: the builds of branch master after
+# the newest release (2026-11-02).
+VERIFIED_NIGHTLY = (10, 99)
+# A release candidate: "-rcN" after the version (the tags 10.0.0-rc2 and 10.0.1-rc1 of
+# KiCad; KICAD_SEMANTIC_VERSION of cmake/KiCadVersion.cmake).
+_RELEASE_CANDIDATE = re.compile(r"\s*\d+\.\d+\.\d+-rc\d", re.IGNORECASE)
+# A development build of a release branch (between two patch releases): "-unknown" (the
+# KICAD_SEMANTIC_VERSION of a branch after "Begin version X.Y.Z development", with no
+# git), "-N-g<hash>" (git describe after the tag of the release), or "-dirty" (git
+# describe --dirty of a source tree with changes, also at the tag;
+# cmake/CreateGitVersionHeader.cmake).
+_DEVELOPMENT = re.compile(r"\s*\d+\.\d+\.\d+-(?:unknown|\d+-g[0-9a-f]+|dirty)(?:-|\s|$)")
 # The newest schematic version with known rules: a nightly build of KiCad 11
 # (branch master, 2026-11-02).
 NEWEST_SCHEMATIC = 20261025
@@ -63,6 +83,45 @@ def version_triple(version: str) -> tuple[int, int, int] | None:
     """Return (major, minor, patch) of a KiCad version, for example "10.0.6", or None."""
     match = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", version)
     return (int(match.group(1)), int(match.group(2)), int(match.group(3))) if match else None
+
+
+def is_verified_nightly(version: str) -> bool:
+    """True for a nightly build with verified rules (VERIFIED_NIGHTLY)."""
+    return version_numbers(version) == VERIFIED_NIGHTLY
+
+
+def is_release_candidate(version: str) -> bool:
+    """True for a release candidate, for example "10.0.1-rc1" (the full version of
+    kicad-cli, kicad_cli_version_sync)."""
+    return _RELEASE_CANDIDATE.match(version) is not None
+
+
+def unverified_reason(version: str) -> str | None:
+    """Return why the server did not compare its rules with a KiCad release, or None:
+    a development build of a release branch, or a patch release after the newest
+    verified one (Release.verified). The server then uses the rules of verified_triple.
+    A nightly build and a version that the server does not know give None
+    (installed_kicad_problem refuses them)."""
+    release = kicad_release(version)
+    numbers = version_triple(version)
+    if release is None or numbers is None:
+        return None
+    if _DEVELOPMENT.match(version):
+        return f"a development build of the release branch {release.name}"
+    if numbers > release.verified:
+        return f"a patch release after KiCad {release.verified_name}"
+    return None
+
+
+def verified_triple(version: str) -> tuple[int, int, int] | None:
+    """Return the patch release whose rules the server uses for a KiCad release: its
+    version, or the newest verified patch release when the version is newer
+    (unverified_reason). None for a version that is not a release."""
+    release = kicad_release(version)
+    numbers = version_triple(version)
+    if release is None or numbers is None:
+        return None
+    return min(numbers, release.verified)
 
 
 def kicad_release(version: str) -> Release | None:

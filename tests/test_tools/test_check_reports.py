@@ -178,7 +178,23 @@ class TestErcUnits:
         assert units == ErcUnits(rules)
         assert units.pcb_scale == pcb_scale
 
-    @pytest.mark.parametrize("version", ["10.0.8", "11.0.0", "", "x"])
+    @pytest.mark.parametrize(
+        "version, used, rules",
+        [
+            ("10.0.8", "10.0.7", None),
+            ("9.0.10", "9.0.9", "9.0.4"),
+            ("10.0.5-3-gabc", "10.0.5", "10.0.0"),
+        ],
+    )
+    def test_an_unverified_version(self, version, used, rules):
+        """The rule of verified_triple, and a note: the report of a newer patch release
+        has only its numbers (the server does not run this KiCad)."""
+        units = erc_report_units({"kicad_version": version, "coordinate_units": "mm"})
+        assert (units.value_rules, units.positions) == (rules, True)
+        assert units.note.startswith(f"The ERC report comes from KiCad {version}, a ")
+        assert units.note.endswith(f"the server reads it with the rule of KiCad {used}.")
+
+    @pytest.mark.parametrize("version", ["11.0.0", "", "x"])
     def test_versions_with_no_rules(self, version):
         units = erc_report_units({"kicad_version": version, "coordinate_units": "mm"})
         assert (units.pcb_scale, units.positions) == (False, False)

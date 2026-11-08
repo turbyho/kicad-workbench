@@ -26,6 +26,7 @@ from .kicad_cli import (
     find_kicad_cli,
     fs_encoding,
     kicad_cli_override_problem,
+    note_kicad_version,
     override_problem,
 )
 from .kicad_version import kicad_python_of
@@ -153,6 +154,10 @@ def check_same_kicad(pcbnew_version: str, reader: str, kicad: str) -> None:
     Raises:
         KicadPythonError: The pcbnew is of an other KiCad.
     """
+    # The warning of an unverified patch release of pcbnew (kicad_build_notes). pcbnew
+    # gives only the numbers (GetMajorMinorPatchVersion): a development build of it is not
+    # known.
+    note_kicad_version(pcbnew_version)
     if version_numbers(kicad) != version_numbers(pcbnew_version):
         raise KicadPythonError(
             f"kicad-cli is KiCad {kicad}, but {reader} is KiCad {pcbnew_version}. The tools "

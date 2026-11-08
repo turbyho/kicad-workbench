@@ -40,7 +40,6 @@ from kicad_workbench.utils.kicad_project import (
 from kicad_workbench.utils.schematic_settings import (
     erc_exclusions,
     subpart_settings,
-    unknown_severity_reason,
 )
 
 # The KiCad releases of the rules: the major version gives the version text.
@@ -441,9 +440,11 @@ class TestErcDialog:
             assert violations[0].items[1].x_mm == 5.0
         assert notes == []
 
-    def test_severity_that_is_not_known(self, tmp_path):
-        # The server has no order of the keys of KiCad 10.0.8: a value that is not a text
-        # can stop the read before duplicate_reference. One note for each check.
+    def test_the_severities_of_a_newer_patch_release(self, tmp_path):
+        # KiCad 10.0.8 gets the order of the keys of 10.0.7, the newest verified patch
+        # release (verified_triple): the value that is not a text stops the read, and the
+        # severity of duplicate_reference is known. The tool call gets the warning of
+        # installed_kicad_warning (kicad_build_notes).
         symbols = "".join(
             symbol("R1", uuid=f"aaaaaaaa-0000-0000-0000-00000000000{i}", at=(5 * i, 0))
             for i in range(1, 4)
@@ -451,12 +452,8 @@ class TestErcDialog:
         project = write_project(tmp_path, symbols)
         severities = {"pin_not_connected": 5, "duplicate_reference": "warning"}
         project.write_text(json.dumps({"erc": {"rule_severities": severities}}), encoding="utf-8")
-        result = erc_violations(project, "10.0.8")
-        assert [v.severity for v in result.violations] == ["error", "error"]
-        assert result.notes == [
-            "The severity of the check duplicate_reference is not known: "
-            f"{unknown_severity_reason('10.0.8')}. The tool shows it as an error."
-        ]
+        assert erc_violations(project, "10.0.8") == erc_violations(project, "10.0.7")
+        assert erc_violations(project, "10.0.8").notes == []
 
     def test_exclusion(self, tmp_path):
         # kicad-cli gives an exclusion as an excluded violation: the tool does not add it.

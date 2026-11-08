@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_workbench.parsers.kicad_versions import verified_triple
 from kicad_workbench.utils import kicad_cli, kicad_version
 from kicad_workbench.utils.kicad_cli import (
     KicadCliError,
@@ -428,6 +429,12 @@ class TestEnglishSettings:
         ("", "KiCad is not installed"),
         ("unknown", "The version 'unknown' of kicad-cli has no major number."),
         ("7.0.11", "KiCad 7.0.11 is older than KiCad 8, the minimum of this server."),
+        ("11.0.0", "KiCad 11.0.0 is a version that the server has no rules for."),
+        ("10.1.0", "KiCad 10.1.0 is a version that the server has no rules for."),
+        ("9.99.0", "KiCad 9.99.0 is a nightly build that the server has no rules for."),
+        ("11.99.0-12-gabc", "KiCad 11.99.0-12-gabc is a nightly build that the server has"),
+        ("10.0.1-rc1", "KiCad 10.0.1-rc1 is a release candidate (a test build)"),
+        ("10.0.0-rc2-5-gabc1234", "KiCad 10.0.0-rc2-5-gabc1234 is a release candidate"),
     ],
 )
 def test_installed_kicad_problem(monkeypatch, version, start):
@@ -436,6 +443,85 @@ def test_installed_kicad_problem(monkeypatch, version, start):
     assert problem is not None and problem.startswith(start), problem
 
 
-@pytest.mark.parametrize("version", ["8.0.0", "9.0.9", "10.0.6", "10.99.0"])
+@pytest.mark.parametrize(
+    "version", ["8.0.0", "9.0.9", "10.0.6", "10.99.0", "10.99.0-1234-gabc", "10.0.8", "10.0.6-1"]
+)
 def test_installed_kicad_with_no_problem(version):
     assert kicad_cli.installed_kicad_problem(version) is None
+
+
+@pytest.mark.parametrize(
+    "version, reason",
+    [
+        ("10.0.8", "a patch release after KiCad 10.0.7"),
+        ("9.0.10", "a patch release after KiCad 9.0.9"),
+        ("10.0.7-15-gabc1234", "a development build of the release branch 10.0"),
+        ("10.0.7-15-gabc1234-dirty", "a development build of the release branch 10.0"),
+        ("10.0.7-unknown", "a development build of the release branch 10.0"),
+        ("10.0.7-unknown-1", "a development build of the release branch 10.0"),
+        ("10.0.7-dirty", "a development build of the release branch 10.0"),
+        ("10.0.5-3-gabc1234", "a development build of the release branch 10.0"),
+    ],
+)
+def test_the_warning_of_an_unverified_kicad(version, reason):
+    """The tools use the rules of verified_triple, with a warning that names them."""
+    warning = kicad_cli.installed_kicad_warning(version)
+    assert warning is not None and warning.startswith(f"⚠️ KiCad {version} is {reason}."), warning
+    used = ".".join(map(str, verified_triple(version)))
+    assert f"The server uses the rules of KiCad {used}, which it compared" in warning
+    assert kicad_cli.installed_kicad_problem(version) is None
+
+
+@pytest.mark.parametrize("version", ["10.0.7", "10.0.6-1", "10.0.6-2ubuntu1", "10.99.0", None])
+def test_no_warning_for_a_verified_kicad(version):
+    """A release (also with the suffix of a package, KICAD_VERSION_EXTRA) and the
+    verified nightly build get no warning."""
+    assert kicad_cli.installed_kicad_warning(version) is None
+
+
+class TestFullVersion:
+    ABOUT = (
+        "Application: kicad-cli x86_64 on x86_64\n\nVersion: {version}, release build\n\n"
+        "Libraries:\n\twxWidgets 3.2.11 EGL\n"
+    )
+
+    def run(self, monkeypatch, stdout: str, code: int = 0):
+        calls = []
+
+        def fake(args, timeout=60.0, english=False):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, code, stdout.encode(), b"")
+
+        monkeypatch.setattr(kicad_cli, "run_kicad_cli_sync", fake)
+        monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: "/usr/bin/kicad-cli")
+        return kicad_cli.kicad_cli_version_sync(), calls
+
+    @pytest.mark.parametrize(
+        "version", ["10.0.6", "10.0.1-rc1", "10.99.0-1234-gabc1234", "10.0.6-1 (custom)"]
+    )
+    def test_the_line_of_the_version(self, monkeypatch, version):
+        """`kicad-cli version` gives only the numbers: the about text has the full
+        version (KICAD_VERSION_FULL)."""
+        found, calls = self.run(monkeypatch, self.ABOUT.format(version=version))
+        assert found == version
+        assert calls == [["version", "--format", "about"]]
+
+    def test_an_about_text_with_no_version(self, monkeypatch):
+        """An unsupported system: GetVersionInfoData gives "(UNSUPPORTED)"."""
+        found, _calls = self.run(monkeypatch, self.ABOUT.format(version="(UNSUPPORTED)"))
+        assert found is None
+        assert kicad_cli.no_kicad_message().startswith(
+            'kicad-cli did not give its version: /usr/bin/kicad-cli gave no line "Version: '
+        )
+
+    def test_the_versions_of_a_tool_call(self, monkeypatch):
+        """note_kicad_version collects each version that a tool call uses."""
+        versions, token = kicad_cli.collect_kicad_versions()
+        try:
+            self.run(monkeypatch, self.ABOUT.format(version="10.0.8"))
+            self.run(monkeypatch, self.ABOUT.format(version="10.0.8"))
+        finally:
+            kicad_cli.reset_collection(token)
+        assert versions == ["10.0.8"]
+        self.run(monkeypatch, self.ABOUT.format(version="10.0.6"))
+        assert versions == ["10.0.8"]  # no collection after the reset

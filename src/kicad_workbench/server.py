@@ -2,6 +2,7 @@
 
 from fastmcp import FastMCP
 
+from .kicad_build_notes import KicadBuildNotes
 from .version_check import VersionNotes
 
 # Create MCP server
@@ -30,6 +31,8 @@ mcp = FastMCP(
 
 # The notes about a newer release and a restart of the client (version_check).
 mcp.add_middleware(VersionNotes())
+# The warning for an installed KiCad that the server did not compare with its rules.
+mcp.add_middleware(KicadBuildNotes())
 
 
 # Import and register tools

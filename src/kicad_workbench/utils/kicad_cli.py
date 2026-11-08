@@ -22,6 +22,7 @@ import functools
 import json
 import locale
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
-from ..parsers.kicad_versions import version_numbers, version_triple
+from ..parsers.kicad_versions import (
+    RELEASES,
+    is_release_candidate,
+    is_verified_nightly,
+    kicad_release,
+    unverified_reason,
+    verified_triple,
+    version_numbers,
+    version_triple,
+)
 from .kicad_project import (
     PRO_SUFFIX,
     is_declared,
@@ -120,10 +130,23 @@ def no_kicad_message() -> str:
 
 
 def installed_kicad_problem(kicad: str | None) -> str | None:
-    """Return why a tool cannot work with the installed KiCad, or None. kicad is the
-    version of kicad_cli_version_sync: None gives no_kicad_message, a version with no
-    major number or a KiCad before KiCad 8 (the minimum) gives its own message. Each
-    check of the minimum version uses this function."""
+    """Return why a tool cannot work with the installed KiCad, or None. Each check of
+    the installed KiCad version uses this function (CLAUDE.md rule 4).
+
+    kicad is the version of kicad_cli_version_sync. These give a message:
+
+    - None: no_kicad_message.
+    - A version with no major number.
+    - A KiCad before KiCad 8, the minimum.
+    - A KiCad with no rules in the server: a release that is not in RELEASES (for
+      example 11.0 or 10.1), and a nightly build other than the nightly build after
+      the newest release (10.99, branch master).
+    - A release candidate (for example 10.0.1-rc1): a test build, not a release.
+
+    A development build of a release branch and a patch release after the newest
+    verified one get the rules of the newest verified patch release, with the warning
+    of installed_kicad_warning.
+    """
     if not kicad:
         return no_kicad_message()
     numbers = version_numbers(kicad)
@@ -134,7 +157,35 @@ def installed_kicad_problem(kicad: str | None) -> str | None:
             f"KiCad {kicad} is older than KiCad 8, the minimum of this server. "
             f"Tell the user: {INSTALL_KICAD}."
         )
+    known = ", ".join(release.name for release in RELEASES)
+    if kicad_release(kicad) is None and not is_verified_nightly(kicad):
+        build = "a nightly build" if numbers[1] == 99 else "a version"
+        return (
+            f"KiCad {kicad} is {build} that the server has no rules for. Tell the user: "
+            f"use a KiCad release that the server knows ({known}), or look for a newer "
+            "release of kicad-workbench."
+        )
+    if is_release_candidate(kicad):
+        return (
+            f"KiCad {kicad} is a release candidate (a test build): the server has the "
+            f"rules of the KiCad releases only. Tell the user: use a KiCad release that "
+            f"the server knows ({known})."
+        )
     return None
+
+
+def installed_kicad_warning(kicad: str | None) -> str | None:
+    """Return the warning for a KiCad that the server did not compare with its rules,
+    or None (kicad_versions.unverified_reason). The tools then use the rules of the
+    newest verified patch release of the same release."""
+    reason = unverified_reason(kicad) if kicad else None
+    if reason is None:
+        return None
+    used = ".".join(map(str, verified_triple(kicad)))
+    return (
+        f"⚠️ KiCad {kicad} is {reason}. The server uses the rules of KiCad {used}, which "
+        f"it compared with real KiCad: a result can be different from KiCad {kicad}."
+    )
 
 
 class KicadCliError(WorkbenchError):
@@ -486,16 +537,61 @@ def reset_call_version(token: contextvars.Token) -> None:
     _call_version.reset(token)
 
 
+# The line of the full version in `kicad-cli version --format about`
+# (GetVersionInfoData of common/build_version.cpp, KiCad 8, 9 and 10, not
+# translated): "Version: <KICAD_VERSION_FULL>, release build".
+# KICAD_VERSION_EXTRA of a package is free text: it can have spaces.
+_ABOUT_VERSION = re.compile(r"^Version: (.+?), (?:release|debug) build\s*$", re.MULTILINE)
+
+
 def kicad_cli_version_sync() -> str | None:
-    """Return the version of kicad-cli (e.g. "10.0.6"), or None if unknown. No
-    cache between tool calls: KiCad can change while the server runs (one run takes
-    about 0.1 s). In a tool call, the version of set_call_version."""
-    global _version_problem
+    """Return the full version of kicad-cli, or None if unknown: for example "10.0.6",
+    "10.0.1-rc1" (a release candidate), "10.0.7-15-gabc1234" (a development build) or
+    "10.99.0-1234-gabc1234" (a nightly build). `kicad-cli version` gives only the
+    numbers (GetMajorMinorPatchVersion), thus the function reads the line "Version:" of
+    `kicad-cli version --format about` (KICAD_VERSION_FULL). No cache between tool
+    calls: KiCad can change while the server runs (one run takes about 0.1 s). In a
+    tool call, the version of set_call_version. Each version that a tool call uses goes
+    to note_kicad_version (the warning of installed_kicad_warning)."""
     known = _call_version.get()
-    if known is not None:
-        return known
+    version = known if known is not None else _run_kicad_cli_version()
+    if version is not None:
+        note_kicad_version(version)
+    return version
+
+
+# The versions of KiCad that a tool call used (kicad_build_notes.KicadBuildNotes sets
+# a list for each call).
+_call_versions: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "kicad_cli_call_versions", default=None
+)
+
+
+def collect_kicad_versions() -> tuple[list[str], contextvars.Token]:
+    """Start the collection of the KiCad versions of a tool call (note_kicad_version).
+    reset_collection ends it."""
+    versions: list[str] = []
+    return versions, _call_versions.set(versions)
+
+
+def reset_collection(token: contextvars.Token) -> None:
+    """End the collection of collect_kicad_versions."""
+    _call_versions.reset(token)
+
+
+def note_kicad_version(version: str) -> None:
+    """Add a KiCad version to the collection of the tool call, if there is one."""
+    versions = _call_versions.get()
+    if versions is not None and version not in versions:
+        versions.append(version)
+
+
+def _run_kicad_cli_version() -> str | None:
+    """Run `kicad-cli version --format about` and return the full version, or None
+    (_version_problem gives the reason)."""
+    global _version_problem
     try:
-        result = run_kicad_cli_sync(["version"], timeout=30)
+        result = run_kicad_cli_sync(["version", "--format", "about"], timeout=30)
     except KicadNotFoundError:
         _version_problem = None
         return None
@@ -505,15 +601,18 @@ def kicad_cli_version_sync() -> str | None:
     except (OSError, KicadCliError) as e:
         _version_problem = f"{find_kicad_cli()}: {e}"
         return None
-    version = decode_output(result.stdout).strip()
-    if result.returncode != 0 or not version:
-        messages = decode_output(result.stdout + result.stderr).strip()
-        _version_problem = f"{find_kicad_cli()} gave the exit code {result.returncode}" + (
-            f": {messages}" if messages else ""
-        )
+    output = decode_output(result.stdout)
+    match = _ABOUT_VERSION.search(output)
+    if result.returncode != 0 or match is None or version_triple(match.group(1)) is None:
+        messages = (output + "\n" + decode_output(result.stderr)).strip()
+        if result.returncode != 0:
+            reason = f"gave the exit code {result.returncode}"
+        else:
+            reason = 'gave no line "Version: <major>.<minor>.<patch>..." in its about text'
+        _version_problem = f"{find_kicad_cli()} {reason}" + (f": {messages}" if messages else "")
         return None
     _version_problem = None
-    return version
+    return match.group(1)
 
 
 async def get_kicad_version() -> str | None:

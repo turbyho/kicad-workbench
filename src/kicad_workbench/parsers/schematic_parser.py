@@ -22,7 +22,9 @@ from .kicad_versions import (
     KICAD10,
     KicadFileError,
     file_text,
+    is_verified_nightly,
     kicad_release,
+    verified_triple,
     version_numbers,
     version_triple,
 )
@@ -280,8 +282,9 @@ def _kicad_rules(kicad: str | None) -> tuple[int, str] | None:
         return None
     if kicad_release(kicad) is None:
         # A nightly build of branch master (10.99): the rules of master.
-        return (10, "library") if numbers[:2] == (10, 99) else None
-    major, _minor, patch = numbers
+        return (10, "library") if is_verified_nightly(kicad) else None
+    # A newer patch release: the rules of the newest verified one (verified_triple).
+    major, _minor, patch = verified_triple(kicad)
     if major == 8 or (major == 9 and patch <= 2):
         return major, "keep"
     if major == 9 and patch == 3:

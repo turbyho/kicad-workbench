@@ -7,7 +7,6 @@ import subprocess
 
 import pytest
 
-from kicad_workbench.parsers.sexpr import quote
 from kicad_workbench.utils import library_tables
 from kicad_workbench.utils.kicad_cli import find_kicad_cli
 from kicad_workbench.utils.library_tables import (
@@ -19,6 +18,8 @@ from kicad_workbench.utils.library_tables import (
     library_rows,
 )
 
+from .symbol_tables import row
+
 
 def table(kind: str, *rows: str) -> str:
     head = {"symbol": "sym_lib_table", "footprint": "fp_lib_table"}[kind]
@@ -26,11 +27,7 @@ def table(kind: str, *rows: str) -> str:
 
 
 def lib(name: str, uri: str, kind_type: str = "KiCad", flags: str = "") -> str:
-    # The URI as KiCad writes it: a backslash of a Windows path is escaped.
-    return (
-        f'(lib (name "{name}")(type "{kind_type}")(uri {quote(str(uri))})(options "")'
-        f'(descr "{name} symbols"){flags})'
-    )
+    return row(name, uri, flags, kind_type, descr=f"{name} symbols")
 
 
 @pytest.fixture(autouse=True)

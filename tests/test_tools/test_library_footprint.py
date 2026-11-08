@@ -125,7 +125,9 @@ class TestModelPaths:
         name = places["alias"] / "x.step"
         if os.name == "nt":
             # "C:\\project\\C:\\...": a second volume makes a name that is not a
-            # file, thus the joined name finds nothing.
+            # file, thus the joined name finds nothing. This follows from the join
+            # as text (FILENAME_RESOLVER::ResolvePath, wxFileName). The check did
+            # not run KiCad on Windows.
             assert resolve(places, str(name)).state == "not found"
             return
         model = write(Path(f"{places['project']}{os.sep}{name}"))

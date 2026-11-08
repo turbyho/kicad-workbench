@@ -73,8 +73,8 @@ path = "src/kicad_workbench/__init__.py"
 packages = ["src/kicad_workbench"]
 
 # The sdist has only the files of this list. The repository also has private files
-# (plans/, spike/, CLAUDE.md, docs/kicad-ipc/ and the other blocked paths of
-# .publish-filter), and these must not go to PyPI. tests/test_build_content.py
+# (plans/, spike/, CLAUDE.md and the other blocked paths of .publish-filter), and
+# these must not go to PyPI. tests/test_build_content.py
 # builds the sdist and the wheel and does a check of their files.
 [tool.hatch.build.targets.sdist]
 only-include = [
@@ -91,7 +91,6 @@ only-include = [
     "requirements-dev.txt",
     "requirements-test.txt",
 ]
-exclude = ["docs/kicad-ipc"]
 
 [tool.ruff]
 line-length = 100

@@ -136,12 +136,11 @@ def test_no_private_file_in_the_sdist(built):
 
 def test_sdist_has_the_source_and_the_tests(built):
     """All files of git under src, tests and docs, for a build and a test run, less
-    the exclude list of the sdist and the private files."""
-    tomllib = pytest.importorskip("tomllib")  # Python 3.11 or later
-
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    excluded = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
-    expected = git_files("src", "tests", "docs") - git_files(*(f":(top){e}" for e in excluded))
+    the private files."""
+    expected = git_files("src", "tests", "docs")
+    # The copies of the KiCad IPC documentation (GPL-3) are private: also with no
+    # git-publish-filter, no such path is in the sdist (until 2026-11-08 in docs/).
+    assert not [name for name in built["sdist"] if "kicad-ipc" in name]
     if has_private_files():
         expected -= private_files()
     assert len(expected) > 50

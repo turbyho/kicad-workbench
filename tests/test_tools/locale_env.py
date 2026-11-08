@@ -7,6 +7,7 @@ not use UTF-8, also when the machine of the test uses UTF-8:
   cannot change it. The CI runner has cp1252.
 - On Linux the process gets a locale that is not UTF-8. The CI workflow
   generates zh_CN.GBK, the character set of a Chinese system.
+- On macOS the system has such locales (for example zh_CN.GB18030).
 
 Python turns on its UTF-8 mode in the C locale, thus the C locale cannot
 show the problem. The process runs with the UTF-8 mode off or on (``-X
@@ -25,7 +26,8 @@ import sys
 
 import pytest
 
-LOCALES = ["zh_CN.GBK", "zh_CN.GB18030", "ar_AE.ISO-8859-6", "en_US.ISO-8859-1"]
+# macOS has "en_US.ISO8859-1" (no hyphen after "ISO").
+LOCALES = ["zh_CN.GBK", "zh_CN.GB18030", "ar_AE.ISO-8859-6", "en_US.ISO-8859-1", "en_US.ISO8859-1"]
 _PROBE = "import locale; print(locale.getpreferredencoding(False))"
 
 

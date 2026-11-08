@@ -266,14 +266,14 @@ async def create_kicad_project(
     then call it again with overwrite=True.
 
     Args:
-        project_path: Directory path for the project
+        project_path: The folder of the project.
         project_name: Name of the project. As in the file dialog of KiCad, the
             extension ".kicad_pro" (or a last ".") goes: "board.kicad_pro" gives "board".
-        title: Optional project title (defaults to project_name)
-        company: Optional company name
+        title: Optional title of the project. Default: project_name.
+        company: Optional name of the company.
         template: "empty" (default) for a blank project, or a KiCad template:
             a name on the template pages of KiCad (KICAD_USER_TEMPLATE_DIR and
-            KICAD<version>_TEMPLATE_DIR, e.g. "Arduino_Uno") or the path of a
+            KICAD<version>_TEMPLATE_DIR, for example "Arduino_Uno") or the path of a
             template folder.
         overwrite: True after the user confirmed: with a template, the files of
             the template replace the files with the same names; with no
@@ -281,7 +281,7 @@ async def create_kicad_project(
             (the files of the folder stay, as in KiCad).
 
     Returns:
-        Confirmation message with created files
+        The files of the new project, or an error.
     """
     # KiCad writes these values into its files as UTF-8. Check them before any
     # file changes, so that a value that is not valid text (a lone surrogate)

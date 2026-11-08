@@ -148,7 +148,7 @@ async def list_schematic_components(
     filter_value: str | None = None,
     filter_dnp: bool | None = None,
 ) -> str:
-    """List all components in a KiCad schematic file.
+    """Give the components of a schematic file.
 
     Each placed symbol of the file is in the list one time for each sheet path of
     the file, with the reference and the unit that KiCad gives that path (a sheet
@@ -156,13 +156,17 @@ async def list_schematic_components(
     components. The tool needs kicad-cli (the rules of the KiCad version).
 
     Args:
-        file_path: Path to .kicad_sch file
-        filter_type: Optional filter by component type prefix (e.g., 'R', 'C', 'U', 'IC')
-        filter_value: Optional filter by component value (partial match)
-        filter_dnp: Optional filter by DNP flag (True=only DNP, False=only non-DNP)
+        file_path: A .kicad_sch file of the project.
+        filter_type: Optional start of the references, for example "R", "C" or
+            "U". The tool makes the filter upper case, not the references.
+        filter_value: Optional text in the Value field (no difference of case).
+        filter_dnp: Optional: True gives only the DNP components, False only the
+            components that are not DNP.
 
     Returns:
-        Formatted list of components with their properties
+        A table of the components: reference, value, footprint, the name of the
+        library symbol (with no library name), and the sheet (more than one sheet
+        path) and the flags DNP and In BOM (when a component has one).
     """
     try:
         path = Path(file_path)
@@ -261,18 +265,19 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
 @with_schematic_versions("file_path")
 @with_field_rules_note
 async def get_symbol_details(file_path: str, reference: str) -> str:
-    """Get detailed information about a specific symbol/component.
+    """Give the fields and the pins of one component of a schematic.
 
     Args:
-        file_path: Path to .kicad_sch file
-        reference: Component reference designator (e.g., 'R1', 'U1')
+        file_path: A .kicad_sch file of the project.
+        reference: The reference of the component, for example "R1" or "U1".
 
     Returns:
-        Detailed component information including pins and properties. The pins
-        are the pins of the netlist of kicad-cli (the placed units of the
-        reference, with the alternate functions). A symbol that the netlist does
-        not have gets the pins of the schematic file, as the installed KiCad
-        loads them. A power symbol (a reference with "#") is not a component.
+        The value, the footprint, the library ID, the position, the unit, the
+        sheet, the fields and the pins of the component. The pins are the
+        pins of the netlist of kicad-cli (the placed units of the reference, with
+        the alternate functions). A symbol that the netlist does not have gets the
+        pins of the schematic file, as the installed KiCad loads them. A power
+        symbol (a reference with "#") is not a component.
     """
     try:
         path = Path(file_path)
@@ -363,15 +368,17 @@ async def search_symbols(
     pattern: str,
     search_fields: str = "all",
 ) -> str:
-    """Search for symbols/components matching a pattern.
+    """Find the components of a schematic whose reference, value or library ID match a pattern.
 
     Args:
-        file_path: Path to .kicad_sch file
-        pattern: Search pattern (supports regex)
-        search_fields: Fields to search: 'all', 'reference', 'value', 'library'
+        file_path: A .kicad_sch file of the project.
+        pattern: A regular expression (no difference of case).
+        search_fields: The fields to search: "all" (default), "reference", "value"
+            or "library".
 
     Returns:
-        List of matching components
+        A table of the components that match: reference, value and the name of
+        the library symbol (the search uses the full library ID).
     """
     try:
         path = Path(file_path)
@@ -439,14 +446,19 @@ async def list_schematic_nets(
     file_path: str,
     filter_power: bool = False,
 ) -> str:
-    """List all nets in a KiCad schematic.
+    """Give the nets of a schematic file.
+
+    The tool reads the labels and the power symbols of the file. A net with no label
+    of a sub-sheet needs the full hierarchy: use generate_netlist on the root
+    schematic for all nets.
 
     Args:
-        file_path: Path to .kicad_sch file
-        filter_power: If True, only show power nets (VCC, GND, etc.)
+        file_path: A .kicad_sch file of the project.
+        filter_power: True gives only the nets whose name has "gnd", "vcc", "vdd",
+            "vss", "+" or "-" (heuristic).
 
     Returns:
-        Formatted list of nets
+        A table of the nets: name, type and code.
     """
     try:
         kicad = await get_kicad_version()
@@ -532,14 +544,14 @@ def _sheet_symbol_lines(screen: SchematicFile) -> list[str]:
 @with_schematic_versions("file_path")
 @with_field_rules_note
 async def get_schematic_info(file_path: str) -> str:
-    """Get general information about a schematic file.
+    """Give the title block, the counts and the sheets of a schematic file.
 
     The components and the sheet symbols are the ones that KiCad loads for the
     project of the file (the references of each sheet path). The tool needs
     kicad-cli (the rules of the KiCad version).
 
     Args:
-        file_path: Path to .kicad_sch file
+        file_path: A .kicad_sch file of the project.
 
     Returns:
         The title block, the number of components (by the prefix of the reference),

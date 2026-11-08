@@ -195,20 +195,20 @@ async def analyze_pin_functions(
     schematic_path: str,
     reference: str = "",
 ) -> str:
-    """Analyze pin functions and detect conflicts.
+    """Give the function of the pins of the components of a schematic (heuristic).
 
-    This function analyzes schematic to determine pin functions by:
-    - Examining net names to infer functionality
-    - Identifying MCU components and their pin mappings
-    - Detecting potential pin conflicts
+    The tool finds the function of a pin (I2C, SPI, UART, GPIO, ADC, PWM, USB,
+    INTERRUPT) from the name of its net, and the family of a microcontroller from
+    its value. See docs/firmware.md of the repository for the limits.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
-        reference: Optional component reference (e.g., 'U1') to analyze specific component
+        reference: Optional reference of one component, for example "U1".
+            Empty: all components.
 
     Returns:
-        Detailed pin function analysis report
+        The pins of each component with their nets and functions.
     """
     try:
         sch_path = Path(schematic_path)
@@ -388,20 +388,18 @@ def _extract_pin_info_from_symbol_details(details_text: str) -> list[dict]:
 async def detect_pin_conflicts(
     schematic_path: str,
 ) -> str:
-    """Detect pins with conflicting electrical connections.
+    """Find the nets with pin conflicts in a schematic.
 
-    This function checks for:
-    - Multiple outputs on same net
-    - Power-to-power connections
-    - Unconnected input pins
-    - Pin type mismatches
+    The pin types come from the netlist of kicad-cli. A net with more than one
+    output or driver pin is an error. A net with one pin is a warning. A pin with no
+    connection is information. Run run_erc for the full electrical check of KiCad.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
 
     Returns:
-        Detailed conflict detection report
+        The errors, the warnings and the information, with a count of each.
     """
     try:
         sch_path = Path(schematic_path)
@@ -562,18 +560,20 @@ async def extract_pinmux_config(
     schematic_path: str,
     component_type: str = "",
 ) -> str:
-    """Extract pin multiplexing configuration for MCUs.
+    """Give the peripheral of each pin of the microcontrollers of a schematic (heuristic).
 
-    This function extracts pin multiplexing (pinmux) configuration
-    for MCU components, showing which peripherals are assigned to which pins.
+    The tool finds the peripheral of a pin (I2C, SPI, UART, GPIO, ADC, PWM, USB,
+    INTERRUPT) from the name of its net. See docs/firmware.md of the repository for
+    the supported microcontrollers and the limits.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
-        component_type: Optional MCU type filter (e.g., 'stm32', 'esp32', 'nrf52')
+        component_type: Optional family of the microcontroller, for example
+            "stm32", "esp32" or "nrf52". Empty: all families.
 
     Returns:
-        Detailed pinmux configuration report
+        The pins of each microcontroller with their peripherals.
     """
     try:
         sch_path = Path(schematic_path)

@@ -352,22 +352,18 @@ def _filter_drc_errors(errors: list[DRCError], violation_type: str = "") -> list
 async def run_erc(
     schematic_path: str,
 ) -> str:
-    """Run Electrical Rules Check (ERC) on schematic.
+    """Run the ERC of kicad-cli on a schematic, with the annotation check of the ERC dialog.
 
-    Checks for:
-    - Unconnected pins
-    - Power conflicts
-    - Multiple outputs on same net
-    - Pin type mismatches
-    - Annotation errors (symbols that are not annotated, duplicate references,
-      units with different values), as the ERC dialog of KiCad finds them.
-      kicad-cli does not run this check: the server runs it.
+    The tool uses the severities of the project. It also runs the annotation check
+    of the ERC dialog of KiCad (symbols that are not annotated, duplicate
+    references, units with different values), which kicad-cli does not run.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project.
 
     Returns:
-        ERC report with violations and recommendations
+        The violations with their locations, the numbers of errors and warnings,
+        and the annotation errors.
     """
     return await _run_erc(schematic_path, [])
 
@@ -412,7 +408,7 @@ async def _run_erc(
         # result of this run.
         erc_report_path.unlink(missing_ok=True)
 
-        # Run ERC using kicad-cli (KiCad 7+). --severity-all also gives the
+        # Run ERC using kicad-cli (KiCad 8 and later). --severity-all also gives the
         # excluded violations, with "excluded": true. The English kicad-cli
         # makes the item text parsable (pin number, pin name and pin type).
         try:
@@ -558,20 +554,18 @@ Please check the file path and try again."""
 async def run_drc(
     pcb_path: str,
 ) -> str:
-    """Run Design Rules Check (DRC) on PCB.
+    """Run the DRC of kicad-cli on a board.
 
-    Checks for:
-    - Clearance violations
-    - Track spacing violations
-    - Missing connections
-    - Pad/footprint overlaps
-    - Board edge constraints
+    The tool uses the severities of the project. When the schematic of the board
+    name is next to the board, the DRC also checks the parity of the schematic and
+    the board.
 
     Args:
-        pcb_path: Path to .kicad_pcb file
+        pcb_path: The .kicad_pcb file.
 
     Returns:
-        DRC report with violations and locations
+        The violations with their locations, and the numbers of errors and
+        warnings.
     """
     try:
         pcb = Path(pcb_path)
@@ -584,7 +578,7 @@ async def run_drc(
         # result of this run.
         drc_report_path.unlink(missing_ok=True)
 
-        # Run DRC using kicad-cli (KiCad 7+). --severity-all also gives the
+        # Run DRC using kicad-cli (KiCad 8 and later). --severity-all also gives the
         # excluded violations. The schematic parity check is possible only
         # when the schematic of the board is available.
         args = ["pcb", "drc", "--format", "json", "--severity-all"]
@@ -732,14 +726,14 @@ async def get_erc_violations(
     schematic_path: str,
     severity: str = "",
 ) -> str:
-    """Get filtered ERC violations from schematic.
+    """Give the ERC violations of a schematic, with a filter by severity.
 
     Args:
-        schematic_path: Path to .kicad_sch file
-        severity: Filter by severity ('error', 'warning', '') for all
+        schematic_path: A .kicad_sch file of the project.
+        severity: Optional severity: "error" or "warning". Empty: all violations.
 
     Returns:
-        Filtered list of ERC violations
+        The ERC violations of the severity.
     """
     try:
         sch_path = Path(schematic_path)
@@ -821,14 +815,15 @@ async def get_drc_violations(
     pcb_path: str,
     violation_type: str = "",
 ) -> str:
-    """Get filtered DRC violations from PCB.
+    """Give the DRC violations of a board, with a filter by type.
 
     Args:
-        pcb_path: Path to .kicad_pcb file
-        violation_type: Filter by type (e.g., 'clearance', 'spacing', '') for all
+        pcb_path: The .kicad_pcb file.
+        violation_type: Optional type of the violations, as the DRC report of
+            KiCad gives it, for example "clearance". Empty: all violations.
 
     Returns:
-        Filtered list of DRC violations
+        The DRC violations of the type.
     """
     try:
         pcb = Path(pcb_path)
@@ -892,16 +887,15 @@ async def export_erc_report(
     schematic_path: str,
     output_path: str = "",
 ) -> str:
-    """Export ERC report to file.
-
-    The report is the kicad-cli ERC JSON report.
+    """Run the ERC of kicad-cli on a schematic and copy its JSON report into a file.
 
     Args:
-        schematic_path: Path to .kicad_sch file
-        output_path: Optional output file path (default: schematic_name_erc_report.json)
+        schematic_path: A .kicad_sch file of the project.
+        output_path: Optional file of the report. Default:
+            <schematic>_erc_report.json next to the schematic.
 
     Returns:
-        Confirmation with output file location
+        The path of the report.
     """
     try:
         sch_path = Path(schematic_path)
@@ -980,16 +974,15 @@ async def export_drc_report(
     pcb_path: str,
     output_path: str = "",
 ) -> str:
-    """Export DRC report to file.
-
-    The report is the kicad-cli DRC JSON report.
+    """Run the DRC of kicad-cli on a board and copy its JSON report into a file.
 
     Args:
-        pcb_path: Path to .kicad_pcb file
-        output_path: Optional output file path (default: pcb_name_drc_report.json)
+        pcb_path: The .kicad_pcb file.
+        output_path: Optional file of the report. Default: <board>_drc_report.json
+            next to the board.
 
     Returns:
-        Confirmation with output file location
+        The path of the report.
     """
     try:
         pcb = Path(pcb_path)

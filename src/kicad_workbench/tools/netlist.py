@@ -272,13 +272,18 @@ async def write_netlist(sch_path: Path) -> tuple[Path, Path | None]:
 async def generate_netlist(
     schematic_path: str,
 ) -> str:
-    """Generate KiCad netlist from schematic file.
+    """Make the netlist of a schematic with kicad-cli, and give the path of its file.
+
+    kicad-cli writes the netlist (KiCad XML) of the full project into a file in the
+    temporary folder of the system. Give this file to trace_netlist_connection,
+    get_netlist_nets and get_netlist_components. Make the netlist again after a change
+    of the schematic.
 
     Args:
-        schematic_path: Path to .kicad_sch file
+        schematic_path: A .kicad_sch file of the project.
 
     Returns:
-        Path to generated .xml netlist file
+        The path of the netlist file.
     """
     try:
         sch_path = Path(schematic_path)
@@ -316,15 +321,18 @@ async def trace_netlist_connection(
     reference: str,
     pin_number: str = "",
 ) -> str:
-    """Trace component connections using netlist file (most accurate).
+    """Give the nets of the pins of a component, and the pins on each net.
+
+    The netlist of kicad-cli is the most exact source for the connections. Make it
+    with generate_netlist, and again after a change of the schematic.
 
     Args:
-        netlist_path: Path to .xml netlist file
-        reference: Component reference (e.g., 'R16')
-        pin_number: Optional pin number (e.g., '1'). If empty, trace all pins.
+        netlist_path: A netlist file of generate_netlist.
+        reference: The reference of the component, for example "R16".
+        pin_number: Optional pin number, for example "1". Empty: all pins.
 
     Returns:
-        Detailed connection information from netlist
+        For each pin, its net and the other pins on that net.
     """
     try:
         parser = await asyncio.to_thread(NetlistParser, netlist_path)
@@ -396,14 +404,15 @@ async def get_netlist_nets(
     netlist_path: str,
     filter_pattern: str = "",
 ) -> str:
-    """Get all nets from netlist file.
+    """Give the nets of a netlist file with their pins.
 
     Args:
-        netlist_path: Path to .xml netlist file
-        filter_pattern: Optional regex pattern to filter net names
+        netlist_path: A netlist file of generate_netlist.
+        filter_pattern: Optional regular expression for the net names (no
+            difference of case). Empty: all nets.
 
     Returns:
-        List of all nets with their connections
+        The nets with their pins.
     """
     try:
         parser = await asyncio.to_thread(NetlistParser, netlist_path)
@@ -448,14 +457,15 @@ async def get_netlist_components(
     netlist_path: str,
     filter_ref: str = "",
 ) -> str:
-    """Get all components from netlist with their network connections.
+    """Give the components of a netlist file with the nets of their pins.
 
     Args:
-        netlist_path: Path to .xml netlist file
-        filter_ref: Optional reference filter (e.g., 'R', 'U', 'C')
+        netlist_path: A netlist file of generate_netlist.
+        filter_ref: Optional start of the references to give, for example "R",
+            "U" or "C" (the case is important). Empty: all components.
 
     Returns:
-        List of components with their net connections
+        The components with the net of each pin.
     """
     try:
         parser = await asyncio.to_thread(NetlistParser, netlist_path)

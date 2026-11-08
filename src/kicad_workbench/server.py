@@ -1,4 +1,4 @@
-"""Main MCP server setup for KiCad integration."""
+"""The FastMCP server of KiCad Workbench: its instructions, its middleware and its tools."""
 
 from fastmcp import FastMCP
 
@@ -7,19 +7,23 @@ from .version_check import VersionNotes
 # Create MCP server
 mcp = FastMCP(
     name="kicad-workbench",
-    instructions="""KiCad Workbench - A server for analyzing KiCad schematics and PCBs,
-    and performing design rule checks.
+    instructions="""KiCad Workbench: the tools read, check and change KiCad 8, 9 and 10
+    projects as the installed KiCad does (kicad-cli, pcbnew and the rules of the KiCad
+    source).
 
-    Available capabilities:
-    - Schematic analysis (components, nets, symbols)
-    - PCB analysis (footprints, tracks, statistics)
-    - Design rule checking (ERC/DRC)
-    - Bill of materials (BOM) through kicad-cli
-    - The fields of placed symbols, and the check of their MPNs
-    - Schematic summarization
-    - Hierarchical sheet and net tracing
-    - Pin/power/bus extraction and device tree generation
-    - Symbol and footprint library search
+    - Schematics: components, nets, symbols, the sheet hierarchy, the netlist.
+    - Boards: footprints, tracks, nets, statistics.
+    - Checks: ERC and DRC of kicad-cli, the pin and pad checks, the library links.
+    - Libraries: the library tables, the search, symbols and footprints, PNG images.
+    - BOM: the BOM of kicad-cli, and the check of the confirmed MPNs.
+    - Edits: symbols, wires, labels, the fields of placed symbols, new projects and
+      boards.
+    - Exports: SVG, 3D view, STEP, Gerber.
+    - Firmware (heuristic): pin functions, buses, device tree sources.
+
+    An error starts with "❌", a warning with "⚠️". When a tool gives a step for the
+    user (for example the conversion of a file in KiCad, or the install of KiCad),
+    tell the user.
     """,
 )
 

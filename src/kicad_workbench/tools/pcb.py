@@ -130,14 +130,16 @@ async def list_pcb_footprints(
     file_path: str,
     filter_layer: str | None = None,
 ) -> str:
-    """List all footprints in a KiCad PCB file.
+    """Give the footprints of a board.
 
     Args:
-        file_path: Path to .kicad_pcb file
-        filter_layer: Optional filter by layer (e.g., 'F.Cu', 'B.Cu')
+        file_path: The .kicad_pcb file.
+        filter_layer: Optional layer of the footprints to give, for example
+            "F.Cu" or "B.Cu". Empty: all footprints.
 
     Returns:
-        Formatted list of footprints
+        A table of the footprints: reference, value, library ID, layer, position,
+        rotation and number of pads.
     """
     try:
         parser = _get_parser(file_path)
@@ -194,13 +196,14 @@ async def list_pcb_footprints(
 @with_board_versions("file_path")
 @_board_tool(": no board outline, no design rules")
 async def get_pcb_statistics(file_path: str) -> str:
-    """Get statistics about a KiCad PCB design.
+    """Give the size, the layers, the counts and the design rules of a board.
 
     Args:
-        file_path: Path to .kicad_pcb file
+        file_path: The .kicad_pcb file.
 
     Returns:
-        PCB statistics and metrics
+        The size of the board, the copper layers, the thickness, the numbers of
+        footprints, tracks, vias, zones and nets, and the design rules.
     """
     try:
         parser = _get_parser(file_path)
@@ -261,16 +264,17 @@ async def get_pcb_statistics(file_path: str) -> str:
 @with_board_versions("file_path")
 @_board_tool(": no design rules")
 async def analyze_pcb_nets(file_path: str) -> str:
-    """Analyze nets in a KiCad PCB file.
+    """Give the routing of a board: track widths, vias, net lengths and layers.
 
-    Provides track width distribution, via distribution, per-net track
-    length ranking, layer coverage, and design rule comparison.
+    The tool gives the distribution of the track widths and of the via drills, the
+    layer spans of the vias, the tracks of each layer, the nets by the length of their
+    tracks, and a comparison with the design rules of the board.
 
     Args:
-        file_path: Path to .kicad_pcb file
+        file_path: The .kicad_pcb file.
 
     Returns:
-        Net information and routing analysis from PCB
+        The routing analysis of the board.
     """
     try:
         parser = _get_parser(file_path)
@@ -462,14 +466,14 @@ async def analyze_pcb_nets(file_path: str) -> str:
 @with_board_versions("file_path")
 @_board_tool("")
 async def find_tracks_by_net(file_path: str, net_name: str) -> str:
-    """Find track segments belonging to a specific net.
+    """Give the tracks and the vias of one net of a board, with their lengths and widths.
 
     Args:
-        file_path: Path to .kicad_pcb file
-        net_name: Name of the net to search for
+        file_path: The .kicad_pcb file.
+        net_name: The name of the net.
 
     Returns:
-        Track information for the specified net with length analysis
+        The tracks and the vias of the net, and the length of the net.
     """
     try:
         parser = _get_parser(file_path)
@@ -647,17 +651,19 @@ async def analyze_pcb_signal_integrity(
     file_path: str,
     net_name: str = "",
 ) -> str:
-    """Analyze signal integrity: diff pair matching, RF traces, critical nets.
+    """Give the differential pairs, the RF tracks and the longest signal nets of a board (heuristic).
 
-    Auto-detects differential pairs (e.g., USB_N/USB_P, DP/DN) and checks
-    length matching. Reports RF trace dimensions and longest signal nets.
+    The tool finds a differential pair from the names of two nets (for example USB_P
+    and USB_N, DP and DN) and gives the difference of their lengths. It finds an RF
+    track from the name of its net. It also gives the longest signal nets and the
+    nets with the most vias.
 
     Args:
-        file_path: Path to .kicad_pcb file
-        net_name: Optional specific net to analyze in detail
+        file_path: The .kicad_pcb file.
+        net_name: Optional name of one net to analyze in detail.
 
     Returns:
-        Signal integrity analysis report
+        The signal analysis of the board.
     """
     try:
         parser = _get_parser(file_path)
@@ -837,13 +843,16 @@ async def analyze_pcb_signal_integrity(
 @with_board_versions("file_path")
 @_board_tool(": no fill state of the zones")
 async def analyze_pcb_power_integrity(file_path: str) -> str:
-    """Analyze power integrity: copper zones, power net routing, GND coverage.
+    """Give the copper zones of a board and the routing of its power nets (heuristic).
+
+    The tool finds a power net and a ground net from its name (for example VCC, VDD,
+    VBUS, GND), and gives the copper zones of each and the tracks of the power nets.
 
     Args:
-        file_path: Path to .kicad_pcb file
+        file_path: The .kicad_pcb file.
 
     Returns:
-        Power integrity analysis report
+        The power analysis of the board.
     """
     try:
         parser = _get_parser(file_path)

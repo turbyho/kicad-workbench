@@ -20,17 +20,19 @@ from ..utils.parts_registry import (
 
 @mcp.tool()
 async def search_parts_registry(query: str, limit: int = 20) -> str:
-    """Search an open registry of 21,000+ verified KiCad parts (no login).
+    """Search an open registry of KiCad parts (no login).
 
-    Matches part id, name, family, category, manufacturer and keywords.
-    Example queries: "usb c connector", "0402 capacitor", "nrf9151".
+    The tool compares the query with the ID, the name, the family, the category, the
+    manufacturer and the keywords of each part. Example queries: "usb c connector",
+    "0402 capacitor", "nrf9151".
 
     Args:
-        query: Search terms (all terms must match; '*' wildcards allowed)
-        limit: Maximum number of results (default 20)
+        query: The words to find. Each word must match. "*" is a wildcard.
+        limit: The maximum number of results (default 20).
 
     Returns:
-        JSON list of matches (id, name, family, page URL)
+        The parts that match (JSON): ID, name, family, category, manufacturer and
+        the URL of the page.
     """
     client = RegistryClient()
     try:
@@ -55,16 +57,16 @@ async def search_parts_registry(query: str, limit: int = 20) -> str:
 
 @mcp.tool()
 async def get_registry_part(part_id: str) -> str:
-    """Get the full registry record for one part.
+    """Give the full record of one part of the parts registry.
 
-    Includes download URLs (footprint/symbol/3D), datasheet link, dimension
-    provenance and field reports from real builds.
+    The record has the download URLs (footprint, symbol, 3D model), the link to the
+    datasheet, the origin of the dimensions, and the reports of real builds.
 
     Args:
-        part_id: Registry part id (from search_parts_registry)
+        part_id: The ID of the part (search_parts_registry gives it).
 
     Returns:
-        JSON part record
+        The record of the part (JSON).
     """
     client = RegistryClient()
     try:
@@ -78,19 +80,21 @@ async def get_registry_part(part_id: str) -> str:
 async def download_registry_part(
     part_id: str, save_dir: str, formats: list[str] | None = None
 ) -> str:
-    """Download a registry part's files into a local directory.
+    """Download the files of a part of the parts registry into a local folder.
 
-    Downloads are HTTPS-only, restricted to the registry's own hosts,
-    capped at 50 MB per file, and saved with extension-checked filenames.
+    The tool downloads only through HTTPS, only from the hosts of the registry, at
+    most 50 MB for each file, and only the file extensions of each format.
 
     Args:
-        part_id: Registry part id (from search_parts_registry)
-        save_dir: Existing local directory (e.g. the project library folder)
-        formats: Which files — any of "footprint", "symbol", "step",
-            "preview" (default: footprint + symbol)
+        part_id: The ID of the part (search_parts_registry gives it).
+        save_dir: A folder that exists, for example the library folder of the
+            project: in the working folder, the home folder or a folder of
+            PARTS_REGISTRY_SAVE_ROOTS.
+        formats: The files to download: "footprint", "symbol", "step" and
+            "preview". Default: the footprint and the symbol.
 
     Returns:
-        Saved file paths, or an error
+        The paths of the files, or an error.
     """
     formats = formats or ["footprint", "symbol"]
     unknown = [f for f in formats if f not in FORMAT_EXTENSIONS]

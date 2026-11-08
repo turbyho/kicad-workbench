@@ -54,26 +54,26 @@ async def render_pcb(
     quality: str = "basic",
     rotate: str = "",
 ) -> Image | str:
-    """Render a 3D view of the PCB to a PNG image.
+    """Render a 3D view of a board as a PNG image with kicad-cli (KiCad 9 or later).
 
-    Produces a photorealistic render of the assembled board via kicad-cli
-    (footprints must have 3D models assigned; otherwise plain board geometry
-    is rendered). Returns the image itself, so multimodal clients show it
-    directly — useful for AI-assisted layout review.
+    The image has the board and the 3D models of the footprints: a footprint with no
+    3D model has no body in the image. Use the image for a visual review of the layout.
 
     Args:
-        pcb_path: Path to the .kicad_pcb file.
-        side: Camera side: top, bottom, left, right, front, back.
-        output_path: Output PNG (default: <pcb>_render_<side>.png next to
-            the PCB).
-        width: Image width in pixels.
-        height: Image height in pixels.
-        quality: Render quality: basic (fast) or high (slower, raytraced).
-        rotate: Optional board rotation 'X,Y,Z' in degrees for isometric
-            views, e.g. '-30,0,25'.
+        pcb_path: The .kicad_pcb file.
+        side: The side of the camera: "top" (default), "bottom", "left", "right",
+            "front" or "back".
+        output_path: Optional PNG file. Default: <board>_render_<side>.png next to
+            the board.
+        width: The width of the image in pixels (default 1600).
+        height: The height of the image in pixels (default 900).
+        quality: "basic" (default, fast), "high" (ray tracing, slower), "user" or
+            "job_settings" (the settings of KiCad).
+        rotate: Optional rotation of the board "X,Y,Z" in degrees, for example
+            "-30,0,25".
 
     Returns:
-        The rendered image, or an error message string.
+        The image, or an error.
     """
     try:
         pcb = Path(pcb_path)
@@ -130,17 +130,17 @@ async def export_pcb_3d(
     output_path: str = "",
     board_only: bool = False,
 ) -> str:
-    """Export the PCB as a STEP 3D model for mechanical CAD handoff.
+    """Export a board as a STEP 3D model with kicad-cli, for mechanical CAD.
 
-    Includes board body, footprints and their assigned 3D models.
+    The model has the board and the 3D models of its footprints.
 
     Args:
-        pcb_path: Path to the .kicad_pcb file.
-        output_path: Output .step file (default: <pcb>.step next to the PCB).
-        board_only: Export only the board body, without component models.
+        pcb_path: The .kicad_pcb file.
+        output_path: Optional .step file. Default: <board>.step next to the board.
+        board_only: True gives only the board, with no models of the footprints.
 
     Returns:
-        Confirmation with the output path and file size.
+        The path and the size of the STEP file.
     """
     try:
         pcb = Path(pcb_path)
@@ -252,19 +252,20 @@ async def export_schematic_svg(
     schematic_path: str,
     output_dir: str = "",
 ) -> str:
-    """Export schematic pages to SVG images.
+    """Export the pages of a schematic as SVG files with kicad-cli.
 
     kicad-cli renders the pages of the project with the hierarchy of its root
     schematic (the schematic of the project name), thus each page has the
     references of its sheet path. For the root schematic, the files are all pages
     of the project. For an other file (a sub-sheet), the files are the pages of
     its sheet paths (a sheet that the hierarchy uses two times gives two pages).
-    SVGs are vector graphics: clients and humans can zoom into any detail without
-    quality loss. The tool needs kicad-cli.
+    An SVG file is a vector image: a zoom shows each detail with no loss. The tool
+    needs kicad-cli.
 
     Args:
         schematic_path: A .kicad_sch file of the project.
-        output_dir: Output directory (default: <schematic>_svg/ next to it).
+        output_dir: Optional folder of the files. Default: <schematic>_svg next
+            to the schematic.
 
     Returns:
         The SVG files of this export.

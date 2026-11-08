@@ -18,7 +18,7 @@ async def search_components_by_type(
     component_type: str,
     search_in_subsheets: bool = True
 ) -> str:
-    """Search for components by type (OLED, sensor, display, etc.).
+    """Find the components of a type, for example OLED, sensor or display (heuristic).
 
     The tool searches the value, the footprint and the net names of each
     component. It reads the netlist that kicad-cli writes now: each component of
@@ -28,7 +28,8 @@ async def search_components_by_type(
 
     Args:
         file_path: A .kicad_sch file of the project.
-        component_type: Type of component to search for (e.g., 'OLED', 'sensor', 'display', 'SPI', 'I2C')
+        component_type: The type of component, for example "OLED", "sensor",
+            "display", "SPI" or "I2C".
         search_in_subsheets: True (default): the components of the file and of all
             sheets below it (for the root schematic: the full project). False: only
             the components that are placed in the file.

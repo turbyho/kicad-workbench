@@ -366,19 +366,22 @@ async def generate_device_tree(
     target_soc: str = "stm32f4",
     output_path: str = "",
 ) -> str:
-    """Generate device tree source (.dts) file from schematic.
+    """Make a device tree source (.dts) from a schematic (heuristic).
 
-    This function analyzes a KiCad schematic and generates a device tree
-    source file compatible with the specified SOC family.
+    The tool finds the buses and the devices on them from the values and the net
+    names. It does not check the pin conflicts (validate_pin_configuration). Do a
+    review of the result before you use it. See docs/firmware.md of the repository
+    for the limits.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
-        target_soc: Target SOC family (stm32f4, esp32, nrf52)
-        output_path: Optional output file path
+        target_soc: The family of the microcontroller: "stm32f4" (default),
+            "esp32" or "nrf52".
+        output_path: Optional .dts file to write. Empty: the tool writes no file.
 
     Returns:
-        Generated device tree source code or error message
+        The device tree source, or an error.
     """
     try:
         sch_path = Path(schematic_path)
@@ -590,15 +593,20 @@ async def extract_gpio_config(
     schematic_path: str,
     soc_family: str = "",
 ) -> str:
-    """Extract GPIO pin configurations from schematic.
+    """Give the GPIO pins of the microcontrollers of a schematic (heuristic).
+
+    A microcontroller is a component with STM32, ESP32, NRF or ATMEGA in its value.
+    A GPIO pin is a pin on a net with "GPIO" or "IO" in its name (also, for example,
+    RADIO). For STM32 the tool gives the port and the bit of each pin.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
-        soc_family: Optional SOC family filter
+        soc_family: Optional text in the value of the microcontroller, for
+            example "stm32" (no difference of case). Empty: each microcontroller.
 
     Returns:
-        GPIO configuration report
+        A table of the GPIO pins of each microcontroller.
     """
     try:
         sch_path = Path(schematic_path)
@@ -741,14 +749,19 @@ No GPIO configurations were found in the schematic.
 async def extract_i2c_devices(
     schematic_path: str,
 ) -> str:
-    """Extract I2C bus and device configurations.
+    """Give the I2C buses of a schematic and the devices on them (heuristic).
+
+    An I2C net has "I2C" or "TWI" in its name. A device is a component with a pin on
+    such a net whose value is in a small table of known devices (for example BMP280):
+    the tool does not give the other components. An address in the net name (for
+    example I2C_SDA_0x76) is the address of the device.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
 
     Returns:
-        I2C device configuration report
+        The I2C buses with their nets and devices.
     """
     try:
         sch_path = Path(schematic_path)
@@ -843,14 +856,18 @@ No I2C devices were found in the schematic.
 async def extract_spi_devices(
     schematic_path: str,
 ) -> str:
-    """Extract SPI bus and device configurations.
+    """Give the SPI buses of a schematic and the devices on them (heuristic).
+
+    An SPI net has "SPI" in its name. A device is a component with a pin on such a net
+    whose value is in a small table of known devices: the tool does not give the
+    other components.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
 
     Returns:
-        SPI device configuration report
+        The SPI buses with their nets and devices.
     """
     try:
         sch_path = Path(schematic_path)
@@ -944,14 +961,20 @@ No SPI devices were found in the schematic.
 async def extract_power_domains(
     schematic_path: str,
 ) -> str:
-    """Extract power domain and regulator configurations.
+    """Give the regulators of a schematic, with a device tree part for each (heuristic).
+
+    A regulator is a component whose value has a text of a list (for example REG,
+    LDO, BUCK, BOOST, TPS, PMIC, also AP and LP: thus also, for example, CAP_10uF).
+    The device tree part has a node for each of the first 5 regulators, with the
+    voltage 3.3 V: correct it.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
 
     Returns:
-        Power domain configuration report
+        The regulators, and a device tree part with a node for each of the first
+        5.
     """
     try:
         sch_path = Path(schematic_path)
@@ -1045,17 +1068,20 @@ No power management components were found in the schematic.
 async def validate_pin_configuration(
     schematic_path: str,
 ) -> str:
-    """Validate pin configuration conflicts for device tree generation.
+    """Check a schematic before a device tree generation (heuristic).
 
-    This function validates that the pin configuration is suitable for
-    device tree generation and reports any conflicts or issues.
+    The tool gives the pin conflicts of detect_pin_conflicts: with an error (more than
+    one driver pin on a net), it tells you not to make a device tree. It also looks
+    for a microcontroller (STM32, ESP32, nRF or ATmega in the value). The tool only
+    gives a report: generate_device_tree does not run this check. See
+    docs/firmware.md of the repository for the limits.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool uses the
             components and the netlist of the full project.
 
     Returns:
-        Validation report with conflicts and recommendations
+        The conflicts and the recommendations.
     """
     try:
         sch_path = Path(schematic_path)

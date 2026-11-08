@@ -58,11 +58,11 @@ async def setup_pcb_layout(
     unit: str = "mm",
     overwrite: bool = False,
 ) -> str:
-    """Initialize an empty PCB with the specified board outline dimensions.
+    """Make a new board with an outline, next to the schematic.
 
-    Writes a .kicad_pcb next to the schematic containing only the board
-    outline (Edge.Cuts), a standard 2-layer stack and default design rules —
-    no footprints, tracks or nets.
+    The board has the name of the schematic, a rectangle on Edge.Cuts, two copper
+    layers and the default design rules. It has no footprints, tracks or nets: use
+    "Update PCB from Schematic" of KiCad for the footprints.
 
     pcbnew of the installed KiCad makes the board (a Python with pcbnew is
     necessary), thus the board has the file format of the installed KiCad, as
@@ -76,18 +76,18 @@ async def setup_pcb_layout(
     existing board. Ask the user before you set overwrite=True.
 
     Args:
-        schematic_path: Path to the .kicad_sch the board is based on (used to
-            derive the .kicad_pcb path and board title).
-        width: Board width in the given unit.
-        height: Board height in the given unit.
+        schematic_path: The .kicad_sch file. The board gets its name and its
+            title.
+        width: The width of the board in the unit (default 100).
+        height: The height of the board in the unit (default 100).
         unit: "mm" (default) or "mil".
-        overwrite: Replace an existing .kicad_pcb file. Set it only after
+        overwrite: True replaces an existing .kicad_pcb file. Set it only after
             the user agreed to lose the existing board.
 
     Returns:
-        Confirmation reporting the actual outline size, layer count and
-        element counts read back from the written file, and the warning
-        about the file version when there is one.
+        The size of the outline, the layers and the counts of items, read
+        back from the written file, and the warning about the file version
+        when there is one.
     """
     try:
         # The outline goes to pcbnew in millimetres (issue #17: the old code
@@ -256,18 +256,18 @@ async def export_gerber(
     pcb_path: str,
     output_dir: str = "",
 ) -> str:
-    """Export a PCB to Gerber + drill files for fabrication via kicad-cli.
+    """Export the Gerber and drill files of a board with kicad-cli, for fabrication.
 
-    Runs KiCad's command-line exporter against the .kicad_pcb and reports the
-    files actually produced. Requires KiCad 7+ installed with kicad-cli on PATH.
+    The tool runs "kicad-cli pcb export gerbers", then "kicad-cli pcb export drill",
+    and gives the files that kicad-cli wrote.
 
     Args:
-        pcb_path: Path to the .kicad_pcb file.
-        output_dir: Directory for output (default: a "gerber" folder next to
-            the PCB).
+        pcb_path: The .kicad_pcb file.
+        output_dir: Optional folder of the files. Default: the folder "gerber"
+            next to the board.
 
     Returns:
-        Confirmation listing the generated files, or an actionable error.
+        The files that kicad-cli wrote, or an error.
     """
     try:
         pcb = Path(pcb_path)
@@ -286,7 +286,7 @@ async def export_gerber(
 
         # Gerbers first (required); drill is best-effort afterwards. Note the
         # subcommand is "gerbers" (plural) and the output flag is "-o", not
-        # "--output-dir" — KiCad 7-10 all use this form. With no --layers it
+        # "--output-dir" — KiCad 8, 9 and 10 use this form. With no --layers it
         # plots every layer defined in the board, so it generalises to N-layer.
         try:
             rc, err = await _run(["pcb", "export", "gerbers", "-o", str(out_path), str(pcb)])

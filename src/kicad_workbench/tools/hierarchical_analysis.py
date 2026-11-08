@@ -26,8 +26,8 @@ async def trace_hierarchical_connection(
     Args:
         file_path: A .kicad_sch file of the project (the root schematic or a
             sub-sheet: the tool uses the netlist of the root schematic).
-        reference: Component reference designator (e.g., 'U1', 'R5')
-        pin_number: Optional pin number to trace (if empty, trace all pins)
+        reference: The reference of the component, for example "U1".
+        pin_number: Optional pin number. Empty: all pins.
 
     Returns:
         The sheet of the component, and the nets and the connected pins of each
@@ -131,7 +131,8 @@ async def analyze_hierarchical_nets(
     Args:
         file_path: A .kicad_sch file of the project (the root schematic or a
             sub-sheet: the tool uses the netlist of the root schematic).
-        filter_pattern: Optional regex pattern to filter net names
+        filter_pattern: Optional regular expression for the net names (no
+            difference of case). Empty: all nets.
         show_hierarchy: True (default): list the sheet paths of the hierarchy with
             their files.
 

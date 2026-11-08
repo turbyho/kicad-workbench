@@ -985,32 +985,29 @@ async def add_hierarchical_label(
     y: float | None = None,
     snap_to_grid: bool = True,
 ) -> str:
-    """Add a hierarchical label on a component pin (cross-sheet connection).
+    """Add a hierarchical label on a pin of a component.
 
-    Hierarchical labels are how signals cross sheet boundaries in KiCad: a
-    label placed in a sub-sheet appears as a same-named pin on the parent
-    sheet's sheet symbol, connecting the two. Placing them by hand for
-    every cross-sheet signal is the classic tedium this automates.
-
-    The label anchors EXACTLY on the pin (computed from the embedded
-    symbol geometry incl. rotation and the library-vs-sheet Y flip), so
-    the connection is electrically valid — verify with generate_netlist.
+    A hierarchical label in a sub-sheet connects its net to the pin with the same
+    name of the sheet symbol in the parent sheet. The tool puts the label on the
+    connection point of the pin (with the rotation and the mirror of the symbol).
+    Make sure that the connection is in the netlist: generate_netlist.
 
     Args:
-        file_path: Path to the .kicad_sch file (the SUB-sheet for signals
-            going up to its parent).
-        reference: Component reference (e.g. 'U1').
-        pin: Pin number.
-        label_name: Label text; defaults to the reference+pin when empty.
-        shape: Electrical direction: input, output, bidirectional,
-            tri_state or passive (ERC uses this).
-        x/y: Explicit anchor coordinates (overrides reference/pin).
-        snap_to_grid: Only for x/y. True: move the label to the nearest point
-            of the connection grid of the project (default 1.27 mm), except on
-            a connection point of the sheet (a pin, a wire, a label).
+        file_path: The .kicad_sch file of the sub-sheet.
+        reference: The reference of the component, for example "U1".
+        pin: The pin number.
+        label_name: The text of the label. Empty: "<reference>.<pin>" (also with
+            x and y).
+        shape: The electrical type of the label: "input" (default), "output",
+            "bidirectional", "tri_state" or "passive". ERC uses it.
+        x, y: Optional position in mm. With x and y, the tool does not use the
+            reference and the pin for the position.
+        snap_to_grid: Only for x and y. True: move the label to the nearest point
+            of the connection grid of the project (default 1.27 mm), except on a
+            connection point of the sheet (a pin, a wire, a label).
 
     Returns:
-        Confirmation with the exact anchor position.
+        The position of the label.
     """
     if shape not in _LABEL_SHAPES:
         return f"❌ Invalid shape '{shape}'. Options: {', '.join(_LABEL_SHAPES)}"
@@ -1046,27 +1043,25 @@ async def add_global_label(
     y: float | None = None,
     snap_to_grid: bool = True,
 ) -> str:
-    """Add a global label on a component pin (project-wide connection).
+    """Add a global label on a pin of a component.
 
-    Global labels connect same-named signals anywhere in the whole
-    hierarchy regardless of sheets — useful for power-style rails and
-    cross-cutting signals where a hierarchical parent/child chain would
-    be awkward.
+    A global label connects the nets with its name in all sheets of the project.
 
     Args:
-        file_path: Path to the .kicad_sch file.
-        reference: Component reference (e.g. 'U1').
-        pin: Pin number.
-        label_name: Global net name (required — globals are named nets).
-        shape: Electrical direction: input, output, bidirectional,
-            tri_state or passive.
-        x/y: Explicit anchor coordinates (overrides reference/pin).
-        snap_to_grid: Only for x/y. True: move the label to the nearest point
-            of the connection grid of the project (default 1.27 mm), except on
-            a connection point of the sheet (a pin, a wire, a label).
+        file_path: The .kicad_sch file.
+        reference: The reference of the component, for example "U1".
+        pin: The pin number.
+        label_name: The name of the net.
+        shape: The electrical type of the label: "input" (default), "output",
+            "bidirectional", "tri_state" or "passive". ERC uses it.
+        x, y: Optional position in mm. With x and y, the tool does not use the
+            reference and the pin.
+        snap_to_grid: Only for x and y. True: move the label to the nearest point
+            of the connection grid of the project (default 1.27 mm), except on a
+            connection point of the sheet (a pin, a wire, a label).
 
     Returns:
-        Confirmation with the exact anchor position.
+        The position of the label.
     """
     if shape not in _LABEL_SHAPES:
         return f"❌ Invalid shape '{shape}'. Options: {', '.join(_LABEL_SHAPES)}"

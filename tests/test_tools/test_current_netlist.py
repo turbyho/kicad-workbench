@@ -7,6 +7,7 @@ project with the same sheet name.
 """
 
 import asyncio
+import re
 import tempfile
 from pathlib import Path
 
@@ -84,7 +85,9 @@ def test_each_call_reads_the_schematic_again(monkeypatch, sch):
 def test_a_netlist_of_kicad_cli_that_is_not_xml(monkeypatch, sch):
     monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(b"<export", []))
     # The thread of current_netlist parses the XML (NetlistParser.load).
-    with pytest.raises(InputError, match=f"The netlist of kicad-cli for {sch} is not valid XML"):
+    with pytest.raises(
+        InputError, match=f"The netlist of kicad-cli for {re.escape(str(sch))} is not valid XML"
+    ):
         asyncio.run(netlist.current_netlist(sch))
 
 
@@ -104,7 +107,9 @@ def test_a_sub_sheet_gives_the_netlist_of_its_root(monkeypatch, tmp_path):
 
     monkeypatch.setattr(netlist, "export_with_kicad_cli", export)
     root = tmp_path / "root.kicad_sch"
-    with pytest.raises(InputError, match=f"The netlist of kicad-cli for {root} is not valid XML"):
+    with pytest.raises(
+        InputError, match=f"The netlist of kicad-cli for {re.escape(str(root))} is not valid XML"
+    ):
         asyncio.run(netlist.current_netlist(tmp_path / "child.kicad_sch"))
     assert sources == [root]
 

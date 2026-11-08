@@ -7,6 +7,7 @@ spike/kicad-versions/schematic_versions_check.py compares the check with KiCad 8
 """
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -226,7 +227,10 @@ def test_nightly_build(tmp_path, monkeypatch):
         "version than 20260306 of KiCad 10.0)." in warning
     )
     set_version(root, "20231120", "20260306")
-    with pytest.raises(Error, match=f"{child} \\(version 20231120\\), the tool|{root}"):
+    with pytest.raises(
+        Error,
+        match=f"{re.escape(str(child))} \\(version 20231120\\), the tool|{re.escape(str(root))}",
+    ):
         check(root, write=True)
     set_version(child, "20231120", "20261025")
     with pytest.raises(Error) as error:

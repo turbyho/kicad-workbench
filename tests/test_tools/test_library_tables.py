@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from kicad_workbench.parsers.sexpr import quote
 from kicad_workbench.utils import library_tables
 from kicad_workbench.utils.kicad_cli import find_kicad_cli
 from kicad_workbench.utils.library_tables import (
@@ -25,8 +26,9 @@ def table(kind: str, *rows: str) -> str:
 
 
 def lib(name: str, uri: str, kind_type: str = "KiCad", flags: str = "") -> str:
+    # The URI as KiCad writes it: a backslash of a Windows path is escaped.
     return (
-        f'(lib (name "{name}")(type "{kind_type}")(uri "{uri}")(options "")'
+        f'(lib (name "{name}")(type "{kind_type}")(uri {quote(str(uri))})(options "")'
         f'(descr "{name} symbols"){flags})'
     )
 

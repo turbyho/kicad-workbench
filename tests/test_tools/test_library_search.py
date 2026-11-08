@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.parsers import lib_symbols
+from kicad_workbench.parsers.sexpr import quote
 from kicad_workbench.tools import library as library_tools
 from kicad_workbench.utils import library_index, library_tables, user_files
 from kicad_workbench.utils.kicad_cli import get_kicad_version
@@ -546,8 +547,10 @@ def make_tables(tmp_path, monkeypatch) -> dict:
     )
 
     def lib(name, uri, flags="", kind_type="KiCad"):
+        # The URI as KiCad writes it: a backslash of a Windows path is escaped.
         return (
-            f'(lib (name "{name}")(type "{kind_type}")(uri "{uri}")(options "")(descr ""){flags})'
+            f'(lib (name "{name}")(type "{kind_type}")(uri {quote(str(uri))})(options "")'
+            f'(descr ""){flags})'
         )
 
     (config / "10.0" / "sym-lib-table").write_text(
@@ -713,7 +716,7 @@ class TestSearchTools:
         )
         (tmp_path / "config" / "10.0" / "fp-lib-table").write_text(
             f'(fp_lib_table\n\t(version 7)\n\t(lib (name "Resistor_SMD")(type "KiCad")'
-            f'(uri "{pretty}")(options "")(descr ""))\n)\n',
+            f'(uri {quote(str(pretty))})(options "")(descr ""))\n)\n',
             encoding="utf-8",
         )
         out = await library_tools.search_library_footprints("0603 resistor")

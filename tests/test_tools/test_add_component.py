@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_workbench.parsers.sexpr import parse
+from kicad_workbench.parsers.sexpr import parse, quote
 from kicad_workbench.tools import schematic_editor
 
 from .installed_kicad import write_schematic
@@ -151,7 +151,8 @@ class TestRefusal:
         ],
     )
     def test_library_that_the_tool_cannot_use(self, libs, rows, message):
-        rows = tuple(r.replace("{dir}", str(libs["dir"])) for r in rows)
+        # The folder as KiCad writes it in the quoted URI (a Windows backslash escaped).
+        rows = tuple(r.replace("{dir}", quote(str(libs["dir"]))[1:-1]) for r in rows)
         libs["table"].write_text(table(*rows), encoding="utf-8")
         sch = write_schematic(libs["board"], 20260306)
         before = sch.read_text(encoding="utf-8")

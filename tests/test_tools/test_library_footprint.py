@@ -121,8 +121,13 @@ class TestModelPaths:
 
     def test_absolute_path_with_no_file_below_the_project(self, places):
         # KiCad joins the project directory and the absolute name as text
-        # (model_paths_check.py: KiCad 8, 9 and 10 find this file).
+        # (model_paths_check.py: KiCad 8, 9 and 10 find this file on Linux).
         name = places["alias"] / "x.step"
+        if os.name == "nt":
+            # "C:\\project\\C:\\...": a second volume makes a name that is not a
+            # file, thus the joined name finds nothing.
+            assert resolve(places, str(name)).state == "not found"
+            return
         model = write(Path(f"{places['project']}{os.sep}{name}"))
         assert resolve(places, str(name)).path == model
 

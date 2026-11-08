@@ -2,7 +2,7 @@
 
 Each release of KiCad Workbench, with the changes for the user.
 
-## 0.1.0 (not released yet)
+## 0.1.0 (2026-11-08)
 
 KiCad Workbench is an MCP server that lets an AI agent work with KiCad 8, 9 and 10
 projects. The agent reads schematics, boards and libraries, runs the checks of KiCad,

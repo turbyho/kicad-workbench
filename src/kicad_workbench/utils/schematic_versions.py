@@ -201,15 +201,27 @@ def _written_text(kicad: str, written: Written) -> str:
     )
 
 
-def _newer_error(kicad: str, newer: list[tuple[Path, int]], written: Written) -> str:
+def _newer_error(
+    kicad: str,
+    newer: list[tuple[Path, int]],
+    written: Written,
+    project: Path,
+    loaded: _ProjectFiles,
+) -> str:
     newest = max(version for _file, version in newer)
     release = next((r for r in RELEASES if r.schematic >= newest), None)
-    which = f"KiCad {release.name} or later" if release else "the KiCad that saved them"
+    places = []
+    if any(file != loaded.alone for file, _version in newer):
+        places.append(f"the project {project}" if project.is_file() else str(loaded.root))
+    if any(file == loaded.alone for file, _version in newer):
+        places.append(str(loaded.alone))
+    step = f"open {' and '.join(places)} in the KiCad that saved the files"
+    if release is not None:
+        step += f", or install KiCad {release.name} or later"
     return (
         f"The schematic files {_files_text(newer)} have a newer file version than "
         f"{_written_text(kicad, written)}: KiCad {kicad} cannot open them. Tell the user: "
-        f"open the project in the KiCad that saved the files, or install {which}. Then do "
-        "the work again."
+        f"{step}. Then do the work again."
     )
 
 
@@ -237,17 +249,22 @@ def _conversion_step(
     steps = []
     if any(file != loaded.alone for file, _version in old):
         if project.is_file():
-            steps.append(f"open the project {project} in KiCad {kicad}")
+            steps.append(
+                f"open the project {project} in KiCad {kicad} and open its schematic editor"
+            )
         else:
             steps.append(_open_alone(kicad, loaded.root, "it has no project file"))
     if any(file == loaded.alone for file, _version in old):
         reason = f"it is not a sheet of the project that KiCad {kicad} loads"
         steps.append(_open_alone(kicad, loaded.alone, reason))
+    where = "Then, in the schematic editor"
+    if len(steps) > 1:
+        where = "In each of the two schematic editors"
     text = (
         ", and ".join(steps)
-        + ". In each schematic, make a change (for example, move an item and move it back) "
-        "and save it (File > Save). The save writes each sheet of the hierarchy in the "
-        f"version of KiCad {kicad}, and an older KiCad cannot open the files then."
+        + f". {where}, make one change (for example, move an item and move it back) and "
+        "save the schematic (File > Save). The save writes each sheet of the hierarchy in "
+        f"the version of KiCad {kicad}, and an older KiCad cannot open the files then."
     )
     if version_numbers(kicad)[0] < 10:
         text += (
@@ -294,7 +311,7 @@ def check_schematic_versions(path: Path, write: bool) -> SchematicVersions:
         old = [(file, v) for file, v in versions if v <= written.version]
         unknown = [(file, v) for file, v in versions if v > written.version]
     if newer:
-        raise SchematicVersionError(_newer_error(kicad, newer, written))
+        raise SchematicVersionError(_newer_error(kicad, newer, written, project, loaded))
     lines = []
     if unknown:
         lines.append(

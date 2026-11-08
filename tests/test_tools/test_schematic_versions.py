@@ -59,7 +59,8 @@ def test_older_files_give_a_warning_for_a_read(tmp_path, monkeypatch):
     )
     assert (
         f"To convert them, tell the user: open the project {folder / 'root.kicad_pro'} in "
-        "KiCad 10.0.6. In each schematic, make a change" in result.warning
+        "KiCad 10.0.6 and open its schematic editor. Then, in the schematic editor, make one "
+        "change" in result.warning
     )
     assert result.warning.endswith("an older KiCad cannot open the files then.")
     # The server changes no file.
@@ -110,7 +111,7 @@ async def test_tool_output_starts_with_the_warning(tmp_path, monkeypatch):
     ("kicad", "newer", "step"),
     [
         ("9.0.9", "20260306", "install KiCad 10.0 or later"),
-        ("10.0.6", "20261025", "install the KiCad that saved them"),
+        ("10.0.6", "20261025", "in the KiCad that saved the files. Then do the work"),
     ],
 )
 def test_newer_file_is_an_error(tmp_path, monkeypatch, kicad, newer, step):
@@ -123,6 +124,23 @@ def test_newer_file_is_an_error(tmp_path, monkeypatch, kicad, newer, step):
     message = str(error.value)
     assert message.startswith(f"The schematic files {child} (version {newer}) have a newer")
     assert f"KiCad {kicad} cannot open them" in message and step in message
+    project = folder / "root.kicad_pro"
+    assert f"Tell the user: open the project {project} in the KiCad that saved" in message
+    assert ("install" in message) == (kicad == "9.0.9")
+
+
+def test_newer_schematic_with_no_project_file(tmp_path, monkeypatch):
+    folder = hier(tmp_path)
+    alone = folder / "alone.kicad_sch"
+    text = (folder / "child.kicad_sch").read_text()
+    alone.write_text(text.replace("20231120", "20260306"), encoding="utf-8")
+    installed(monkeypatch, "9.0.9")
+    with pytest.raises(Error) as error:
+        check(alone)
+    assert (
+        f"Tell the user: open {alone} in the KiCad that saved the files, or install KiCad "
+        "10.0 or later." in str(error.value)
+    )
 
 
 @pytest.mark.parametrize("kicad", ["8.0.9", "9.0.9"])
@@ -156,7 +174,8 @@ def test_a_schematic_with_no_project_file(tmp_path, monkeypatch, kicad, entry):
     assert warning.startswith(f"⚠️ The schematic files {alone} (version 20230121) have")
     assert (
         f"tell the user: start the schematic editor of KiCad {kicad} alone (eeschema) and "
-        f"open {alone} (File > Open): it has no project file. In each schematic" in warning
+        f"open {alone} (File > Open): it has no project file. Then, in the schematic editor"
+        in warning
     )
 
 
@@ -183,9 +202,11 @@ def test_kicad_9_loads_no_top_level_sheets_of_kicad_10(tmp_path, monkeypatch):
         f"{other} (version 20231120) have"
     )
     assert (
-        f"tell the user: open the project {project} in KiCad 9.0.9, and start the schematic "
+        f"tell the user: open the project {project} in KiCad 9.0.9 and open its schematic "
+        "editor, and start the schematic "
         f"editor of KiCad 9.0.9 alone (eeschema) and open {other} (File > Open): it is not "
-        "a sheet of the project that KiCad 9.0.9 loads. In each schematic" in warning
+        "a sheet of the project that KiCad 9.0.9 loads. In each of the two schematic editors"
+        in warning
     )
     # KiCad 10 loads the two top-level sheets.
     loaded = schematic_versions._project_files(project, 10, other)

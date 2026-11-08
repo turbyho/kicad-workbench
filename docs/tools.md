@@ -12,13 +12,15 @@ netlist file of `generate_netlist`.
 ## Exact and heuristic tools
 
 Most tools give the result of KiCad: they use kicad-cli or `pcbnew`, or the rules of
-the KiCad source code for the file version. A schematic file, a board or a library of
+the KiCad source code for the installed KiCad. They read a file as the installed KiCad
+loads it: the format follows the file version only where the parser of KiCad branches
+on it. A schematic file, a board or a library of
 an older version than the installed KiCad gives a warning with the step for the user,
 and an edit tool refuses an older schematic (the README, "File versions"). The search
 tools give no item of a library file that the installed KiCad cannot read (a newer
-file). Some tools use heuristics: they find a
-component type from its value or reference, or a differential pair from the names
-of two nets. These tools are marked "heuristic"
+file). Some tools use heuristics: they find a component type from its value or
+reference, a group of a net (power, interface, signal) from its name, or a
+differential pair from the names of two nets. These tools are marked "heuristic"
 below. Use their result as a start for a review, not as a fact.
 
 ## Schematics
@@ -26,9 +28,9 @@ below. Use their result as a start for a review, not as a fact.
 | Tool | What it does |
 |---|---|
 | `get_schematic_info(file_path)` | The title block, the counts of components and nets, the components by reference prefix, and the sheets |
-| `list_schematic_components(file_path, filter_type?, filter_value?, filter_dnp?)` | The components, with a filter by type, value or DNP |
-| `list_schematic_nets(file_path, filter_power?)` | The nets, optionally only the power nets |
-| `search_symbols(file_path, pattern, search_fields?)` | The symbols whose reference, value or library ID matches a regular expression |
+| `list_schematic_components(file_path, filter_type?, filter_value?, filter_dnp?)` | The components, with a filter by the start of the reference (for example "R" or "U"), by value or by DNP |
+| `list_schematic_nets(file_path, filter_power?)` | The nets of the labels and the power symbols of one file. A net with no label of a sub-sheet needs the full hierarchy (the netlist tools). `filter_power` gives only the nets whose name has "gnd", "vcc", "vdd", "vss", "+" or "-" (heuristic) |
+| `search_symbols(file_path, pattern, search_fields?)` | The symbols whose reference, value or library ID matches a regular expression (the table has at most 50 rows) |
 | `get_symbol_details(file_path, reference)` | The fields and the pins of one component of the project. The pins (number, name, electrical type) come from the netlist of kicad-cli. `trace_netlist_connection` gives the net of each pin |
 | `search_components_by_type(file_path, component_type, search_in_subsheets?)` | Components of a type, for example "sensor" or "display" (heuristic: value, footprint and nets), in the file and in all sheets below it |
 
@@ -42,7 +44,7 @@ version of KiCad, whose rules give the references.
 
 | Tool | What it does |
 |---|---|
-| `analyze_hierarchical_nets(file_path, filter_pattern?, show_hierarchy?)` | The nets of all sheets (the netlist of kicad-cli) by group, and the sheet paths |
+| `analyze_hierarchical_nets(file_path, filter_pattern?, show_hierarchy?)` | The nets of all sheets (the netlist of kicad-cli) by group, and the sheet paths. The groups power, interface and signal come from the net names (heuristic). The answer gives at most 20 power, 30 interface and 20 signal nets, each with its number of pins |
 | `trace_hierarchical_connection(file_path, reference, pin_number?)` | The sheet and the connections of a component, at each level of the hierarchy |
 
 ## Netlist
@@ -51,15 +53,16 @@ version of KiCad, whose rules give the references.
 |---|---|
 | `generate_netlist(schematic_path)` | Makes the netlist of the schematic with kicad-cli, and gives its path |
 | `trace_netlist_connection(netlist_path, reference, pin_number?)` | The nets of the pins of a component, and the pins on each net |
-| `get_netlist_nets(netlist_path, filter_pattern?)` | The nets of the netlist with their pins |
+| `get_netlist_nets(netlist_path, filter_pattern?)` | The nets of the netlist with their pins (the first 10 pins of each net) |
 | `get_netlist_components(netlist_path, filter_ref?)` | The components of the netlist with their nets |
 
 The netlist of kicad-cli is the most exact source for the connections. Use it before
 the schematic tools when the connection is important.
 
 The netlist tools above read the file of `generate_netlist`: make it again after a
-change of the schematic. The pin conflict tool, the hierarchy and search tools, and
-`get_symbol_details`, make the netlist with kicad-cli at each call. Thus they always
+change of the schematic. The pin conflict tool, the hierarchy tools,
+`search_components_by_type` and `get_symbol_details` make the netlist with kicad-cli
+at each call. Thus they always
 give the current state of the schematic, and they need kicad-cli. For a large
 project, each call takes some seconds.
 
@@ -69,7 +72,8 @@ top-level sheet needs kicad-cli of KiCad 10.0.7 or later, which loads all top-le
 sheets: kicad-cli 10.0.0 to 10.0.6 loads only one, thus these tools give an error, not
 a result with some sheets.
 
-The hierarchy and search tools get the components from the netlist: each component
+The hierarchy tools and `search_components_by_type` get the components from the
+netlist: each component
 of each sheet path, at each level of the hierarchy, with the reference of that path
 (a sheet that the hierarchy uses two times gives two references). The netlist has
 no power symbols and no symbol with no library symbol.
@@ -77,10 +81,10 @@ no power symbols and no symbol with no library symbol.
 ## Boards
 
 These tools import `pcbnew` in the server process. Without `pcbnew` (but with KiCad
-installed), they read the board file as text, with no design rules and no board
-outline, and each answer has the warning "pcbnew not available" (see
-[installation.md](installation.md)). With no KiCad, they give the error "KiCad is not
-installed".
+installed), they read the board file as text, and each answer has the warning
+"pcbnew not available" with the limits of the tool (see
+[installation.md](installation.md), "Requirements"). With no KiCad, they give the
+error "KiCad is not installed".
 When `pcbnew` cannot read the board (for example a board of a newer KiCad), the
 tools give an error: the text reader does not know the rules of such a board. The
 text reader reads only the boards of KiCad 8 to 10; an older board needs `pcbnew`, or
@@ -93,7 +97,7 @@ a save in KiCad 8 or later.
 | `find_tracks_by_net(file_path, net_name)` | The tracks and vias of one net, with their lengths and widths |
 | `analyze_pcb_nets(file_path)` | The distribution of track widths and vias, the nets by length, the layers |
 | `analyze_pcb_signal_integrity(file_path, net_name?)` | Differential pairs and their length difference (heuristic: the pairs come from the net names, for example `USB_P` and `USB_N`), RF tracks, the longest signal nets |
-| `analyze_pcb_power_integrity(file_path)` | The copper zones, the routing of the power nets, the area of the ground zones |
+| `analyze_pcb_power_integrity(file_path)` | The copper zones of the power and ground nets (count, layers, filled state), and the routing of the power nets (heuristic: the power and ground nets come from the net names) |
 
 ## Checks
 
@@ -130,14 +134,17 @@ index in the cache folder of the user is used until a library file changes.
 
 | Tool | What it does |
 |---|---|
-| `export_bom(schematic_path, output_path?, fields?, group_by?, exclude_dnp?, variant?, all_variants?)` | The BOM of the full project, as `kicad-cli sch export bom` makes it: the selected fields (default: all), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or a CSV file for each variant). It gives an error when the units of one package have a different Value, MPN, Value_Confirmed or MPN_Confirmed |
+| `export_bom(schematic_path, output_path?, fields?, group_by?, exclude_dnp?, variant?, all_variants?)` | The BOM of the full project, as `kicad-cli sch export bom` makes it: the selected fields (default: all), one line for each reference or groups, the DNP filter, and the variants of KiCad 10 (one variant, or a CSV file for each variant). When the units of one package have a different Value, MPN, Value_Confirmed or MPN_Confirmed, the answer starts with an error of the design: the BOM and the CSV file are still written, and their line of the package has the values joined with a comma (KiCad 9 and 10) or `-- mixed values --` (KiCad 8) |
 | `check_symbol_fields(schematic_path)` | The check of the confirmed MPNs (Value, MPN, Value_Confirmed, MPN_Confirmed), for a user with no datasheet-lens. See [datasheet-lens.md](datasheet-lens.md) |
 
 ## Edits
 
-The edit tools write the file in the format of its file version, refuse a project with
-a schematic file of an older version than the installed KiCad, and refuse a file that
-KiCad has open. See [editing.md](editing.md).
+The schematic edit tools (`add_component_from_library`, `add_wire`, the label tools)
+and `set_symbol_fields` write the file in the format of its file version, refuse a
+project with a schematic file of an older version than the installed KiCad, and
+refuse a file that KiCad has open. `setup_pcb_layout` gives only a warning for an
+older schematic, because `pcbnew` writes the new board in the version of the installed
+KiCad. `create_kicad_project` makes new files. See [editing.md](editing.md).
 
 | Tool | What it does |
 |---|---|
@@ -155,8 +162,8 @@ KiCad has open. See [editing.md](editing.md).
 | Tool | What it does |
 |---|---|
 | `export_schematic_svg(schematic_path, output_dir?)` | SVG files made by kicad-cli with the full hierarchy: all pages for the root schematic, the pages of its sheet paths for a sub-sheet |
-| `render_pcb(pcb_path, side?, output_path?, width?, height?, quality?, rotate?)` | A 3D view of the board as PNG, made by kicad-cli |
-| `export_pcb_3d(pcb_path, output_path?, board_only?)` | A STEP model of the board, made by kicad-cli |
+| `render_pcb(pcb_path, side?, output_path?, width?, height?, quality?, rotate?)` | A 3D view of the board as PNG or JPEG (the extension of `output_path`), made by kicad-cli of KiCad 9 or later (kicad-cli 8 has no "pcb render") |
+| `export_pcb_3d(pcb_path, output_path?, board_only?)` | A STEP model of the board, made by kicad-cli. A 3D model that kicad-cli did not add gives a warning with the footprint and the reason |
 | `export_gerber(pcb_path, output_dir?)` | Gerber and drill files, made by kicad-cli |
 
 ## Parts registry

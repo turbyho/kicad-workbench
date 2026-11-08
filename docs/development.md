@@ -13,7 +13,9 @@ cd kicad-workbench
 .venv/bin/pip install -e ".[test,dev]"
 ```
 
-The extra `test` has the test tools, the extra `dev` also ruff.
+The extra `test` has the test tools and `hatchling` (a test builds the sdist and the
+wheel). The extra `dev` has the test tools and ruff, with no `hatchling`. Thus install
+the two.
 
 An MCP client can start this install with `.venv/bin/kicad-workbench`. The server
 keeps the modules of its start: after a change of the code, restart the MCP client.
@@ -63,11 +65,13 @@ The tools must give the result that KiCad gives. A small difference is also a de
 3. Read a file as the installed KiCad loads it: the format follows the file version
    only where the parser of that KiCad branches on it. The installed version also
    applies to kicad-cli, the global library tables and the checks that KiCad runs.
-   The server does not convert files (`utils/file_versions.py`,
+   The server does not convert files (`utils/file_versions.py`:
    `with_schematic_versions`, `with_board_versions` and `with_library_versions` on each
-   tool): a schematic, a board or a library of an older version gives a warning with
-   the step for the user, and a tool that writes refuses an older schematic or board. A file of an
-   unknown version, or of a newer version than the installed KiCad, gives an error.
+   tool that reads a schematic, a board or a library item, and `check_library_versions`
+   in the library search): a schematic, a board or a library of an older version
+   gives a warning with the step for the user, and a tool that writes refuses an older
+   schematic or board. A file of an unknown version, or of a newer version than the
+   installed KiCad, gives an error.
    The minimum is KiCad 8.
 4. Compare a new rule with real KiCad 8, 9 and 10. Unit tests alone do not show that a
    rule is correct.

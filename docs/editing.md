@@ -2,10 +2,14 @@
 
 KiCad has no Python interface for schematics in KiCad 8, 9 and 10. Thus the edit tools
 write the S-expression file of the schematic themselves, with the rules of the KiCad
-source code for the file version. They write the file in that format. A project with a
-schematic file of an older version than the installed KiCad is an error for an edit
+source code for the installed KiCad, in the format of the file version. A project with
+a schematic file of an older version than the installed KiCad is an error for an edit
 tool: KiCad saves an edit of the file in its own version, thus the user converts the
-files in KiCad first (see the README, "File versions"). Use the schematic editor of
+files in KiCad first (see the README, "File versions"). A file of a newer version is
+an error too. Thus the file that an edit tool writes has the version of the installed
+KiCad. With a nightly build (10.99), the server does not know the version that the
+build writes: a file of a version after the newest release gives a warning, and the
+tool writes it in its file version. Use the schematic editor of
 KiCad for the design work, and the edit tools for well-defined changes: a symbol from
 a library, a wire, a label, the fields of a symbol.
 
@@ -18,7 +22,9 @@ PCB editor before the edit, and open the file again after the edit.
 
 - After a crash of KiCad, the lock file stays and the tools refuse the write. Open
   the file in KiCad and close it again, or delete the lock file.
-- The schematic editor locks only the root schematic. To find the root schematic of a
+- The schematic editor locks the schematic that it opens: the root schematic of the
+  project, or in KiCad 10 also the first top-level sheet of the project. A top-level
+  sheet that KiCad opens alone has its own lock. To find the root schematic of a
   sub-sheet, the tools read the sheet hierarchy of the projects in the folder of the
   sub-sheet and in its parent folders. They cannot find the root schematic of a
   sub-sheet outside the folder tree of its project (for example
@@ -54,8 +60,10 @@ The connection grid is `schematic.connection_grid_size` of the project file (def
   a connection point of the sheet does not move, also when it is off the grid: a pin,
   a wire end, a bus entry end, a junction, a no-connect flag, a label or a sheet pin.
   For a label, also a point on a wire or a bus. Thus a new wire or label connects to
-  an item off the grid. A horizontal or vertical wire segment stays horizontal or
-  vertical.
+  an item off the grid. A point of `add_wire` in the middle of a wire moves only along
+  that wire. A horizontal or vertical wire segment stays horizontal or vertical. A
+  symbol does not move when the move to the grid takes one of its pins away from a
+  connection point of the sheet: it stays at x, y, and the output tells it.
 - `False`: the tool uses the positions as they are.
 
 The output gives the position that the tool writes, and each pin or wire end off the
@@ -64,15 +72,17 @@ grid. It does not tell about these points when the project ignores the ERC check
 ## Wires and junctions
 
 `add_wire` and `add_component_from_library` add junctions as the schematic editor of
-KiCad does, with the rules of the file version:
+KiCad does, with the rules of the installed KiCad:
 
 - A junction goes where three or more wire directions meet, for example a wire end
   or a pin in the middle of a wire. The wire there splits into two wires.
 - Before that, the tool merges the segments of a new wire that are on one straight
   line, and merges a new wire with a wire on the same straight line that it touches
   or overlaps.
-- The tool removes the part of a wire between two pins of a symbol (KiCad:
-  `TrimWire`).
+- For a new wire, the tool removes its part between the two pins of a symbol (or
+  unit) with at most two connection points (KiCad: `TrimWire`). For a new symbol, it
+  removes the part of a wire between two of its pins (KiCad:
+  `TrimOverLappingWires`). These steps change wires, not buses.
 - A KiCad wire has two points. `add_wire` adds one wire for each segment.
 
 The tool refuses the change in these cases:

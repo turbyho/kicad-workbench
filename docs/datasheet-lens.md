@@ -32,8 +32,11 @@ with an MPN that the user never confirmed is a change of its own.
 
 A general value with no MPN (`10k`) has no selected part. `MPN` = `-` tells that the
 symbol needs no part (for example a test point). The units of one package (`U1A` and
-`U1B`) must have the same `Value`, `MPN`, `Value_Confirmed` and `MPN_Confirmed`:
-`export_bom` gives an error when they do not.
+`U1B`) must have the same `Value`, `MPN`, `Value_Confirmed` and `MPN_Confirmed`.
+When they do not, the answer of `export_bom` starts with an error of the design. The
+BOM and the CSV file are still written. Their line of the package has the values of
+the units joined with a comma (KiCad 9 and 10: the joined MPNs look like an MPN and
+its alternative), or `-- mixed values --` (KiCad 8).
 
 The old convention put the MPNs in the parentheses of `Value`
 (`2N7002 (2N7002LT1G)`). For a symbol of the old convention (no `MPN_Confirmed`),
@@ -74,8 +77,10 @@ or have no stock.
 ### Without datasheet-lens
 
 `check_symbol_fields` of kicad-workbench does the check of step 4 with the same model
-and the same messages as `project_check`. It reads the BOM of kicad-cli of the
-default variant and of each variant. It does not check the datasheets.
+and the same messages as `project_check` of a datasheet-lens with the model of the four
+fields (2026-11-07 or later). `check_symbol_fields` reads the BOM of kicad-cli of the
+default variant and of each variant. It does not check the datasheets. An older
+datasheet-lens reads the MPNs from the parentheses of `Value`.
 
 ## Checks against the datasheet
 

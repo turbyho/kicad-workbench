@@ -427,6 +427,9 @@ class TestKiCadOnErrors:
         np.copy_file(np.rules("9.0.9"), same, same)
         assert same.read_text(encoding="utf-8") == "content"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows removes a dot at the end of a file name"
+    )
     def test_a_trailing_dot_stays(self, tmp_path):
         tpl = tmp_path / "T"
         write(tpl / "T.kicad_pro")

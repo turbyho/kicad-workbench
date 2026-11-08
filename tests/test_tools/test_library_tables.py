@@ -18,6 +18,8 @@ from kicad_workbench.utils.library_tables import (
     library_rows,
 )
 
+from .symbol_tables import row
+
 
 def table(kind: str, *rows: str) -> str:
     head = {"symbol": "sym_lib_table", "footprint": "fp_lib_table"}[kind]
@@ -25,10 +27,7 @@ def table(kind: str, *rows: str) -> str:
 
 
 def lib(name: str, uri: str, kind_type: str = "KiCad", flags: str = "") -> str:
-    return (
-        f'(lib (name "{name}")(type "{kind_type}")(uri "{uri}")(options "")'
-        f'(descr "{name} symbols"){flags})'
-    )
+    return row(name, uri, flags, kind_type, descr=f"{name} symbols")
 
 
 @pytest.fixture(autouse=True)

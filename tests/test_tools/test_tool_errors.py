@@ -6,6 +6,7 @@ gives its exit code and its output, not a guess.
 """
 
 import asyncio
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -126,7 +127,9 @@ class TestWriteNetlist:
 def test_a_netlist_that_is_not_xml(tmp_path):
     path = tmp_path / "bad.xml"
     path.write_text("not XML", encoding="utf-8")
-    with pytest.raises(ValueError, match=f"The netlist {path} is not valid XML: syntax error"):
+    with pytest.raises(
+        ValueError, match=f"The netlist {re.escape(str(path))} is not valid XML: syntax error"
+    ):
         NetlistParser(str(path)).get_nets()
     result = asyncio.run(netlist.get_netlist_nets(str(path)))
     assert result.startswith(f"❌ The netlist {path} is not valid XML: syntax error"), result

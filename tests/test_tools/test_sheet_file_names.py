@@ -9,6 +9,7 @@ directory. The rules for Windows come from the source of wxWidgets 3.2.
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -202,7 +203,7 @@ class TestLoad:
         root = schematic(
             tmp_path / "t.kicad_sch", ROOT, sheet(1, "T", "~nobody_kw_test/s.kicad_sch")
         )
-        with pytest.raises(SheetFileError, match=f"{root}: The sheet file name"):
+        with pytest.raises(SheetFileError, match=f"{re.escape(str(root))}: The sheet file name"):
             load(root)
         sheets = load(root, tolerant=True)
         assert [(p.shown, p.screen is not None) for p in sheets.paths] == [
@@ -305,6 +306,12 @@ class TestReviewFindings:
         assert any("has no UUID" in problem for problem in problems), problems
 
 
+def native(folder: Path, *parts: str) -> str:
+    """The text of wxFileName::GetFullPath for an absolute name: the components with
+    the separator of the system, with no change of "." (an absolute name stays)."""
+    return os.sep.join([str(folder), *parts])
+
+
 def test_the_info_of_two_screens_with_different_sheets(tmp_path, monkeypatch):
     # sub.kicad_sch has two names. Under the first, its sheet "Up" loads
     # "<dir>/x/../t.kicad_sch" (no ancestor of t.kicad_sch: a text of its own); under
@@ -328,11 +335,14 @@ def test_the_info_of_two_screens_with_different_sheets(tmp_path, monkeypatch):
     sub = schematic(tmp_path / "sub.kicad_sch", SUB, sheet(3, "Up", f"{base}/x/../t.kicad_sch"))
     result = asyncio.run(schematic_tool.get_schematic_info(str(sub)))
     assert "⚠️ KiCad loads this file under 2 names" in result, result
-    assert f"## Sheet symbols of the screen {base}/sub.kicad_sch\n- Up:" in result
-    assert f"## Sheet symbols of the screen {base}/./sub.kicad_sch\n- Up:" in result
+    # GetFullPath writes the separator of the system ("\\" on Windows).
+    assert f"## Sheet symbols of the screen {native(tmp_path, 'sub.kicad_sch')}\n- Up:" in result
+    assert (
+        f"## Sheet symbols of the screen {native(tmp_path, '.', 'sub.kicad_sch')}\n- Up:" in result
+    )
     assert result.count("(the file holds its own ancestor: an empty sheet in KiCad)") == 1
     # The message names the screen with the file name of KiCad ("/./" stays).
-    assert f"The sheet 'Up' of {base}/./sub.kicad_sch holds its own ancestor" in result
+    assert f"The sheet 'Up' of {native(tmp_path, '.', 'sub.kicad_sch')} holds its own" in result
 
 
 def test_a_parse_error_names_the_screen_with_the_file_name_of_kicad(tmp_path):
@@ -340,14 +350,15 @@ def test_a_parse_error_names_the_screen_with_the_file_name_of_kicad(tmp_path):
     base = tmp_path.as_posix()
     root = schematic(tmp_path / "t.kicad_sch", ROOT, sheet(1, "B", f"{base}/./sub.kicad_sch"))
     (tmp_path / "sub.kicad_sch").write_bytes(b"(kicad_sch (version 20260306) \xff)\n")
-    name = f"{base}/./sub.kicad_sch"
+    # GetFullPath writes the separator of the system ("\\" on Windows).
+    name = native(tmp_path, ".", "sub.kicad_sch")
     with pytest.raises(KicadFileError) as error:
         load(root)
     assert str(error.value).count(name) == 1, error.value
-    assert f"{base}/sub.kicad_sch" not in str(error.value)
+    assert native(tmp_path, "sub.kicad_sch") not in str(error.value)
     problems = load(root, tolerant=True).problems
     assert len(problems) == 1 and problems[0].count(name) == 1, problems
-    assert f"{base}/sub.kicad_sch" not in problems[0]
+    assert native(tmp_path, "sub.kicad_sch") not in problems[0]
 
 
 class TestTopLevelSheetFiles:

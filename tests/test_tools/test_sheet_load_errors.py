@@ -7,6 +7,8 @@ a sheet with no name). The server does not model the part of a file: an error (u
 decision, 2026-11-07). A missing file is an empty sheet.
 """
 
+import re
+
 import pytest
 
 from kicad_workbench.errors import KicadFileError, KicadParseError
@@ -67,7 +69,7 @@ def test_kicad_9_and_a_sheet_with_one_field_in_a_sub_sheet(tmp_path):
         sub.read_text(encoding="utf-8").replace("\t(symbol\n", sheet + "\t(symbol\n", 1),
         encoding="utf-8",
     )
-    with pytest.raises(KicadFileError, match=f"{sub}: A sheet has 1 properties"):
+    with pytest.raises(KicadFileError, match=f"{re.escape(str(sub))}: A sheet has 1 properties"):
         placed_components(path, "9.0.9", project_wide=True)
 
 
@@ -79,5 +81,7 @@ def test_a_sub_sheet_of_an_old_version_names_the_file(tmp_path):
         sub.read_text(encoding="utf-8").replace("(version 20260306)", "(version 20230121)"),
         encoding="utf-8",
     )
-    with pytest.raises(KicadFileError, match=f"{sub}: .*older than the version of KiCad 8"):
+    with pytest.raises(
+        KicadFileError, match=f"{re.escape(str(sub))}: .*older than the version of KiCad 8"
+    ):
         placed_components(path, "10.0.7", project_wide=True)

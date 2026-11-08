@@ -7,6 +7,9 @@ not use UTF-8, also when the machine of the test uses UTF-8:
   cannot change it. The CI runner has cp1252.
 - On Linux the process gets a locale that is not UTF-8. The CI workflow
   generates zh_CN.GBK, the character set of a Chinese system.
+- On macOS the process gets a locale that is not UTF-8 (the system has
+  zh_CN.GB18030 and en_US.ISO8859-1). Python always uses UTF-8 for the file
+  names and the arguments on macOS, thus the locale changes only the output.
 
 Python turns on its UTF-8 mode in the C locale, thus the C locale cannot
 show the problem. The process runs with the UTF-8 mode off or on (``-X
@@ -25,7 +28,8 @@ import sys
 
 import pytest
 
-LOCALES = ["zh_CN.GBK", "zh_CN.GB18030", "ar_AE.ISO-8859-6", "en_US.ISO-8859-1"]
+# macOS has "en_US.ISO8859-1" (no hyphen after "ISO").
+LOCALES = ["zh_CN.GBK", "zh_CN.GB18030", "ar_AE.ISO-8859-6", "en_US.ISO-8859-1", "en_US.ISO8859-1"]
 _PROBE = "import locale; print(locale.getpreferredencoding(False))"
 
 
@@ -58,10 +62,11 @@ def non_utf8_env() -> tuple[dict[str, str], str]:
 def can_name(text: str, encoding: str, utf8_mode: bool) -> bool:
     """Return True if a file name or an argument can hold the text.
 
-    Windows uses Unicode for file names and arguments. Other systems use the
-    bytes of the locale encoding, or UTF-8 in the UTF-8 mode of Python.
+    Windows uses Unicode for file names and arguments, and Python uses UTF-8
+    for them on macOS. Other systems use the bytes of the locale encoding, or
+    UTF-8 in the UTF-8 mode of Python.
     """
-    if sys.platform == "win32" or utf8_mode:
+    if sys.platform in ("win32", "darwin") or utf8_mode:
         return True
     try:
         text.encode(encoding)

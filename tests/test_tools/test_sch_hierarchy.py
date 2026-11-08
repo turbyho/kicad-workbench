@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sys
 import uuid as uuidlib
 from pathlib import Path
 
@@ -168,6 +169,7 @@ class TestSheetFields:
         write(tmp_path / "fake.kicad_sch")
         assert sheet_files(root) == [root]
 
+    @pytest.mark.skipif(sys.platform == "win32", reason='Windows does not allow " in a file name')
     def test_escaped_quote_and_parenthesis_in_strings(self, tmp_path):
         root = project(tmp_path, "board")
         root.write_text(sch('dir (1)/a \\"b\\".kicad_sch'), encoding="utf-8")

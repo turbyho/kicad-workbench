@@ -19,11 +19,12 @@ def table(*rows: str) -> str:
     return "(sym_lib_table\n\t(version 7)\n" + "".join(f"\t{row}\n" for row in rows) + ")\n"
 
 
-def row(name: str, uri: Path | str, flags: str = "", kind: str = "KiCad") -> str:
-    """One (lib ...) row of a library table."""
+def row(name: str, uri: Path | str, flags: str = "", kind: str = "KiCad", descr: str = "") -> str:
+    """One (lib ...) row of a library table, as KiCad writes it (quote escapes the
+    backslashes of a Windows path). The tests make each table row with this function."""
     return (
         f"(lib (name {quote(name)})(type {quote(kind)})(uri {quote(str(uri))})"
-        f'(options "")(descr ""){flags})'
+        f'(options "")(descr {quote(descr)}){flags})'
     )
 
 

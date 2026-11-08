@@ -379,8 +379,12 @@ class TestEnglishSettings:
     def test_run_gives_the_copy_to_kicad_cli(self, settings, monkeypatch):
         monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: sys.executable)
         monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: "10.0.6")
+        # The child writes as kicad-cli does (decode_output): UTF-8 on Windows,
+        # else the character set of its LC_CTYPE.
         code = (
-            "import json, os, pathlib; home = pathlib.Path(os.environ['KICAD_CONFIG_HOME']); "
+            "import json, os, pathlib, sys\n"
+            "if sys.platform == 'win32': sys.stdout.reconfigure(encoding='utf-8')\n"
+            "home = pathlib.Path(os.environ['KICAD_CONFIG_HOME']); "
             "print(home); print(json.loads((home / '10.0' / 'kicad_common.json')"
             ".read_text(encoding='utf-8'))['system']['language'])"
         )

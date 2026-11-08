@@ -19,6 +19,7 @@ from kicad_workbench.utils.library_index import LibraryItem, library_items, sear
 from kicad_workbench.utils.library_tables import LibraryRow
 
 from .file_times import move_clock_forward
+from .symbol_tables import row as table_row
 from .test_sch_hierarchy import sch
 
 
@@ -546,9 +547,7 @@ def make_tables(tmp_path, monkeypatch) -> dict:
     )
 
     def lib(name, uri, flags="", kind_type="KiCad"):
-        return (
-            f'(lib (name "{name}")(type "{kind_type}")(uri "{uri}")(options "")(descr ""){flags})'
-        )
+        return table_row(name, uri, flags, kind_type)
 
     (config / "10.0" / "sym-lib-table").write_text(
         "(sym_lib_table\n\t(version 7)\n"
@@ -712,8 +711,7 @@ class TestSearchTools:
             footprint("R_0603_1608Metric", '"Resistor SMD 0603"', '"resistor"'), encoding="utf-8"
         )
         (tmp_path / "config" / "10.0" / "fp-lib-table").write_text(
-            f'(fp_lib_table\n\t(version 7)\n\t(lib (name "Resistor_SMD")(type "KiCad")'
-            f'(uri "{pretty}")(options "")(descr ""))\n)\n',
+            f"(fp_lib_table\n\t(version 7)\n\t{table_row('Resistor_SMD', pretty)}\n)\n",
             encoding="utf-8",
         )
         out = await library_tools.search_library_footprints("0603 resistor")

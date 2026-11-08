@@ -141,18 +141,24 @@ class TestRefusal:
     @pytest.mark.parametrize(
         "rows, message",
         [
-            ((), 'no symbol library "Device" is in the global library table of KiCad 10.0.6'),
-            ((row("Device", "{dir}/Device.kicad_sym", "(disabled)"),), ": disabled."),
-            ((row("Device", "{dir}/Device.kicad_sym", kind="Legacy"),), 'has the type "Legacy"'),
+            (
+                lambda d: (),
+                'no symbol library "Device" is in the global library table of KiCad 10.0.6',
+            ),
+            (lambda d: (row("Device", d / "Device.kicad_sym", "(disabled)"),), ": disabled."),
+            (
+                lambda d: (row("Device", d / "Device.kicad_sym", kind="Legacy"),),
+                'has the type "Legacy"',
+            ),
             # A disabled row gives its state first, as in list_libraries.
-            ((row("Device", "{dir}/old.lib", "(disabled)", kind="Legacy"),), ": disabled."),
-            ((row("Device", "{dir}/Gone.kicad_sym"),), ": missing."),
-            ((row("Device", "${NO_SUCH_VAR}/x.kicad_sym"),), "variable with no value"),
+            (lambda d: (row("Device", d / "old.lib", "(disabled)", kind="Legacy"),), ": disabled."),
+            (lambda d: (row("Device", d / "Gone.kicad_sym"),), ": missing."),
+            (lambda d: (row("Device", "${NO_SUCH_VAR}/x.kicad_sym"),), "variable with no value"),
         ],
     )
     def test_library_that_the_tool_cannot_use(self, libs, rows, message):
-        rows = tuple(r.replace("{dir}", str(libs["dir"])) for r in rows)
-        libs["table"].write_text(table(*rows), encoding="utf-8")
+        # The rows of the folder of the libraries (row quotes the full URI).
+        libs["table"].write_text(table(*rows(libs["dir"])), encoding="utf-8")
         sch = write_schematic(libs["board"], 20260306)
         before = sch.read_text(encoding="utf-8")
         result = add(sch)

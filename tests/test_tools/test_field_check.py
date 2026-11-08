@@ -220,6 +220,9 @@ class TestCheckSymbolFields:
     async def test_no_confirmed_fields(self, project):
         header = '"Reference","Value","MPN"\n'
         project["state"]["version"] = "9.0.9"
+        # A file of KiCad 9: KiCad 9 cannot load a newer file.
+        sch = project["directory"] / "board.kicad_sch"
+        sch.write_text(sch.read_text().replace("20250922", "20250114"), encoding="utf-8")
         project["state"]["csv"] = {"": header + '"R1","10k (A)",""\n"R2","10k","B"\n'}
         out = await check(project)
         assert len(project["state"]["calls"]) == 1  # KiCad 9: no variants

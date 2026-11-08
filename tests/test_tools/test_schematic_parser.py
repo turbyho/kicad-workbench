@@ -156,7 +156,7 @@ def test_kicad6_sheet_fields():
     from kicad_workbench.parsers.kicad_fields import rules_for_file, sheet_fields
 
     root = parse(SCH)
-    fields = sheet_fields(root.first("sheet"), rules_for_file(root))
+    fields = sheet_fields(root.first("sheet"), rules_for_file(root, 9))
     assert fields == {"Sheetname": "Power", "Sheetfile": "power.kicad_sch"}
 
 
@@ -466,10 +466,11 @@ def test_unknown_alternate_note():
     ],
 )
 def test_pins_of_a_symbol_with_no_definition(tmp_path, kicad, expected):
-    # UpdatePins stops with no m_part: the pins are the (pin ...) items of the file.
+    # UpdatePins stops with no m_part: the pins are the (pin ...) items of the file. A
+    # file of KiCad 8: each KiCad can load it.
     path = tmp_path / "a.kicad_sch"
     path.write_text(
-        '(kicad_sch (version 20250114) (generator "eeschema") (uuid "a0") (lib_symbols)\n'
+        '(kicad_sch (version 20231120) (generator "eeschema") (uuid "a0") (lib_symbols)\n'
         '  (symbol (lib_id "Lib:Gone") (at 0 0 0) (unit 1)\n'
         '    (property "Reference" "U1" (at 0 0 0)) (property "Value" "U" (at 0 0 0))\n'
         '    (pin "~" (uuid "p1")) (pin "2" (uuid "p2") (alternate "X"))))\n',

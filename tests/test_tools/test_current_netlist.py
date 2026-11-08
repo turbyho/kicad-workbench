@@ -222,8 +222,14 @@ def test_the_nets_note_of_the_root_runs_no_kicad_cli(monkeypatch, tmp_path):
     from kicad_workbench.tools import schematic
 
     root = _two_top_level_sheets(tmp_path)
-    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: pytest.fail("version"))
-    result = asyncio.run(schematic.list_schematic_nets(str(root)))
+    # The tool needs only the version of the call (the field rules): with_schematic_versions
+    # sets it, thus no more kicad-cli runs.
+    monkeypatch.setattr(kicad_cli, "run_kicad_cli_sync", lambda *a, **k: pytest.fail("kicad-cli"))
+    token = kicad_cli.set_call_version("10.0.6")
+    try:
+        result = asyncio.run(schematic.list_schematic_nets(str(root)))
+    finally:
+        kicad_cli.reset_call_version(token)
     assert "Note" not in result, result
 
 
@@ -232,8 +238,12 @@ def test_the_nets_note_of_an_other_top_level_sheet(monkeypatch, tmp_path):
     from kicad_workbench.tools import schematic
 
     root = _two_top_level_sheets(tmp_path)
-    monkeypatch.setattr(kicad_cli, "kicad_cli_version_sync", lambda: pytest.fail("version"))
-    result = asyncio.run(schematic.list_schematic_nets(str(tmp_path / "extra.kicad_sch")))
+    monkeypatch.setattr(kicad_cli, "run_kicad_cli_sync", lambda *a, **k: pytest.fail("kicad-cli"))
+    token = kicad_cli.set_call_version("10.0.6")
+    try:
+        result = asyncio.run(schematic.list_schematic_nets(str(tmp_path / "extra.kicad_sch")))
+    finally:
+        kicad_cli.reset_call_version(token)
     assert (
         "`extra.kicad_sch` is not the root schematic of its project. The nets with no "
         "label need the full hierarchy: they are not here. Use `generate_netlist` on "

@@ -21,7 +21,7 @@ from ..parsers.sheet_list import EMPTY_REASONS
 from ..server import mcp
 from ..utils.kicad_cli import get_kicad_version
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
-from ..utils.schematic_versions import with_schematic_versions
+from ..utils.schematic_versions import NO_KICAD, with_schematic_versions
 from ..utils.tool_errors import error_answer
 from .netlist import NetlistError, netlist_of
 
@@ -454,8 +454,11 @@ async def list_schematic_nets(
         Formatted list of nets
     """
     try:
-        parser = SchematicParser(file_path)
-        nets = parser.get_nets()
+        kicad = await get_kicad_version()
+        if kicad is None:
+            # The field rules come from the installed KiCad (kicad_fields).
+            return f"❌ {NO_KICAD}"
+        nets = await asyncio.to_thread(lambda: SchematicParser(file_path, kicad).get_nets())
 
         # Filter for power nets if requested
         if filter_power:

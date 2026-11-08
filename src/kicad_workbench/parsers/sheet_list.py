@@ -509,7 +509,7 @@ def _read_screen(name: KicadFileName, kicad: int | None) -> tuple[Screen, str | 
     file = Path(name.text)
     data, stamp = read_stamped(file)
     root = parse(decode_as_kicad(data, name.text))
-    rules = rules_for_file(root)
+    rules = rules_for_file(root, kicad)
     screen = Screen(file, name, root, stamp, schematic_version(root), rules, definitions(root))
     screen.kiids = parsed_kiids(root, kicad if kicad is not None else rules.kicad)
     screen.sheets = [
@@ -552,11 +552,12 @@ def _tolerant_file(data: bytes, key: str, kicad: int | None) -> _TolerantFile:
     root = parse(decode_as_kicad(data, key))
     version = file_version(root) or 0
     try:
-        all_rules = [rules_for_file(root)]
+        all_rules = [rules_for_file(root, kicad)]
         note = ""
     except KicadFileError as e:
-        # The KiCad that loads the file is not known: the kicad-cli of PATH is not
-        # always the KiCad of the user. The sheets of the two rule sets.
+        # The server does not know the version of the file, thus not the rules of
+        # the KiCad that saved it (or the KiCad has no rules). The sheets of the two
+        # rule sets.
         all_rules = [FieldRules(9, version), FieldRules(10, version)]
         note = f"{e} The sheets are the sheets of the rules of KiCad 8, 9 and 10."
     kiids = parsed_kiids(root, kicad if kicad is not None else all_rules[-1].kicad)

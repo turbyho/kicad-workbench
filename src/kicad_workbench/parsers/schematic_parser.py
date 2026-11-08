@@ -23,6 +23,7 @@ from .kicad_versions import (
     KicadFileError,
     file_text,
     kicad_release,
+    version_numbers,
     version_triple,
 )
 from .lib_symbols import pin_number
@@ -587,9 +588,11 @@ class SchematicParser:
 
         Args:
             file_path: Path to .kicad_sch file
-            kicad: The version of the KiCad that reads the file: the KiCad of the
-                netlist that the caller uses with the pins (NetlistParser.kicad_version).
-                None: not known (_component_pins).
+            kicad: The version of the KiCad that reads the file: the installed KiCad,
+                or the KiCad of the netlist that the caller uses with the pins
+                (NetlistParser.kicad_version). It gives the field rules. None: not
+                known (_component_pins); the field rules of the KiCad version that
+                saved the file.
 
         Raises:
             FileNotFoundError: If file doesn't exist
@@ -622,7 +625,15 @@ class SchematicParser:
         if self._tree is None:
             tree = parse(read_as_kicad(self.file_path))
             try:
-                self._rules = rules_for_file(tree)
+                major = None
+                if self.kicad is not None:
+                    numbers = version_numbers(self.kicad)
+                    if numbers is None:
+                        raise KicadFileError(
+                            f"The KiCad version {self.kicad!r} has no major number."
+                        )
+                    major = numbers[0]
+                self._rules = rules_for_file(tree, major)
             except KicadFileError as e:
                 raise with_file(e, self.file_path) from e
             self._tree = tree
@@ -632,7 +643,8 @@ class SchematicParser:
 
     @property
     def field_rules(self) -> FieldRules:
-        """The rules of the KiCad version that saved the file (see kicad_fields)."""
+        """The field rules of the KiCad that reads the file (kicad), or of the KiCad
+        version that saved it when kicad is None (see kicad_fields)."""
         self._root()
         assert self._rules is not None
         return self._rules

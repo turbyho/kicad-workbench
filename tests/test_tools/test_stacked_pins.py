@@ -48,7 +48,9 @@ def project(tmp_path, monkeypatch):
     def write(kicad: str, nodes: list[tuple[str, str]]):
         path = tmp_path / "board.kicad_sch"
         path.write_text(
-            f'(kicad_sch\n\t(version 20260306)\n\t(generator "eeschema")\n\t(uuid "a0")\n'
+            # A file of the KiCad of the netlist: KiCad 9 cannot load a newer file.
+            f"(kicad_sch\n\t(version {20250114 if kicad.startswith('9.') else 20260306})\n"
+            '\t(generator "eeschema")\n\t(uuid "a0")\n'
             f"{LIB}{SYMBOL})\n",
             encoding="utf-8",
         )

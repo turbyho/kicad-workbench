@@ -46,8 +46,30 @@ class TestVersions:
         ],
     )
     def test_version_of_the_file(self, version, kicad):
+        # The KiCad that loads the file is not known: the KiCad that saved it.
         root = parse(f'(kicad_sch (version {version}) (generator "eeschema"))')
-        assert rules_for_file(root) == FieldRules(kicad, version)
+        assert rules_for_file(root, None) == FieldRules(kicad, version)
+
+    @pytest.mark.parametrize(
+        "version, installed, kicad",
+        [
+            # Each KiCad reads the fields of an older file with its own rules.
+            (20231120, 8, 9),
+            (20231120, 9, 9),
+            (20231120, 10, 10),
+            (20250114, 10, 10),
+            (20250114, 11, 10),
+            (20261025, 10, 10),
+        ],
+    )
+    def test_the_rules_of_the_installed_kicad(self, version, installed, kicad):
+        root = parse(f'(kicad_sch (version {version}) (generator "eeschema"))')
+        assert rules_for_file(root, installed) == FieldRules(kicad, version)
+
+    def test_a_kicad_before_kicad_8_has_no_rules(self):
+        root = parse('(kicad_sch (version 20231120) (generator "eeschema"))')
+        with pytest.raises(KicadFileError, match="KiCad 7 has no field rules"):
+            rules_for_file(root, 7)
 
     @pytest.mark.parametrize(
         "header, message",
@@ -63,7 +85,7 @@ class TestVersions:
     )
     def test_version_that_the_server_cannot_read(self, header, message):
         with pytest.raises(KicadFileError, match=message):
-            rules_for_file(parse(f"(kicad_sch {header})"))
+            rules_for_file(parse(f"(kicad_sch {header})"), 10)
 
     def test_note(self):
         assert FieldRules(9, 20231120).note() == (

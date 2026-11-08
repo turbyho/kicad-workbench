@@ -1,8 +1,12 @@
-"""Fields of schematic symbols and sheets, as the KiCad version of the file reads them.
+"""Fields of schematic symbols and sheets, as the KiCad that loads the file reads them.
 
-A schematic is read with the rules of the KiCad version that saved it (see
-kicad_versions). When a newer KiCad converts the file, the file gets a newer
-version, and the next read uses the newer rules.
+The parser of each KiCad reads the fields of a file of each version with its own rules:
+it does not branch on the file version to find a field (rule 4 of CLAUDE.md; measured:
+kicad-cli 10 reads the sheet fields of files of KiCad 8 and 9 with the rules of KiCad
+10, and kicad-cli 9 the files of KiCad 8 with the rules of KiCad 9,
+spike/kicad-versions/sheet_fields_check.py "10/8", "10/9", "9/8"). Thus the rules come
+from the installed KiCad. Only when the KiCad is not known, they come from the KiCad
+version that saved the file.
 
 The parsers of KiCad 8 and 9, and of KiCad 10, find the mandatory fields
 (Reference, Value, ... and Sheetname, Sheetfile) in different ways
@@ -37,7 +41,7 @@ _SHEET_NAMES = ("Sheetname", "Sheetfile")
 
 @dataclass(frozen=True)
 class FieldRules:
-    """The field rules of the KiCad version that saved a file."""
+    """The field rules of the KiCad that loads a file."""
 
     kicad: int  # 9 (KiCad 8 and 9) or 10 (KiCad 10 and the nightly builds)
     file_version: int
@@ -86,14 +90,28 @@ def with_field_rules_note(function: Callable) -> Callable:
     return wrapper
 
 
-def rules_for_file(root: Node) -> FieldRules:
-    """Return the rules of the KiCad version that saved the schematic.
+def rules_for_file(root: Node, kicad: int | None) -> FieldRules:
+    """Return the field rules of the KiCad that loads the schematic.
+
+    A file that is newer than the installed KiCad is an error before each tool
+    (utils/schematic_versions.check_schematic_versions): that check knows the full
+    version of the installed KiCad (10.0 or a nightly build 10.99), not only its major
+    version.
+
+    Args:
+        kicad: The major version of the KiCad that loads the file (the installed
+            KiCad). None: not known; then the KiCad version that saved the file.
 
     Raises:
         KicadFileError: The server cannot read the version of the file
-            (kicad_versions.schematic_version).
+            (kicad_versions.schematic_version), or the KiCad is older than KiCad 8.
     """
-    return rules_for_version(schematic_version(root))
+    version = schematic_version(root)
+    if kicad is None:
+        return rules_for_version(version)
+    if kicad < 8:
+        raise KicadFileError(f"KiCad {kicad} has no field rules: the minimum is KiCad 8.")
+    return FieldRules(9 if kicad <= 9 else 10, version)
 
 
 def rules_for_version(version: int) -> FieldRules:

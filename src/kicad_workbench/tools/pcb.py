@@ -8,6 +8,7 @@ from ..errors import WorkbenchError
 from ..parsers.kicad_versions import version_numbers
 from ..server import mcp
 from ..utils import kicad_cli
+from ..utils.file_versions import with_board_versions
 from ..utils.tool_errors import error_answer
 
 
@@ -99,6 +100,7 @@ def _is_pcbnew(parser) -> bool:
 
 
 @mcp.tool()
+@with_board_versions("file_path")
 @_board_tool("")
 async def list_pcb_footprints(
     file_path: str,
@@ -165,6 +167,7 @@ async def list_pcb_footprints(
 
 
 @mcp.tool()
+@with_board_versions("file_path")
 @_board_tool(": no board outline, no design rules")
 async def get_pcb_statistics(file_path: str) -> str:
     """Get statistics about a KiCad PCB design.
@@ -231,6 +234,7 @@ async def get_pcb_statistics(file_path: str) -> str:
 
 
 @mcp.tool()
+@with_board_versions("file_path")
 @_board_tool(": no design rules")
 async def analyze_pcb_nets(file_path: str) -> str:
     """Analyze nets in a KiCad PCB file.
@@ -431,6 +435,7 @@ async def analyze_pcb_nets(file_path: str) -> str:
 
 
 @mcp.tool()
+@with_board_versions("file_path")
 @_board_tool("")
 async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     """Find track segments belonging to a specific net.
@@ -612,6 +617,7 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
 
 
 @mcp.tool()
+@with_board_versions("file_path")
 @_board_tool(": no design rules")
 async def analyze_pcb_signal_integrity(
     file_path: str,
@@ -804,6 +810,7 @@ async def analyze_pcb_signal_integrity(
 
 
 @mcp.tool()
+@with_board_versions("file_path")
 @_board_tool(": no fill state of the zones")
 async def analyze_pcb_power_integrity(file_path: str) -> str:
     """Analyze power integrity: copper zones, power net routing, GND coverage.

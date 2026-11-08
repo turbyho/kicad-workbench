@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..parsers.kicad_fields import with_field_rules_note
 from ..server import mcp
-from ..utils.schematic_versions import with_schematic_versions
+from ..utils.file_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from .netlist import current_netlist
 from .schematic import BaseNames, components_of_project

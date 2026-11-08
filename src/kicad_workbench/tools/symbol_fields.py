@@ -66,12 +66,12 @@ from ..parsers.sheet_list import screens_by_file
 from ..parsers.symbol_info import letter_reference
 from ..parsers.unit_fields import is_confirmed_field, is_mpn_confirmed_field
 from ..server import mcp
+from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_cli import get_kicad_version, no_kicad_message
 from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
 from ..utils.library_tables import kicad_environment
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from ..utils.variants import file_variants, project_variants
 from .library import cell

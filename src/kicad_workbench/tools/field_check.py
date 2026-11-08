@@ -38,6 +38,7 @@ from ..parsers.unit_fields import (
     variant_unit_conflicts,
 )
 from ..server import mcp
+from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_bom import (
     bom_args,
     bom_rules,
@@ -48,7 +49,6 @@ from ..utils.kicad_bom import (
 )
 from ..utils.kicad_cli import KicadCliError, get_kicad_version, no_kicad_message
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from ..utils.variants import variant_names
 

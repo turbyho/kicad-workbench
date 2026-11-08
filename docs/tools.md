@@ -12,9 +12,9 @@ netlist file of `generate_netlist`.
 ## Exact and heuristic tools
 
 Most tools give the result of KiCad: they use kicad-cli or `pcbnew`, or the rules of
-the KiCad source code for the file version. A schematic file of an older version than
-the installed KiCad gives a warning with the step for the user, and an edit tool
-refuses it (the README, "File versions"). Some tools use heuristics: they find a
+the KiCad source code for the file version. A schematic file or a board of an older
+version than the installed KiCad gives a warning with the step for the user, and an
+edit tool refuses it (the README, "File versions"). Some tools use heuristics: they find a
 function from a net name, a component type from its value or reference, or a
 differential pair from the names of two nets. These tools are marked "heuristic"
 below. Use their result as a start for a review, not as a fact.

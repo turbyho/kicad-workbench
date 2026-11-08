@@ -94,7 +94,7 @@ def rules_for_file(root: Node, kicad: int | None) -> FieldRules:
     """Return the field rules of the KiCad that loads the schematic.
 
     A file that is newer than the installed KiCad is an error before each tool
-    (utils/schematic_versions.check_schematic_versions): that check knows the full
+    (utils/file_versions.check_schematic_versions): that check knows the full
     version of the installed KiCad (10.0 or a nightly build 10.99), not only its major
     version.
 

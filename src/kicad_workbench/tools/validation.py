@@ -27,6 +27,7 @@ from ..parsers.check_report_parser import (
 from ..parsers.sch_geometry import IU_PER_MM
 from ..server import mcp
 from ..utils.file_save import save_files
+from ..utils.file_versions import with_board_versions, with_schematic_versions
 from ..utils.kicad_cli import (
     KicadCliError,
     KicadNotFoundError,
@@ -43,7 +44,6 @@ from ..utils.sch_hierarchy import (
     project_files,
     schematic_project_file,
 )
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import EXPECTED_ERRORS, error_answer
 
 
@@ -553,6 +553,7 @@ Please check the file path and try again."""
 
 
 @mcp.tool()
+@with_board_versions("pcb_path")
 @with_schematic_versions("pcb_path")
 async def run_drc(
     pcb_path: str,
@@ -814,6 +815,7 @@ No violations match the specified filter.{notes_text}{unannotated_text}"""
 
 
 @mcp.tool()
+@with_board_versions("pcb_path")
 @with_schematic_versions("pcb_path")
 async def get_drc_violations(
     pcb_path: str,
@@ -972,6 +974,7 @@ The ERC report has been successfully exported to the specified location.{_notes_
 
 
 @mcp.tool()
+@with_board_versions("pcb_path")
 @with_schematic_versions("pcb_path")
 async def export_drc_report(
     pcb_path: str,

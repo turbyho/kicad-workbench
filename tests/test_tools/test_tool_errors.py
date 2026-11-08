@@ -250,6 +250,7 @@ _CHECKS_OF_THE_CODE = {
     ("parsers/annotation.py", "placed_symbols_after_load", "ValueError"),
     ("parsers/annotation.py", "check_annotation", "ValueError"),
     ("parsers/sexpr.py", "edited", "ValueError"),
+    ("utils/file_versions.py", "_with_check", "NameError"),
 }
 
 

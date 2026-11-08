@@ -1,5 +1,5 @@
 """Tests for the check of the schematic file versions against the installed KiCad
-(utils/schematic_versions.py).
+(utils/file_versions.py).
 
 The tests use copies of the fixtures in tmp_path, and set the installed KiCad;
 spike/kicad-versions/schematic_versions_check.py compares the check with KiCad 8.0.9,
@@ -13,13 +13,13 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.parsers.kicad_versions import header_version
-from kicad_workbench.utils import schematic_versions
+from kicad_workbench.utils import file_versions
 from kicad_workbench.utils.kicad_cli import kicad_cli_version_sync
 
-pytestmark = pytest.mark.schematic_versions
+pytestmark = pytest.mark.file_versions
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
-Error = schematic_versions.SchematicVersionError
+Error = file_versions.FileVersionError
 
 
 def hier(tmp_path: Path) -> Path:
@@ -39,11 +39,11 @@ def set_version(path: Path, old: str, new: str) -> None:
 
 
 def installed(monkeypatch, kicad: str) -> None:
-    monkeypatch.setattr(schematic_versions, "_installed_kicad", lambda: kicad)
+    monkeypatch.setattr(file_versions, "_installed_kicad", lambda: kicad)
 
 
-def check(path: Path, write: bool = False) -> schematic_versions.SchematicVersions:
-    return schematic_versions.check_schematic_versions(path, write)
+def check(path: Path, write: bool = False) -> file_versions.FileVersions:
+    return file_versions.check_schematic_versions(path, write)
 
 
 def test_older_files_give_a_warning_for_a_read(tmp_path, monkeypatch):
@@ -82,20 +82,19 @@ def test_older_files_are_an_error_for_a_write(tmp_path, monkeypatch):
 def test_current_files_give_nothing(tmp_path, monkeypatch):
     folder = hier(tmp_path)
     installed(monkeypatch, "8.0.9")
-    assert check(folder / "root.kicad_sch", write=True) == schematic_versions.SchematicVersions(
-        "8.0.9", ""
-    )
+    result = check(folder / "root.kicad_sch", write=True)
+    assert result == file_versions.FileVersions("8.0.9", "")
 
 
 async def test_tool_output_starts_with_the_warning(tmp_path, monkeypatch):
     folder = hier(tmp_path)
     installed(monkeypatch, "10.0.6")
 
-    @schematic_versions.with_schematic_versions("file_path")
+    @file_versions.with_schematic_versions("file_path")
     async def read(file_path: str) -> str:
         return f"# Tool\n\nversion {kicad_cli_version_sync()}"
 
-    @schematic_versions.with_schematic_versions("file_path", write=True)
+    @file_versions.with_schematic_versions("file_path", write=True)
     async def write(file_path: str) -> str:
         return pytest.fail("the tool must not run")
 
@@ -209,7 +208,7 @@ def test_kicad_9_loads_no_top_level_sheets_of_kicad_10(tmp_path, monkeypatch):
         in warning
     )
     # KiCad 10 loads the two top-level sheets.
-    loaded = schematic_versions._project_files(project, 10, other)
+    loaded = file_versions._project_files(project, 10, other)
     files = [(file, 20231120) for file in (root, child, other)]
     assert (loaded.root, loaded.files, loaded.alone) == (root, files, None)
 
@@ -237,15 +236,15 @@ def test_nightly_build(tmp_path, monkeypatch):
     warning = check(root, write=True).warning
     assert warning == (
         "⚠️ KiCad 10.99.0 is a nightly build: the server does not know the file version "
-        f"that it writes. Thus it cannot tell if the schematic files {root} (version "
-        f"20261025), {child} (version 20261025) have an older or a newer version. Their "
-        "version is newer than KiCad 10.0 writes (20260306)."
+        f"that it writes. Thus it cannot tell if the file version of the schematic files "
+        f"{root} (version 20261025), {child} (version 20261025) is older or newer. Each of "
+        "these versions is newer than KiCad 10.0 writes (20260306)."
     )
 
 
 def test_no_kicad_is_an_error(tmp_path, monkeypatch):
     folder = hier(tmp_path)
-    monkeypatch.setattr(schematic_versions, "kicad_cli_version_sync", lambda: None)
+    monkeypatch.setattr(file_versions, "kicad_cli_version_sync", lambda: None)
     with pytest.raises(Error, match="kicad-cli was not found"):
         check(folder / "root.kicad_sch")
 
@@ -268,9 +267,9 @@ async def test_unexpected_error_gives_the_traceback(tmp_path, monkeypatch):
     def defect(path, write):
         raise ValueError("a defect")
 
-    monkeypatch.setattr(schematic_versions, "check_schematic_versions", defect)
+    monkeypatch.setattr(file_versions, "check_schematic_versions", defect)
 
-    @schematic_versions.with_schematic_versions("file_path")
+    @file_versions.with_schematic_versions("file_path")
     async def tool(file_path: str) -> str:
         return "# Tool"
 
@@ -282,7 +281,7 @@ async def test_unexpected_error_gives_the_traceback(tmp_path, monkeypatch):
 async def test_path_that_is_not_a_project(tmp_path, monkeypatch):
     """A path that is not a schematic project gives no check: the tool gives its own
     error."""
-    monkeypatch.setattr(schematic_versions, "_installed_kicad", lambda: pytest.fail("no call"))
+    monkeypatch.setattr(file_versions, "_installed_kicad", lambda: pytest.fail("no call"))
     missing = (
         tmp_path / "none.kicad_sch",
         tmp_path / "x.txt",
@@ -290,10 +289,99 @@ async def test_path_that_is_not_a_project(tmp_path, monkeypatch):
         tmp_path / "missing.kicad_pro",
     )
     for path in missing:
-        assert check(path) == schematic_versions.SchematicVersions("", "")
+        assert check(path) == file_versions.FileVersions("", "")
 
-    @schematic_versions.with_schematic_versions("file_path", write=True)
+    @file_versions.with_schematic_versions("file_path", write=True)
     async def tool(file_path: str) -> str:
         return "❌ The schematic does not exist."
 
     assert await tool(str(tmp_path / "none.kicad_sch")) == "❌ The schematic does not exist."
+
+
+def board(tmp_path: Path, version: int = 20240108) -> Path:
+    """A board of KiCad 8 (the fixture), with its project, in a different version."""
+    folder = tmp_path / "pcb"
+    folder.mkdir()
+    path = folder / "board.kicad_pcb"
+    text = (FIXTURES / "example_pcb.kicad_pcb").read_text(encoding="utf-8")
+    path.write_text(text.replace("20240108", str(version), 1), encoding="utf-8")
+    (folder / "board.kicad_pro").write_text("{}", encoding="utf-8")
+    return path
+
+
+def check_board(path: Path, write: bool = False) -> file_versions.FileVersions:
+    return file_versions.check_board_file_version(path, write)
+
+
+def test_an_older_board_gives_a_warning_for_a_read(tmp_path, monkeypatch):
+    path = board(tmp_path)
+    installed(monkeypatch, "10.0.6")
+    for entry in (path, path.with_suffix(".kicad_pro"), path.parent):
+        warning = check_board(entry).warning
+        assert warning == (
+            f"⚠️ The board {path} (version 20240108) has an older file version than KiCad "
+            "10.0.6 writes (20260206). The tool reads the board as it is, and changes no "
+            "file. A tool that writes refuses it until the user converts it in KiCad. To "
+            f"convert it, tell the user: open the board {path} in the PCB editor of KiCad "
+            "10.0.6 and save it (File > Save). The save writes the board in the version of "
+            "KiCad 10.0.6, and an older KiCad cannot open the board then."
+        )
+    with pytest.raises(Error, match="the tool does not write it in the older version"):
+        check_board(path, write=True)
+    assert "20240108" in path.read_text(encoding="utf-8")  # no change
+
+
+@pytest.mark.parametrize(
+    ("kicad", "version", "install"),
+    [("8.0.9", 20241229, "install KiCad 9.0 or later"), ("10.0.6", 20261031, None)],
+)
+def test_a_newer_board_is_an_error(tmp_path, monkeypatch, kicad, version, install):
+    path = board(tmp_path, version)
+    installed(monkeypatch, kicad)
+    with pytest.raises(Error) as error:
+        check_board(path)
+    message = str(error.value)
+    assert message.startswith(f"The board {path} (version {version}) has a newer file")
+    assert f"KiCad {kicad} cannot open it" in message
+    assert (install in message) if install else ("install" not in message)
+
+
+def test_a_current_board_and_no_board(tmp_path, monkeypatch):
+    path = board(tmp_path, 20241229)
+    installed(monkeypatch, "9.0.9")
+    assert check_board(path, write=True) == file_versions.FileVersions("9.0.9", "")
+    path.unlink()
+    for entry in (path, path.with_suffix(".kicad_pro"), tmp_path / "x.kicad_sch"):
+        assert check_board(entry) == file_versions.FileVersions("", "")
+
+
+def test_a_board_of_a_nightly_build(tmp_path, monkeypatch):
+    installed(monkeypatch, "10.99.0")
+    path = board(tmp_path, 20260206)
+    assert "an older file version than KiCad 10.99.0 writes" in check_board(path).warning
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("20260206", "20261031", 1), encoding="utf-8"
+    )
+    assert check_board(path, write=True).warning.startswith(
+        "⚠️ KiCad 10.99.0 is a nightly build: the server does not know the file version"
+    )
+
+
+async def test_the_board_tools_start_with_the_warning(tmp_path, monkeypatch):
+    from kicad_workbench.tools import pcb
+
+    path = board(tmp_path)
+    installed(monkeypatch, "10.0.6")
+    out = await pcb.list_pcb_footprints(str(path))
+    assert out.startswith(f"⚠️ The board {path} (version 20240108) has an older"), out
+    assert "# Footprints in" in out
+
+
+def test_the_board_of_a_sub_sheet(tmp_path, monkeypatch):
+    """A sub-sheet has the board of its project, not a board of its own name."""
+    folder = hier(tmp_path)
+    path = folder / "root.kicad_pcb"
+    shutil.copy(FIXTURES / "example_pcb.kicad_pcb", path)
+    installed(monkeypatch, "10.0.6")
+    warning = check_board(folder / "child.kicad_sch").warning
+    assert warning.startswith(f"⚠️ The board {path} (version 20240108) has an older")

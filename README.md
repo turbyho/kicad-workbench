@@ -72,11 +72,11 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   writes the format of the file version, and refuses a file that KiCad has open.
 - **File versions.** Each KiCad opens a file of an older version, and its next save
   writes the file in its own version. The server does not convert files: the user
-  converts them in KiCad. A schematic of an older version than the installed KiCad
-  gives a warning with the step for the user. A tool that writes refuses it, because
-  KiCad saves an edit of it in its own version. A file of a newer version than the
-  installed KiCad is an error, as in KiCad: the output tells the user to install a
-  newer KiCad.
+  converts them in KiCad. A schematic or a board of an older version than the
+  installed KiCad gives a warning with the step for the user. A tool that writes
+  refuses it, because KiCad saves an edit of it in its own version. A file of a newer
+  version than the installed KiCad is an error, as in KiCad: the output tells the user
+  to install a newer KiCad.
 - **Firmware.** Pin functions, pin conflicts, I2C and SPI devices, power domains, and
   device tree sources for STM32F4, ESP32 and nRF52.
 - **Parts registry.** A search in an open registry of KiCad parts

@@ -33,6 +33,7 @@ from ..parsers.check_report_parser import (
 from ..parsers.kicad_versions import version_numbers
 from ..parsers.sexpr import SExprError
 from ..server import mcp
+from ..utils.file_versions import with_board_versions, with_schematic_versions
 from ..utils.kicad_cli import (
     KicadCliError,
     decode_output,
@@ -51,7 +52,6 @@ from ..utils.library_tables import (
 from ..utils.model_paths import ModelFile, resolve_model
 from ..utils.sch_hierarchy import AmbiguousRootError, netlist_root, schematic_project_file
 from ..utils.schematic_settings import rule_severities, unknown_severity_reason
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from .library import (
     SchematicFootprints,
@@ -516,6 +516,7 @@ async def _check_links(project_path: str) -> str:
 
 
 @mcp.tool()
+@with_board_versions("project_path")
 @with_schematic_versions("project_path")
 async def check_library_links(project_path: str) -> str:
     """Check the links of a project to its symbol and footprint libraries and 3D models.

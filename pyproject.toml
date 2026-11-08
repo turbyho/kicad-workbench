@@ -127,5 +127,5 @@ disallow_untyped_defs = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "schematic_versions: the test runs the check of the schematic file versions against the installed KiCad (utils/schematic_versions.py)",
+    "file_versions: the test runs the check of the file versions of the schematics and the boards against the installed KiCad (utils/file_versions.py)",
 ]

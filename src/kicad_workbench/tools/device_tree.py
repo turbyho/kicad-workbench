@@ -15,8 +15,8 @@ from jinja2 import Template
 from ..parsers.kicad_fields import with_field_rules_note
 from ..server import mcp
 from ..utils.file_save import AfterSaveError
+from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_text import write_kicad_text
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from .schematic import BaseNames, components_of_project
 

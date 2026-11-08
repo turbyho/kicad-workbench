@@ -16,11 +16,11 @@ from ..parsers.kicad_versions import (
 from ..parsers.sexpr import SExprError, parse
 from ..server import mcp
 from ..utils.file_stamp import FileStamp, file_stamp
+from ..utils.file_versions import with_board_versions, with_schematic_versions
 from ..utils.kicad_cli import decode_output, run_kicad_cli
 from ..utils.kicad_lock import check_board_not_open, write_board, write_with_warning
 from ..utils.kicad_python import KicadPythonError, board_text
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 
 # The largest coordinate of KiCad: 2**31 - 1 nm.
@@ -247,6 +247,7 @@ def _summarize_pcb(text: str) -> str:
 
 
 @mcp.tool()
+@with_board_versions("pcb_path")
 async def export_gerber(
     pcb_path: str,
     output_dir: str = "",

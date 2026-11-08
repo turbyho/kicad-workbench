@@ -67,6 +67,7 @@ from ..parsers.sexpr import (
 from ..parsers.sheet_list import kiid, kiid_path
 from ..server import mcp
 from ..utils.file_stamp import FileStamp, read_for_write_stamped
+from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_cli import kicad_cli_version_sync, no_kicad_message
 from ..utils.kicad_lock import writable_schematic_version, write_schematic, write_with_warning
 from ..utils.kicad_project import (
@@ -85,7 +86,6 @@ from ..utils.schematic_settings import (
     off_grid_severity,
     schematic_settings,
 )
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 
 

@@ -24,6 +24,7 @@ from fastmcp.utilities.types import Image
 from ..errors import InputError
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, save_files
+from ..utils.file_versions import with_board_versions, with_schematic_versions
 from ..utils.kicad_cli import (
     cli_root,
     cli_sheet_paths,
@@ -36,7 +37,6 @@ from ..utils.sch_hierarchy import (
     AmbiguousRootError,
     schematic_project_file,
 )
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 
 _RENDER_SIDES = {"top", "bottom", "left", "right", "front", "back"}
@@ -44,6 +44,7 @@ _RENDER_QUALITIES = {"basic", "high", "user", "job_settings"}
 
 
 @mcp.tool()
+@with_board_versions("pcb_path")
 async def render_pcb(
     pcb_path: str,
     side: str = "top",
@@ -123,6 +124,7 @@ async def render_pcb(
 
 
 @mcp.tool()
+@with_board_versions("pcb_path")
 async def export_pcb_3d(
     pcb_path: str,
     output_path: str = "",

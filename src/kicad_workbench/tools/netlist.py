@@ -11,9 +11,9 @@ from ..errors import InputError, WorkbenchError
 from ..parsers.netlist_parser import NetlistComponent, NetlistParser
 from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
+from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_cli import KicadCliError, cli_root, cli_sheet_paths, export_with_kicad_cli
 from ..utils.sch_hierarchy import AmbiguousRootError, SheetPath, schematic_project_file
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from ..utils.user_files import write_atomic
 

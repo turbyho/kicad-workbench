@@ -4,11 +4,12 @@ long64 and long32 set the size of a C long, thus a test gives the same result on
 each system: a C long has 64 bits on Linux and macOS and 32 bits on Windows
 (parsers/c_numbers.py).
 
-Before each tool, the server compares the schematic files of the project with the
-version that the installed KiCad writes (utils/schematic_versions.py): an older file
+Before each tool, the server compares the schematic files and the board of the
+project with the version that the installed KiCad writes (utils/file_versions.py): an
+older file
 gives a warning, or an error for a tool that writes. The tests of a tool test its rules
 on the fixtures as they are, files of KiCad 8, 9 and 10: thus each test gets no check,
-except a test with the marker schematic_versions (the tests of the check;
+except a test with the marker file_versions (the tests of the check;
 spike/kicad-versions/schematic_versions_check.py compares it with KiCad).
 """
 
@@ -16,17 +17,16 @@ import pytest
 
 from kicad_workbench.parsers import c_numbers
 from kicad_workbench.parsers.sub_symbols import sub_symbol_unit
-from kicad_workbench.utils import schematic_versions
+from kicad_workbench.utils import file_versions
 
 
 @pytest.fixture(autouse=True)
-def _no_schematic_version_check(request, monkeypatch):
-    if request.node.get_closest_marker("schematic_versions") is None:
-        monkeypatch.setattr(
-            schematic_versions,
-            "check_schematic_versions",
-            lambda path, write: schematic_versions.SchematicVersions("", ""),
-        )
+def _no_file_version_check(request, monkeypatch):
+    if request.node.get_closest_marker("file_versions") is None:
+        for check in ("check_schematic_versions", "check_board_file_version"):
+            monkeypatch.setattr(
+                file_versions, check, lambda path, write: file_versions.FileVersions("", "")
+            )
 
 
 def _long(monkeypatch, bits: int):

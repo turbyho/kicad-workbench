@@ -37,6 +37,7 @@ from ..parsers.sexpr import SExprError, parse
 from ..parsers.symbol_info import SymbolInfo, SymbolPin, symbol_info
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, save_files
+from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_cli import (
     KicadCliError,
     decode_output,
@@ -77,7 +78,6 @@ from ..utils.sch_hierarchy import (
     netlist_root,
     schematic_project_file,
 )
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.svg_image import (
     Plan,
     RegionError,

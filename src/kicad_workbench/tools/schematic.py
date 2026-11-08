@@ -19,9 +19,9 @@ from ..parsers.schematic_parser import (
 )
 from ..parsers.sheet_list import EMPTY_REASONS
 from ..server import mcp
+from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_cli import get_kicad_version, no_kicad_message
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
-from ..utils.schematic_versions import with_schematic_versions
 from ..utils.tool_errors import error_answer
 from .netlist import NetlistError, netlist_of
 

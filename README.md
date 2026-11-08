@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.turbyho/kicad-workbench -->
 # KiCad Workbench
 
 KiCad Workbench is an MCP server that lets an AI agent work with KiCad projects. The

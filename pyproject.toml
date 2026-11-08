@@ -84,6 +84,8 @@ only-include = [
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
+    "glama.json",
+    "server.json",
     "pyproject.toml",
     "requirements.txt",
     "requirements-dev.txt",

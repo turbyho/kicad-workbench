@@ -141,3 +141,17 @@ src/kicad_workbench/
 | `utils/kicad_lock.py`, `kicad_text.py`, `user_files.py` | Lock files, text encoding, the cache folder |
 | `utils/file_save.py` | The save of a file as KiCad 10.0.7 saves it (a temporary file, then a rename) |
 | `utils/file_versions.py` | The check of the file versions of the schematics, the board and the libraries against the installed KiCad |
+
+## Release
+
+1. Set the new version in `src/kicad_workbench/__init__.py` (`__version__`) and in
+   `server.json` (two places). `tests/test_registry_files.py` compares them.
+2. Add the section of the release to `CHANGELOG.md`, with the date.
+3. Build the sdist and the wheel, and tag the release.
+4. Publish the package on PyPI. The README of the package must have the line
+   `<!-- mcp-name: io.github.turbyho/kicad-workbench -->` first: the MCP Registry
+   reads it to find the owner of the package.
+5. Publish the entry of `server.json` in the MCP Registry with `mcp-publisher`
+   (`mcp-publisher login github` as the owner of the namespace `io.github.turbyho`,
+   then `mcp-publisher publish`). The GitHub repository must be public.
+6. Glama reads `glama.json` (the maintainers) from the public GitHub repository.

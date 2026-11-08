@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.turbyho/kicad-workbench",
+  "title": "KiCad Workbench",
+  "description": "Gives KiCad 8, 9 and 10 projects to LLM agents: schematics, boards, ERC, DRC, BOM, edits",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/turbyho/kicad-workbench",
+  "repository": {
+    "url": "https://github.com/turbyho/kicad-workbench",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "kicad-workbench",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "remotes": []
+}

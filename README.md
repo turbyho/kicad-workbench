@@ -9,8 +9,9 @@ The server gives the results that KiCad gives. Where KiCad has an interface, the
 server uses KiCad itself. kicad-cli makes the netlist, the BOM, the ERC and DRC
 reports and the exports. The Python module `pcbnew` of KiCad reads boards and
 footprints. Where KiCad has no interface, the server uses the rules of the KiCad
-source code for the version of KiCad that saved the file. It tells when a result can
-be incomplete. We compare these rules with KiCad 8.0.9, 9.0.9 and 10.
+source code for the installed version of KiCad, and reads a file as that KiCad loads
+it. It tells when a result can be incomplete. We compare these rules with KiCad 8.0.9,
+9.0.9 and 10.
 
 - **Design review.** The agent gets the components, nets, pins and sheets of a
   schematic, and the footprints, tracks and zones of a board. It runs ERC and DRC,
@@ -22,7 +23,7 @@ be incomplete. We compare these rules with KiCad 8.0.9, 9.0.9 and 10.
   variant of KiCad 10), checks the MPN fields of the symbols, and writes the
   confirmed fields into the schematic.
 - **Firmware.** The agent gets the pin functions of a microcontroller, the I2C and
-  SPI devices and the power domains, and a device tree source as a start for the
+  SPI devices and the regulators, and a device tree source as a start for the
   firmware.
 
 Status: in development (version 0.1). The tools work and have tests. The interfaces
@@ -59,7 +60,8 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   connections across sheets.
 - **Netlist.** The netlist of kicad-cli, and the connections of each pin.
 - **Boards.** Footprints, tracks, vias and zones, the statistics and the design rules
-  (through `pcbnew`), a 3D view as PNG or JPEG, and the STEP and Gerber exports.
+  (through `pcbnew`), a 3D view as PNG or JPEG (KiCad 9 or later), and the STEP and
+  Gerber exports.
 - **Checks.** ERC (with the annotation check of the ERC dialog, which kicad-cli does
   not run) and DRC through kicad-cli, the pin and pad check of "Update PCB from
   Schematic", and the links to the libraries and the 3D models.
@@ -75,11 +77,11 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   converts them in KiCad. A schematic, a board or a library of an older version than
   the installed KiCad gives a warning with the step for the user (for a library:
   `kicad-cli sym upgrade` or `kicad-cli fp upgrade`). A tool that writes refuses an
-  older schematic or board, because KiCad saves an edit of it in its own version. A file of a newer
-  version than the installed KiCad is an error, as in KiCad: the output tells the user
-  to install a newer KiCad.
-- **Firmware.** Pin functions, pin conflicts, I2C and SPI devices, power domains, and
-  device tree sources for STM32F4, ESP32 and nRF52.
+  older schematic or board, because KiCad saves an edit of it in its own version. A
+  file of a newer version than the installed KiCad is an error, as in KiCad: the
+  output tells the user to install a newer KiCad.
+- **Firmware.** Pin functions, pin conflicts, I2C and SPI devices, regulators (a
+  heuristic), and device tree sources for STM32F4, ESP32 and nRF52.
 - **Parts registry.** A search in an open registry of KiCad parts
   ([PartReel](https://partreel.com)), and the download of their symbols and
   footprints (on request also their 3D models).
@@ -91,8 +93,8 @@ All tools are in [docs/tools.md](https://github.com/turbyho/kicad-workbench/blob
 - KiCad 8, 9 or 10, with kicad-cli.
 - Python 3.10 or later.
 - For exact board data: a Python that can import the module `pcbnew` of KiCad.
-  Without it, the board tools (statistics, tracks, nets, zones) read the board file
-  as text, with no design rules and no board outline.
+  Without it, the board tools (footprints, statistics, tracks, nets, zones) read the
+  board file as text, with no design rules and no board outline.
 
 ## Installation
 

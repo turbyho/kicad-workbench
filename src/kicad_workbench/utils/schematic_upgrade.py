@@ -40,8 +40,14 @@ from .kicad_cli import (
     run_kicad_cli_sync,
     set_call_version,
 )
-from .kicad_lock import check_schematic_not_open
-from .kicad_project import PRO_SUFFIX, SCH_SUFFIX, text_variables, top_level_sheets
+from .kicad_lock import OpenInKicad, schematic_open_in_kicad, stale_lock_text
+from .kicad_project import (
+    PRO_SUFFIX,
+    SCH_SUFFIX,
+    TopLevelSheet,
+    text_variables,
+    top_level_sheets,
+)
 from .kicad_text import read_as_kicad
 from .sch_hierarchy import AmbiguousRootError, files_of_load, schematic_project_file
 from .tool_errors import EXPECTED_ERRORS, error_answer
@@ -173,15 +179,35 @@ def _project_of(path: Path) -> Path | None:
     return None
 
 
-def _project_files(project: Path, kicad_major: int, path: Path) -> list[Path]:
-    """Return the schematic files of the project as the installed KiCad loads it, and
-    the schematic of the path (a schematic that KiCad opens alone is the root of its
-    own project)."""
+@dataclass(frozen=True)
+class _ProjectFiles:
+    """The schematic files of a project as the GUI of the installed KiCad loads them."""
+
+    root: Path  # the schematic that KiCad opens for the project
+    files: list[Path]  # each file of the hierarchy
+    alone: Path | None  # the schematic of the path when it is not one of the files
+
+
+def _project_files(project: Path, kicad_major: int, path: Path) -> _ProjectFiles:
+    """Return the schematic files of the project as the GUI of the installed KiCad loads
+    it, and the schematic of the path when it is not one of them (KiCad opens such a
+    schematic alone: it is the root of its own hierarchy).
+
+    The user works with the project in the GUI. The GUI of KiCad 10 loads each top-level
+    sheet whose file exists (SCH_EDIT_FRAME::OpenProjectFiles, annotation._tops). KiCad 8
+    and 9 have no top-level sheets in the project file: they load the schematic of the
+    project name.
+    """
+    root = Path(os.path.abspath(project.with_suffix(SCH_SUFFIX)))
+    declared = top_level_sheets(project) if kicad_major >= 10 else []
+    existing = [top for top in declared if top.file.is_file()]
+    tops = existing or [TopLevelSheet(root, None, root.stem)]
     variables = text_variables(project.with_suffix(SCH_SUFFIX))
-    files = files_of_load(top_level_sheets(project), project.parent, variables, kicad_major)
+    files = files_of_load(tops, project.parent, variables, kicad_major)
+    alone = None
     if path.suffix == SCH_SUFFIX and not any(same(file, path) for file in files):
-        files.append(path)
-    return files
+        alone = path
+    return _ProjectFiles(tops[0].file, files, alone)
 
 
 def same(a: Path, b: Path) -> bool:
@@ -201,23 +227,58 @@ def _newer_error(kicad: str, newer: list[tuple[Path, int]], written: int) -> str
     )
 
 
-def _save_in_kicad_error(kicad: str, old: list[tuple[Path, int]], written: int) -> str:
-    files = ", ".join(f"{file} (version {version})" for file, version in old)
+def _old_files(old: list[tuple[Path, int]]) -> str:
+    return ", ".join(f"{file} (version {version})" for file, version in old)
+
+
+def _open_alone(kicad: str, schematic: Path, reason: str) -> str:
     return (
-        f"The schematic files {files} have an older file version than KiCad {kicad} "
-        f"({written}). The server works with the files in the version of the installed "
-        f"KiCad, and kicad-cli {kicad} cannot convert a schematic. Tell the user: open the "
-        f"project in KiCad {kicad}, save each of these sheets in the schematic editor "
-        "(File > Save), then do the work again."
+        f"start the schematic editor of KiCad {kicad} alone (eeschema) and open {schematic} "
+        f"(File > Open): {reason}"
     )
 
 
-def _open_in_kicad_error(message: str) -> str:
+def _save_in_kicad_error(
+    kicad: str, old: list[tuple[Path, int]], written: int, project: Path, loaded: _ProjectFiles
+) -> str:
+    """The step for the user when kicad-cli cannot save a schematic (KiCad 8 and 9).
+
+    SCH_EDIT_FRAME::SaveProject of KiCad 8.0.9 saves no file when the schematic has no
+    change. KiCad 9.0.9 also saves a schematic with no change when its root sheet has an
+    older version. When it saves, it saves each sheet of the hierarchy. A schematic with
+    no project file is the root of a project with no settings
+    (sch_hierarchy.schematic_project_file): the project manager cannot open it, and the
+    schematic editor has File > Open only when it runs alone (menubar.cpp). The
+    schematic of the path that the project does not load is open only alone.
+    """
+    steps = []
+    if any(file != loaded.alone for file, _version in old):
+        if project.is_file():
+            steps.append(f"open the project {project} in KiCad {kicad}")
+        else:
+            steps.append(_open_alone(kicad, loaded.root, "it has no project file"))
+    if any(file == loaded.alone for file, _version in old):
+        reason = f"it is not a sheet of the project that KiCad {kicad} loads"
+        steps.append(_open_alone(kicad, loaded.alone, reason))
     return (
-        "A schematic file of the project has an older file version than the installed KiCad, "
-        "and KiCad has the schematic open, thus the server cannot convert it. Tell the user: "
-        "save the schematic in KiCad (KiCad saves it in its version), then do the work again. "
-        + message.removeprefix("❌ ")
+        f"The schematic files {_old_files(old)} have an older file version than KiCad "
+        f"{kicad} ({written}). The server works with the files in the version of the "
+        f"installed KiCad, and kicad-cli {kicad} cannot convert a schematic. Tell the user: "
+        + ", and ".join(steps)
+        + ". In each schematic, make a change (for example, move an item and move it back) "
+        "and save it (File > Save). Then do the work again. The save writes each sheet of "
+        f"the hierarchy in the version of KiCad {kicad}. Without a change, KiCad 8 saves no "
+        "file, and KiCad 9 saves the files only when the root sheet has an older version."
+    )
+
+
+def _open_in_kicad_error(kicad: str, old: list[tuple[Path, int]], opened: OpenInKicad) -> str:
+    return (
+        f"{opened.text('schematic')} The schematic files {_old_files(old)} have an older "
+        f"file version than KiCad {kicad}, and the server converts them only when KiCad "
+        "does not have them open. Tell the user to save the changes and close the "
+        "schematic editor window. Then do the work again: the server then converts the "
+        "files.\n\n" + stale_lock_text("schematic")
     )
 
 
@@ -270,7 +331,9 @@ def _convert(
     target = written if written is not None else _release_version(kicad)
     major = version_numbers(kicad)[0]
     for _ in range(_MAX_PASSES):
-        versions = [(file, _file_version(file)) for file in _project_files(project, major, path)]
+        loaded = _project_files(project, major, path)
+        files = [*loaded.files, *([loaded.alone] if loaded.alone else [])]
+        versions = [(file, _file_version(file)) for file in files]
         newer = [(file, v) for file, v in versions if v is not None and v > target]
         if newer:
             raise SchematicVersionError(_newer_error(kicad, newer, target))
@@ -278,11 +341,11 @@ def _convert(
         if not old:
             return CurrentSchematics(kicad, conversions)
         if written is None:
-            raise SchematicVersionError(_save_in_kicad_error(kicad, old, target))
+            raise SchematicVersionError(_save_in_kicad_error(kicad, old, target, project, loaded))
         for file, _version in old:
-            message = check_schematic_not_open(file)
-            if message:
-                raise SchematicVersionError(_open_in_kicad_error(message))
+            opened = schematic_open_in_kicad(file)
+            if opened:
+                raise SchematicVersionError(_open_in_kicad_error(kicad, old, opened))
         for file, version in old:
             result = run_kicad_cli_sync(["sch", "upgrade", str(file)], timeout=120, english=True)
             after = _file_version(file)

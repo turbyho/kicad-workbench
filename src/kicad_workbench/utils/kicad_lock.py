@@ -19,6 +19,7 @@ error message tells how to remove it.
 import json
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import WorkbenchError
@@ -72,39 +73,61 @@ def _lock_owner(lock_path: Path) -> str:
         return "unknown"
 
 
-def _open_error(opened: Path, lock_path: Path, document: str, editor: str) -> str:
+@dataclass(frozen=True)
+class OpenInKicad:
+    """A file that a KiCad editor has open: the file and its lock file."""
+
+    file: Path  # the file that KiCad opened (for a schematic: the root that holds the file)
+    lock: Path
+    owner: str  # "user@host" from the lock file at the check, or "unknown"
+
+    def text(self, document: str) -> str:
+        """Return the first sentence of an error message: KiCad has the file open."""
+        return (
+            f"KiCad has the {document} open: {self.file} "
+            f"(lock file {self.lock}, owner {self.owner})."
+        )
+
+
+def _opened(file: Path, lock: Path) -> OpenInKicad:
+    return OpenInKicad(file, lock, _lock_owner(lock))
+
+
+def stale_lock_text(document: str) -> str:
+    """Return the text of an error message about a lock file that stays after a crash."""
     return (
-        f"❌ KiCad has the {document} open: {opened} "
-        f"(lock file {lock_path}, owner {_lock_owner(lock_path)}). "
-        "This tool writes the file directly. KiCad does not read such a change, "
-        "and the next save in KiCad removes it. Thus the tool did not write the file.\n\n"
-        f"Tell the user to save the {document} and close the {editor} window. "
-        "Then do this operation again. "
-        f"After the write, tell the user to open the {document} again to see the change.\n\n"
         "If KiCad does not run, the lock file stays from a crash of KiCad. "
         f"Then tell the user to open the {document} in KiCad and close it again, "
         "or to delete the lock file."
     )
 
 
-def check_schematic_not_open(file_path: str | Path) -> str | None:
-    """Do a check if KiCad has a schematic open, before a tool writes it.
+def _open_error(opened: OpenInKicad, document: str, editor: str) -> str:
+    return (
+        f"❌ {opened.text(document)} "
+        "This tool writes the file directly. KiCad does not read such a change, "
+        "and the next save in KiCad removes it. Thus the tool did not write the file.\n\n"
+        f"Tell the user to save the {document} and close the {editor} window. "
+        "Then do this operation again. "
+        f"After the write, tell the user to open the {document} again to see the change.\n\n"
+        + stale_lock_text(document)
+    )
+
+
+def schematic_open_in_kicad(file_path: str | Path) -> OpenInKicad | None:
+    """Return the schematic that KiCad has open and that holds a file, or None.
 
     KiCad has the schematic open when the file has a lock file, or when a
     root schematic that holds the file in the hierarchy of its project has a
     lock file. KiCad 10 can lock the first top-level sheet of the project.
 
     Args:
-        file_path: Path to the .kicad_sch file that the tool writes.
-
-    Returns:
-        None if KiCad does not have the schematic open. Else, an error
-        message for the LLM that tells the user to close the schematic editor.
+        file_path: Path to the .kicad_sch file.
     """
     path = Path(os.path.abspath(file_path))
     lock = _existing_lock(path)
     if lock:
-        return _open_error(path, lock, "schematic", "schematic editor")
+        return _opened(path, lock)
     for root in project_root_schematics(path):
         # KiCad locks the schematic that it opens (SCH_EDIT_FRAME::OpenProjectFiles):
         # for the project, the root or the first top-level sheet of a KiCad 10
@@ -116,10 +139,25 @@ def check_schematic_not_open(file_path: str | Path) -> str | None:
                 continue
             if opened in (root, tops[0]):
                 if in_project(path, root):
-                    return _open_error(opened, lock, "schematic", "schematic editor")
+                    return _opened(opened, lock)
             elif in_hierarchy(path, opened):
-                return _open_error(opened, lock, "schematic", "schematic editor")
+                return _opened(opened, lock)
     return None
+
+
+def check_schematic_not_open(file_path: str | Path) -> str | None:
+    """Do a check if KiCad has a schematic open, before a tool writes it
+    (schematic_open_in_kicad).
+
+    Args:
+        file_path: Path to the .kicad_sch file that the tool writes.
+
+    Returns:
+        None if KiCad does not have the schematic open. Else, an error
+        message for the LLM that tells the user to close the schematic editor.
+    """
+    opened = schematic_open_in_kicad(file_path)
+    return _open_error(opened, "schematic", "schematic editor") if opened else None
 
 
 def check_board_not_open(file_path: str | Path) -> str | None:
@@ -138,7 +176,7 @@ def check_board_not_open(file_path: str | Path) -> str | None:
 def _check_file_not_open(file_path: str | Path, document: str, editor: str) -> str | None:
     path = Path(os.path.abspath(file_path))
     lock = _existing_lock(path)
-    return _open_error(path, lock, document, editor) if lock else None
+    return _open_error(_opened(path, lock), document, editor) if lock else None
 
 
 def check_project_not_open(file_path: str | Path) -> str | None:

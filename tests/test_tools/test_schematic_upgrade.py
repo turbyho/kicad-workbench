@@ -6,6 +6,7 @@ kicad-cli 10 or later (sch upgrade); spike/kicad-versions/upgrade_check.py
 compares the conversion with KiCad 8.0.9, 9.0.9 and 10.
 """
 
+import json
 import shutil
 from pathlib import Path
 
@@ -85,10 +86,16 @@ def test_newer_file_is_an_error(tmp_path):
 def test_open_in_kicad_is_an_error(tmp_path):
     folder = hier(tmp_path)
     lock_file_path(folder / "root.kicad_sch").write_text("{}", encoding="utf-8")
-    with pytest.raises(
-        schematic_upgrade.SchematicVersionError, match="save the schematic in KiCad"
-    ):
+    with pytest.raises(schematic_upgrade.SchematicVersionError) as error:
         schematic_upgrade.current_schematics(folder / "child.kicad_sch")
+    message = str(error.value)
+    assert message.startswith(f"KiCad has the schematic open: {folder / 'root.kicad_sch'} ")
+    assert f"The schematic files {folder / 'root.kicad_sch'} (version 20231120), " in message
+    assert "Tell the user to save the changes and close the schematic editor window" in message
+    assert "the server then converts the files" in message
+    # Not the text of a write: the tool writes no file of the user.
+    assert "This tool writes the file directly" not in message
+    assert message.endswith("or to delete the lock file.")
     assert version(folder / "child.kicad_sch") == 20231120
 
 
@@ -101,7 +108,10 @@ def test_kicad_9_asks_the_user_to_save(tmp_path, monkeypatch):
     message = str(error.value)
     assert "older file version than KiCad 9.0.9 (20250114)" in message
     assert "root.kicad_sch (version 20231120)" in message and "child.kicad_sch" in message
-    assert "save each of these sheets in the schematic editor (File > Save)" in message
+    project = folder / "root.kicad_pro"
+    assert f"Tell the user: open the project {project} in KiCad 9.0.9. In each schematic" in message
+    assert "and save it (File > Save)" in message and "eeschema" not in message
+    assert "Without a change, KiCad 8 saves no file" in message
     # A file of the version of KiCad 9: no step.
     for name in ("root.kicad_sch", "child.kicad_sch"):
         path = folder / name
@@ -110,6 +120,63 @@ def test_kicad_9_asks_the_user_to_save(tmp_path, monkeypatch):
     monkeypatch.setattr(schematic_upgrade, "_installed_kicad", lambda: "8.0.9")
     with pytest.raises(schematic_upgrade.SchematicVersionError, match="cannot open them"):
         schematic_upgrade.current_schematics(folder / "root.kicad_sch")
+
+
+@pytest.mark.parametrize("kicad", ["8.0.9", "9.0.9"])
+@pytest.mark.parametrize("entry", ["alone.kicad_sch", "alone.kicad_pcb"])
+def test_kicad_9_and_a_schematic_with_no_project_file(tmp_path, monkeypatch, kicad, entry):
+    """A schematic that is not a sheet of a project is the root of a project with no
+    settings: the user opens it in the schematic editor alone. A board gets the
+    schematic of its name."""
+    folder = hier(tmp_path)
+    alone = folder / "alone.kicad_sch"
+    text = (folder / "child.kicad_sch").read_text()
+    alone.write_text(text.replace("20231120", "20230121"), encoding="utf-8")
+    (folder / "alone.kicad_pcb").write_text("(kicad_pcb)", encoding="utf-8")
+    monkeypatch.setattr(schematic_upgrade, "_installed_kicad", lambda: kicad)
+    with pytest.raises(schematic_upgrade.SchematicVersionError) as error:
+        schematic_upgrade.current_schematics(folder / entry)
+    message = str(error.value)
+    assert message.startswith(f"The schematic files {alone} (version 20230121) have")
+    assert (
+        f"Tell the user: start the schematic editor of KiCad {kicad} alone (eeschema) and "
+        f"open {alone} (File > Open): it has no project file. In each schematic, make a "
+        "change" in message
+    )
+
+
+def test_kicad_9_loads_no_top_level_sheets_of_kicad_10(tmp_path, monkeypatch):
+    """KiCad 9 loads the schematic of the project name, not the top-level sheets of a
+    project file of KiCad 10: an other top-level sheet is open only alone."""
+    folder = hier(tmp_path)
+    other = folder / "other.kicad_sch"
+    shutil.copy(folder / "child.kicad_sch", other)
+    sheets = [
+        {"filename": "root.kicad_sch", "name": "root", "uuid": "a"},
+        {"filename": "other.kicad_sch", "name": "other", "uuid": "b"},
+    ]
+    project = folder / "root.kicad_pro"
+    project.write_text(
+        json.dumps({"meta": {"version": 3}, "schematic": {"top_level_sheets": sheets}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(schematic_upgrade, "_installed_kicad", lambda: "9.0.9")
+    with pytest.raises(schematic_upgrade.SchematicVersionError) as error:
+        schematic_upgrade.current_schematics(other)
+    message = str(error.value)
+    root, child = folder / "root.kicad_sch", folder / "child.kicad_sch"
+    assert message.startswith(
+        f"The schematic files {root} (version 20231120), {child} (version 20231120), "
+        f"{other} (version 20231120) have"
+    )
+    assert (
+        f"Tell the user: open the project {project} in KiCad 9.0.9, and start the schematic "
+        f"editor of KiCad 9.0.9 alone (eeschema) and open {other} (File > Open): it is not "
+        "a sheet of the project that KiCad 9.0.9 loads. In each schematic" in message
+    )
+    # KiCad 10 loads the two top-level sheets.
+    loaded = schematic_upgrade._project_files(project, 10, other)
+    assert (loaded.root, loaded.files, loaded.alone) == (root, [root, child, other], None)
 
 
 def test_no_kicad_is_an_error(tmp_path, monkeypatch):

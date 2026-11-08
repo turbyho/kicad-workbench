@@ -331,6 +331,7 @@ class TestTool:
         out = await library_tools.get_library_symbol("Device:R")
         assert out.startswith("❌ Cannot read the symbol Device:R:") and message in out, out
 
+    @pytest.mark.file_versions
     async def test_library_newer_than_the_installed_kicad(self, tables, monkeypatch):
         (tables["libs"] / "Device.kicad_sym").write_text(
             library('(symbol "R")', version=20251024), encoding="utf-8"
@@ -342,7 +343,33 @@ class TestTool:
         )
         set_version(monkeypatch, "9.0.9")
         out = await library_tools.get_library_symbol("Device:R")
-        assert "The installed KiCad 9.0.9 cannot read it." in out, out
+        assert out.startswith("❌ Cannot read the symbol Device:R: The symbol library "), out
+        assert "of a newer file version than KiCad 9.0.9 writes (20241209)" in out
+        assert "KiCad 9.0.9 cannot read them. Tell the user: use the library in the KiCad" in out
+        assert "or install KiCad 10.0 or later" in out
+
+    @pytest.mark.file_versions
+    async def test_a_library_before_kicad_8_gives_only_the_error(self, tables, monkeypatch):
+        library_file = tables["libs"] / "Device.kicad_sym"
+        library_file.write_text(library('(symbol "R")', version=20211014), encoding="utf-8")
+        set_version(monkeypatch, "10.0.6")
+        out = await library_tools.get_library_symbol("Device:R")
+        assert out.startswith("❌ Cannot read the symbol Device:R: The symbol library file"), out
+        assert "⚠️" not in out and f"run `kicad-cli sym upgrade {library_file}`" in out
+
+    @pytest.mark.file_versions
+    async def test_an_older_library_gives_a_warning(self, tables, monkeypatch):
+        library_file = tables["libs"] / "Device.kicad_sym"
+        library_file.write_text(library('(symbol "R")', version=20241209), encoding="utf-8")
+        set_version(monkeypatch, "10.0.6")
+        out = await library_tools.get_library_symbol("Device:R")
+        assert out.startswith(
+            f"⚠️ The symbol library {library_file} has files of an older file version than "
+            f"KiCad 10.0.6 writes (20251024): {library_file} (version 20241209). The tool "
+            "reads them as KiCad 10.0.6 loads them, and does not change the library. To convert the "
+            f"library, tell the user: run `kicad-cli sym upgrade {library_file}` of KiCad 10.0.6."
+        ), out
+        assert "\n\n# Library symbol Device:R" in out
 
     @pytest.mark.parametrize("version", ["9.99.0", "11.0.0", "10.1.0"])
     async def test_installed_kicad_without_rules(self, tables, monkeypatch, version):

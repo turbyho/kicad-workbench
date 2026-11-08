@@ -32,6 +32,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..parsers.kicad_versions import file_version, footprint_version
 from ..parsers.lib_symbols import LibraryFiles, library_files, parent_name
 from ..parsers.sexpr import Node, SExprError, parse, property_field
 from ..parsers.sub_symbols import symbol_name
@@ -42,7 +43,8 @@ from .user_files import cache_home, write_atomic
 # Change the version when the content of an index entry changes.
 # Version 4: the stamp has the change time and the inode number, and an index of
 # a file that changed just before the read has the digest of the files.
-_INDEX_VERSION = 4
+# Version 5: each entry has its file and the file version (file_versions).
+_INDEX_VERSION = 5
 _EXTENSIONS = {"symbol": ".kicad_sym", "footprint": ".kicad_mod"}
 _ENTRY_KEYS = ("name", "description", "keywords", "footprint", "description_field")
 # The items of each library: key -> (stamp, digest, items, problems). The digest
@@ -64,6 +66,9 @@ class LibraryItem:
     footprint: str = ""  # The default footprint of a symbol.
     # The own "Description" field of a symbol (with no value from a parent).
     description_field: str = ""
+    # The library file of the item and its file version (None: no version).
+    file: str = field(default="", compare=False)
+    version: int | None = field(default=None, compare=False)
     _terms: list = field(default=None, init=False, repr=False, compare=False)
 
     @property
@@ -157,8 +162,10 @@ def _read(kind: str, path: Path, library: LibraryFiles) -> tuple[list[dict], lis
             problems.append(f"{file} cannot be read: {e}")
             continue
         if kind == "symbol":
+            version = file_version(root)
             for symbol in root.children("symbol"):
                 entry = _read_symbol(symbol)
+                entry.update(file=str(file), version=version)
                 entries[entry["name"]] = entry
         else:
             descr = root.first("descr")
@@ -169,6 +176,8 @@ def _read(kind: str, path: Path, library: LibraryFiles) -> tuple[list[dict], lis
                 "keywords": tags.value(0, "") if tags else "",
                 "footprint": "",
                 "description_field": "",
+                "file": str(file),
+                "version": footprint_version(root),
             }
     if kind == "symbol":
         # The parent of a symbol can be in a different file of a directory library.
@@ -207,7 +216,10 @@ def _load_cache(
     if not (
         isinstance(entries, list)
         and all(
-            isinstance(entry, dict) and all(isinstance(entry.get(key), str) for key in _ENTRY_KEYS)
+            isinstance(entry, dict)
+            and all(isinstance(entry.get(key), str) for key in _ENTRY_KEYS)
+            and isinstance(entry.get("file"), str)
+            and (entry.get("version") is None or isinstance(entry.get("version"), int))
             for entry in entries
         )
         and isinstance(problems, list)
@@ -315,6 +327,8 @@ def library_items(kind: str, row: LibraryRow) -> tuple[list[LibraryItem], list[s
                     entry["keywords"],
                     entry["footprint"],
                     entry["description_field"],
+                    entry["file"],
+                    entry["version"],
                 )
                 for entry in entries
             ]

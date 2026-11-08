@@ -36,8 +36,15 @@ from ..parsers.sch_geometry import mm_text
 from ..parsers.sexpr import SExprError, parse
 from ..parsers.symbol_info import SymbolInfo, SymbolPin, symbol_info
 from ..server import mcp
+from ..utils import file_versions
 from ..utils.file_save import SaveFilesError, save_files
-from ..utils.file_versions import with_schematic_versions
+from ..utils.file_versions import (
+    FileVersionError,
+    library_file_version,
+    record_library_warnings,
+    with_library_versions,
+    with_schematic_versions,
+)
 from ..utils.kicad_cli import (
     KicadCliError,
     decode_output,
@@ -139,14 +146,18 @@ def project_file(project_path: str) -> Path | None:
     return projects[0]
 
 
-async def _rows(kind: str, project_path: str) -> tuple[list[LibraryRow], list[str]]:
-    """Return the library rows of the installed KiCad and of the project."""
+async def _rows(kind: str, project_path: str) -> tuple[list[LibraryRow], list[str], str]:
+    """Return the library rows of the installed KiCad and of the project, and the
+    version of the installed KiCad."""
     if kind not in _KINDS:
         raise InputError(f"The kind {kind!r} is not 'symbol' or 'footprint'.")
     version = await get_kicad_version()
     if version is None:
         raise InputError(no_kicad_message())
-    return await asyncio.to_thread(lambda: library_rows(kind, version, project_file(project_path)))
+    rows, problems = await asyncio.to_thread(
+        lambda: library_rows(kind, version, project_file(project_path))
+    )
+    return rows, problems, version
 
 
 def cell(text: str) -> str:
@@ -193,7 +204,7 @@ def _state(row: LibraryRow, active: bool) -> str:
 
 
 async def _list(kind: str, project_path: str) -> str:
-    rows, problems = await _rows(kind, project_path)
+    rows, problems, _kicad = await _rows(kind, project_path)
     active = {id(row) for row in active_rows(rows)}
     states = await asyncio.to_thread(lambda: [_state(row, id(row) in active) for row in rows])
     lines = [
@@ -270,7 +281,7 @@ async def _search(
         return "❌ The query is empty."
     if limit < 1:
         return "❌ The limit must be 1 or more."
-    rows, problems = await _rows(kind, project_path)
+    rows, problems, kicad = await _rows(kind, project_path)
     rows = active_rows(rows)
     if library:
         # A library that the user names is searched also when it is hidden.
@@ -285,7 +296,10 @@ async def _search(
         selected = [row for row in rows if not row.disabled and (include_hidden or not row.hidden)]
 
     results, notes, searched = await asyncio.to_thread(_read_and_search, kind, selected, query)
+    results, warnings, unreadable = _versions_of_results(kind, results, selected, kicad)
+    problems += unreadable
     lines = [
+        *(f"{warning}\n" for warning in warnings),
         f"# {kind.capitalize()} search: {query}",
         "",
         f"Found: {len(results)} in {_plural(searched)}"
@@ -309,6 +323,27 @@ async def _search(
                 f"| {cell(item.lib_id)} | {cell(item.description)} | {cell(item.keywords)} |"
             )
     return "\n".join(lines + problem_lines(problems + notes))
+
+
+def _versions_of_results(
+    kind: str, results: list[LibraryItem], rows: list[LibraryRow], kicad: str
+) -> tuple[list[LibraryItem], list[str], list[str]]:
+    """Compare the library files of the results with the installed KiCad
+    (file_versions.check_library_versions): a warning for each library with an older
+    file. KiCad cannot read a newer file: its items are not results, and the file is a
+    problem.
+
+    Returns:
+        (the results, the warnings, the problems).
+    """
+    paths = {row.name: row.path for row in rows}
+    by_library: dict[Path, list[tuple[Path, int]]] = {}
+    for item in results:
+        if item.version is not None and paths.get(item.library) is not None:
+            by_library.setdefault(paths[item.library], []).append((Path(item.file), item.version))
+    found = file_versions.check_library_versions(kind, by_library, kicad)
+    kept = [item for item in results if Path(item.file) not in found.newer]
+    return kept, found.warnings, found.problems
 
 
 async def _search_tool(*args) -> str:
@@ -399,7 +434,8 @@ def _field_rules(kicad: str) -> int:
 
 
 def _version_problem(symbol: LibrarySymbol, kicad: str) -> str | None:
-    """Return why the server or the installed KiCad cannot read a library file, or None."""
+    """Return why the server cannot read a library file, or None (a file of a newer
+    version than the installed KiCad: library_symbol_versions)."""
     version = symbol.version
     if version is None:
         return f"The symbol library file {symbol.file} has no file version, (version N)."
@@ -407,8 +443,9 @@ def _version_problem(symbol: LibrarySymbol, kicad: str) -> str | None:
         return (
             f"The symbol library file {symbol.file} has the file version {version}, which "
             f"is older than the version of KiCad 8.0 ({KICAD8.symbol_library}). This server "
-            "reads the libraries of KiCad 8 and later. Open the library in the symbol "
-            "editor of KiCad 8 or later and save it."
+            "reads the libraries of KiCad 8 and later. Tell the user: run `kicad-cli sym "
+            f"upgrade {symbol.file}` of KiCad {kicad}: it saves the library in the version "
+            f"of KiCad {kicad}."
         )
     if version > KICAD10.symbol_library:
         return (
@@ -416,14 +453,26 @@ def _version_problem(symbol: LibrarySymbol, kicad: str) -> str | None:
             f"is newer than the version of KiCad 10.0 ({KICAD10.symbol_library}). This "
             "server has no rules for a library of a nightly build."
         )
-    release = kicad_release(kicad)
-    if release is not None and version > release.symbol_library:
-        return (
-            f"The symbol library file {symbol.file} has the file version {version}, which "
-            f"is newer than the version of KiCad {release.name} ({release.symbol_library}). "
-            f"The installed KiCad {kicad} cannot read it."
-        )
     return None
+
+
+def library_symbol_versions(chain: list[LibrarySymbol], row: LibraryRow, kicad: str) -> None:
+    """Compare the library files of a symbol and its parents with the installed KiCad:
+    a newer file is an error, an older file a warning for the output of the tool call
+    (file_versions.check_library_files). Then the files that the server cannot read.
+
+    Raises:
+        LibraryLookupError: KiCad or the server cannot read a file of the chain.
+    """
+    files = [(symbol.file, symbol.version) for symbol in chain]
+    try:
+        warnings = file_versions.check_library_files("symbol", {row.path: files}, kicad)
+    except FileVersionError as e:
+        raise LibraryLookupError(str(e)) from e
+    for symbol in chain:
+        if problem := _version_problem(symbol, kicad):
+            raise LibraryLookupError(problem)
+    record_library_warnings(warnings)
 
 
 def _yes(value: bool) -> str:
@@ -536,9 +585,7 @@ def _read_symbol(
     chain, row, problems = find_library_symbol(
         library_name, symbol_name, kicad, project_file(project_path)
     )
-    for symbol in chain:
-        if problem := _version_problem(symbol, kicad):
-            raise LibraryLookupError(problem)
+    library_symbol_versions(chain, row, kicad)
     try:
         return chain, row, problems, symbol_info(chain, rules)
     except KicadFileError as e:
@@ -563,6 +610,7 @@ async def _get_symbol(lib_id: str, project_path: str) -> str:
 
 
 @mcp.tool()
+@with_library_versions
 async def get_library_symbol(lib_id: str, project_path: str = "") -> str:
     """Show the content of a symbol of a KiCad library: fields, units and pins.
 
@@ -852,11 +900,21 @@ def _find_footprint(
         library tables, the .kicad_mod file).
 
     Raises:
-        LibraryLookupError: The library or the footprint is not there.
+        LibraryLookupError: The library or the footprint is not there, or its file is
+            newer than the installed KiCad (file_versions.check_library_files: an older
+            file gives a warning).
         InputError: The project path gives no project or more than one.
     """
     project = project_file(project_path)
-    return project, *_footprint_file(library_name, footprint_name, kicad, project)
+    row, problems, file = _footprint_file(library_name, footprint_name, kicad, project)
+    version = library_file_version(file, "footprint")
+    try:
+        files = {row.path: [(file, version)]}
+        warnings = file_versions.check_library_files("footprint", files, kicad)
+    except FileVersionError as e:
+        raise LibraryLookupError(str(e)) from e
+    record_library_warnings(warnings)
+    return project, row, problems, file
 
 
 def _footprint_file(
@@ -974,6 +1032,7 @@ async def _get_footprint(lib_id: str, project_path: str) -> str:
 
 
 @mcp.tool()
+@with_library_versions
 async def get_library_footprint(lib_id: str, project_path: str = "") -> str:
     """Show the content of a footprint of a KiCad library: pads, courtyard, attributes, 3D models.
 
@@ -1239,6 +1298,7 @@ async def _check_pin_pad_mapping(symbol_id: str, footprint_id: str, project_path
 
 
 @mcp.tool()
+@with_library_versions
 async def check_pin_pad_mapping(
     symbol_lib_id: str, footprint_lib_id: str = "", project_path: str = ""
 ) -> str:
@@ -1666,6 +1726,44 @@ class SchematicFootprints:
     problems: list[str]  # The problems of the library tables.
 
 
+def _export_library_versions(row: LibraryRow, kicad: str) -> None:
+    """Check each footprint file of a library for the SVG export of kicad-cli.
+
+    PCBNEW_JOBS_HANDLER::JobExportFpSvg (KiCad 8.0.9, 9.0.9 and 10.0.7) loads the full
+    library (FP_CACHE::Load): a file that KiCad cannot read stops the export of each
+    footprint ("Unable to load library"). The versions come from the library index.
+
+    Raises:
+        LibraryLookupError: A file of the library is newer than the installed KiCad.
+    """
+    items, _problems = library_items("footprint", row)
+    files = [(Path(item.file), item.version) for item in items if item.version is not None]
+    found = file_versions.check_library_versions("footprint", {row.path: files}, kicad)
+    if found.problems:
+        raise LibraryLookupError(
+            "kicad-cli loads the full footprint library for the export, and it cannot read a "
+            f"file of it: {' '.join(found.problems)}"
+        )
+
+
+def _footprint_versions(
+    files: dict[str, tuple[Path, str]], rows: list[LibraryRow], kicad: str
+) -> file_versions.LibraryCheck:
+    """Compare the footprint files of a schematic with the installed KiCad. The versions
+    come from the library index (library_items: the file and the version of each
+    footprint), thus the files are not read again."""
+    known: dict[Path, int | None] = {}
+    for row in rows:
+        items, _problems = library_items("footprint", row)
+        known.update((Path(item.file), item.version) for item in items)
+    by_library: dict[Path, list[tuple[Path, int]]] = {}
+    for library_path, name in files.values():
+        file = library_path / f"{name}.kicad_mod"
+        if (version := known.get(file)) is not None:
+            by_library.setdefault(library_path, []).append((file, version))
+    return file_versions.check_library_versions("footprint", by_library, kicad)
+
+
 async def schematic_footprints(
     path: Path, kicad: str, references: list[str] | None = None, embedded: bool = False
 ) -> SchematicFootprints | str:
@@ -1747,6 +1845,17 @@ async def schematic_footprints(
             )
         else:
             files[footprint] = (library_found[0].path, name)
+    used = [found for found in libraries.values() if not isinstance(found, str)]
+    versions = await asyncio.to_thread(_footprint_versions, files, [row for row, _ in used], kicad)
+    for footprint, (library_path, name) in list(files.items()):
+        file = library_path / f"{name}.kicad_mod"
+        if file in versions.newer:
+            reasons[footprint] = (
+                f'KiCad {kicad} cannot read the footprint "{footprint}": its file {file} has '
+                "a newer file version."
+            )
+            del files[footprint]
+    record_library_warnings(versions.warnings + [f"⚠️ {p}" for p in versions.problems])
     try:
         reader, loaded = await read_footprints(list(files.values()), embedded)
     except FootprintReadError as e:
@@ -1840,6 +1949,7 @@ async def _check_schematic(schematic_path: str, references: list[str] | None) ->
 
 @mcp.tool()
 @with_schematic_versions("schematic_path")
+@with_library_versions
 async def check_schematic_pin_pad_mapping(
     schematic_path: str, references: list[str] | None = None
 ) -> str:
@@ -2063,6 +2173,7 @@ async def _render(
             _project, row, problems, _file = _find_footprint(
                 library_name, item_name, kicad, project_path
             )
+            _export_library_versions(row, kicad)
             return row, problems, None
         try:
             chain, row, problems, info = _read_symbol(library_name, item_name, kicad, project_path)
@@ -2221,6 +2332,7 @@ async def _render(
 
 
 @mcp.tool()
+@with_library_versions
 async def render_library_item(
     lib_id: str,
     item_type: str,

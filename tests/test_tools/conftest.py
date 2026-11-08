@@ -4,9 +4,9 @@ long64 and long32 set the size of a C long, thus a test gives the same result on
 each system: a C long has 64 bits on Linux and macOS and 32 bits on Windows
 (parsers/c_numbers.py).
 
-Before each tool, the server compares the schematic files and the board of the
-project with the version that the installed KiCad writes (utils/file_versions.py): an
-older file
+Before each tool, the server compares the schematic files, the board and the
+libraries of the project with the version that the installed KiCad writes
+(utils/file_versions.py): an older file
 gives a warning, or an error for a tool that writes. The tests of a tool test its rules
 on the fixtures as they are, files of KiCad 8, 9 and 10: thus each test gets no check,
 except a test with the marker file_versions (the tests of the check;
@@ -27,6 +27,12 @@ def _no_file_version_check(request, monkeypatch):
             monkeypatch.setattr(
                 file_versions, check, lambda path, write: file_versions.FileVersions("", "")
             )
+        monkeypatch.setattr(file_versions, "library_versions", lambda kind, libraries, kicad: [])
+        monkeypatch.setattr(
+            file_versions,
+            "check_library_versions",
+            lambda kind, libraries, kicad: file_versions.LibraryCheck([], [], set()),
+        )
 
 
 def _long(monkeypatch, bits: int):

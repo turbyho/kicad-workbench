@@ -23,6 +23,7 @@ the installed KiCad writes:
 """
 
 import asyncio
+import contextvars
 import functools
 import inspect
 import os
@@ -35,10 +36,12 @@ from ..parsers.kicad_versions import (
     KICAD8,
     RELEASES,
     Release,
+    footprint_version,
     header_version,
     kicad_release,
     version_numbers,
 )
+from ..parsers.sexpr import parse
 from .kicad_cli import (
     kicad_cli_version_sync,
     no_kicad_message,
@@ -52,6 +55,7 @@ from .kicad_project import (
     text_variables,
     top_level_sheets,
 )
+from .kicad_text import read_as_kicad
 from .sch_hierarchy import AmbiguousRootError, file_versions_of_load, schematic_project_file
 from .tool_errors import error_answer
 
@@ -506,3 +510,192 @@ def with_board_versions(argument: str, write: bool = False) -> Callable:
         write: True for a tool that writes the board.
     """
     return _with_check("check_board_file_version", argument, write, "the board file version")
+
+
+# The kinds of library files: the attribute of Release, the name for the messages and
+# the kicad-cli command that converts the library (kicad-cli 8, 9 and 10 save the
+# library in place: spike/kicad-versions/library_versions_check.py).
+_LIBRARY_KINDS = {
+    "symbol": ("symbol_library", "symbol library", "sym"),
+    "footprint": ("board", "footprint library", "fp"),
+}
+
+
+def _newer_library_error(
+    kind: str, library: Path, newer: list[tuple[Path, int]], kicad: str, written: Written
+) -> str:
+    attribute, name, _command = _LIBRARY_KINDS[kind]
+    newest = max(version for _file, version in newer)
+    release = next((r for r in RELEASES if getattr(r, attribute) >= newest), None)
+    step = "use the library in the KiCad that saved it"
+    if release is not None:
+        step += f", or install KiCad {release.name} or later"
+    return (
+        f"The {name} {library} has the files {_files_text(newer)}, of a newer file version "
+        f"than {_written_text(kicad, written)}: KiCad {kicad} cannot read them. Tell the "
+        f"user: {step}. Then do the work again."
+    )
+
+
+def library_versions(
+    kind: str, libraries: dict[Path, list[tuple[Path, int]]], kicad: str
+) -> list[str]:
+    """Compare the file versions of the libraries that a tool reads with the version that
+    the installed KiCad writes, as check_schematic_versions does for a schematic.
+
+    Each KiCad reads a library of an older version, and `kicad-cli sym upgrade` or
+    `kicad-cli fp upgrade` (KiCad 8, 9 and 10; KiCad 10 also for a directory of symbol
+    library files) saves it in its own version. KiCad cannot read a library file of a
+    newer version.
+
+    Args:
+        kind: "symbol" or "footprint".
+        libraries: For each library (a .kicad_sym file or directory, a .pretty
+            directory), its files with their file version.
+        kicad: The version of the installed KiCad.
+
+    Returns:
+        A warning for each library with an older file (empty: no such library).
+
+    Raises:
+        FileVersionError: A file is newer than the installed KiCad.
+    """
+    attribute, name, command = _LIBRARY_KINDS[kind]
+    written = _written_version(kicad, attribute)
+    warnings = []
+    for library, files in libraries.items():
+        newer, old, unknown = _split(list(dict.fromkeys(files)), written)
+        if newer:
+            raise FileVersionError(_newer_library_error(kind, library, newer, kicad, written))
+        if unknown:
+            warnings.append(_unknown_warning(kicad, f"the {name} {library}", unknown, written))
+        if old:
+            more = f" and {len(old) - 5} more files" if len(old) > 5 else ""
+            warnings.append(
+                f"⚠️ The {name} {library} has files of an older file version than "
+                f"{_written_text(kicad, written)}: {_files_text(old[:5])}{more}. The tool "
+                f"reads them as KiCad {kicad} loads them, and does not change the library. To "
+                f"convert the library, tell the user: run `kicad-cli {command} upgrade "
+                f"{library}` of KiCad {kicad}. It saves the library in the version of KiCad "
+                f"{kicad}, and an older KiCad cannot read the library then."
+            )
+    return warnings
+
+
+@dataclass(frozen=True)
+class LibraryCheck:
+    """The result of check_library_versions."""
+
+    warnings: list[str]  # the libraries with an older file (library_versions)
+    problems: list[str]  # the libraries with a newer file: KiCad cannot read the file
+    newer: set[Path]  # the files of a newer version
+
+
+def check_library_versions(
+    kind: str, libraries: dict[Path, list[tuple[Path, int]]], kicad: str
+) -> LibraryCheck:
+    """Compare the files of more than one item with the installed KiCad, as KiCad loads
+    a library: a file of a newer version is an error for that file only, and KiCad loads
+    the other files (PCB_IO_KICAD_SEXPR::getFootprint and FootprintEnumerate ignore the
+    error of FP_CACHE::Load for the other footprints; a .kicad_sym file is one file).
+    """
+    attribute = _LIBRARY_KINDS[kind][0]
+    written = _written_version(kicad, attribute)
+    warnings: list[str] = []
+    problems: list[str] = []
+    newer_files: set[Path] = set()
+    for library, files in libraries.items():
+        newer, _old, _unknown = _split(list(dict.fromkeys(files)), written)
+        if newer:
+            problems.append(_newer_library_error(kind, library, newer, kicad, written))
+            newer_files.update(file for file, _version in newer)
+        readable = [(file, v) for file, v in files if file not in newer_files]
+        warnings += library_versions(kind, {library: readable}, kicad)
+    return LibraryCheck(warnings, problems, newer_files)
+
+
+def library_file_version(path: Path, kind: str) -> int | None:
+    """Return the file version of a library file, or None (the reader of the tool then
+    gives the error).
+
+    A .kicad_sym file has the (version N) in its header. A .kicad_mod file can have it
+    after the name of the footprint (kicad_versions.footprint_version). A footprint
+    file is small: the function parses it.
+    """
+    if kind == "symbol":
+        return _file_version(path, "kicad_symbol_lib")
+    try:
+        return footprint_version(parse(read_as_kicad(path)))
+    except (OSError, WorkbenchError):
+        return None
+
+
+# The warnings about older libraries in one tool call (see with_library_versions).
+_library_warnings: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "library_warnings", default=None
+)
+
+
+def check_library_files(
+    kind: str, libraries: dict[Path, list[tuple[Path, int | None]]], kicad: str
+) -> list[str]:
+    """Compare the library files of one item that a tool reads with the installed KiCad
+    (library_versions). A file with no version is not compared (the reader of the tool
+    gives the error).
+
+    Args:
+        kind: "symbol" or "footprint".
+        libraries: For each library (the path of its row), the files that the tool reads,
+            with the file version that the reader got (library_file_version).
+        kicad: The version of the installed KiCad.
+
+    Returns:
+        The warnings: give them to record_library_warnings after the other checks of
+        the reader, thus an error has no warning before it.
+
+    Raises:
+        FileVersionError: A file is newer than the installed KiCad.
+    """
+    versions = {
+        library: [(file, v) for file, v in files if v is not None]
+        for library, files in libraries.items()
+    }
+    return library_versions(kind, versions, kicad)
+
+
+def record_library_warnings(warnings: list[str]) -> None:
+    """Keep the warnings about older libraries for the output of the tool call
+    (with_library_versions)."""
+    kept = _library_warnings.get()
+    if kept is not None:
+        kept.extend(warning for warning in warnings if warning not in kept)
+
+
+def with_library_versions(function: Callable) -> Callable:
+    """Put the warnings about older libraries (record_library_warnings) at the start of
+    the output of an async tool: of its text, or of the first text of a list. A tool that an other decorated tool calls adds no
+    warning: the outer tool adds them. Put the decorator below @mcp.tool()."""
+
+    @functools.wraps(function)
+    async def wrapper(*args, **kwargs):
+        if _library_warnings.get() is not None:
+            return await function(*args, **kwargs)
+        token = _library_warnings.set([])
+        try:
+            result = await function(*args, **kwargs)
+            warnings = _library_warnings.get()
+        finally:
+            _library_warnings.reset(token)
+        if not warnings:
+            return result
+        if isinstance(result, str):
+            return "\n\n".join([*warnings, result])
+        if isinstance(result, list):
+            # A tool that gives images (render_library_item): the text comes first.
+            text = "\n\n".join(warnings)
+            if result and isinstance(result[0], str):
+                return [f"{text}\n\n{result[0]}", *result[1:]]
+            return [text, *result]
+        return result
+
+    return wrapper

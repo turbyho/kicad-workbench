@@ -634,6 +634,24 @@ class TestListLibraries:
 
 
 class TestSearchTools:
+    @pytest.mark.file_versions
+    async def test_the_versions_of_the_libraries_of_the_results(self, tables):
+        """The libraries are of KiCad 9 (20241209): KiCad 10 reads them, with a warning.
+        KiCad 10 cannot read a newer library: its symbols are not results."""
+        device = tables["libs"] / "Device.kicad_sym"
+        out = await library_tools.search_library_symbols("resistor")
+        assert out.startswith(
+            f"⚠️ The symbol library {device} has files of an older file version than KiCad "
+            f"10.0.6 writes (20251024): {device} (version 20241209)."
+        ), out
+        assert table_rows(out) == [["Device:R", "Resistor \\| global", "R res", ""]]
+        text = device.read_text(encoding="utf-8")
+        device.write_text(text.replace("20241209", "20261015"), encoding="utf-8")
+        out = await library_tools.search_library_symbols("resistor")
+        assert "Found: 0 in 1 library" in out and "⚠️" not in out.split("\n")[0], out
+        assert f"- The symbol library {device} has the files {device} (version 20261015)" in out
+        assert "KiCad 10.0.6 cannot read them" in out
+
     async def test_project_library_replaces_global(self, tables):
         out = await library_tools.search_library_symbols("resistor", str(tables["project"]))
         assert table_rows(out) == [["Device:R", "Resistor of the project", "", ""]]

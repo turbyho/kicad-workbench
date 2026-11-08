@@ -64,9 +64,9 @@ The tools must give the result that KiCad gives. A small difference is also a de
    only where the parser of that KiCad branches on it. The installed version also
    applies to kicad-cli, the global library tables and the checks that KiCad runs.
    The server does not convert files (`utils/file_versions.py`,
-   `with_schematic_versions` and `with_board_versions` on each tool): a schematic or a
-   board of an older version gives a warning with the step for the user, and a tool
-   that writes refuses it. A file of an
+   `with_schematic_versions`, `with_board_versions` and `with_library_versions` on each
+   tool): a schematic, a board or a library of an older version gives a warning with
+   the step for the user, and a tool that writes refuses an older schematic or board. A file of an
    unknown version, or of a newer version than the installed KiCad, gives an error.
    The minimum is KiCad 8.
 4. Compare a new rule with real KiCad 8, 9 and 10. Unit tests alone do not show that a
@@ -137,4 +137,4 @@ src/kicad_workbench/
 | `utils/library_tables.py`, `library_lookup.py`, `library_index.py` | Library tables, path variables, library search |
 | `utils/kicad_lock.py`, `kicad_text.py`, `user_files.py` | Lock files, text encoding, the cache folder |
 | `utils/file_save.py` | The save of a file as KiCad 10.0.7 saves it (a temporary file, then a rename) |
-| `utils/file_versions.py` | The check of the file versions of the schematics and the board of a project against the installed KiCad, before each tool |
+| `utils/file_versions.py` | The check of the file versions of the schematics, the board and the libraries against the installed KiCad |

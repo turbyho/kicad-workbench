@@ -96,6 +96,18 @@ def file_version(root: Node) -> int | None:
     return _version_text(first.value(0))
 
 
+def footprint_version(root: Node) -> int | None:
+    """Return the file version of a parsed footprint (a .kicad_mod file), or None.
+
+    PCB_IO_KICAD_SEXPR_PARSER::parseFOOTPRINT_unchecked reads each (version N) of the
+    footprint, also after its name, and keeps the largest (m_requiredVersion).
+    """
+    if root.head not in ("footprint", "module"):
+        return None
+    numbers = [n for n in (_version_text(node.value(0)) for node in root.children("version")) if n]
+    return max(numbers) if numbers else None
+
+
 def header_version(text: str, head: str) -> int | None:
     """Return the (version N) of the text of a KiCad file with the head, or None.
 

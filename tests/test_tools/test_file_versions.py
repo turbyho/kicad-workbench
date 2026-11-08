@@ -385,3 +385,62 @@ def test_the_board_of_a_sub_sheet(tmp_path, monkeypatch):
     installed(monkeypatch, "10.0.6")
     warning = check_board(folder / "child.kicad_sch").warning
     assert warning.startswith(f"⚠️ The board {path} (version 20240108) has an older")
+
+
+def test_the_version_of_a_footprint_file(tmp_path):
+    """parseFOOTPRINT_unchecked reads each (version N) of the footprint and keeps the
+    largest; the version can come after the name."""
+    path = tmp_path / "R.kicad_mod"
+    for text, version in (
+        ('(footprint "R" (version 20240108) (layer "F.Cu"))', 20240108),
+        ('(footprint "R" (layer "F.Cu") (version 20221018) (version 20241229))', 20241229),
+        ('(module "R" (version 20210228))', 20210228),
+        ('(footprint "R" (layer "F.Cu"))', None),
+        ("(footprint", None),
+    ):
+        path.write_text(text, encoding="utf-8")
+        assert file_versions.library_file_version(path, "footprint") == version, text
+    path = tmp_path / "L.kicad_sym"
+    path.write_text("(kicad_symbol_lib (version 20241209))", encoding="utf-8")
+    assert file_versions.library_file_version(path, "symbol") == 20241209
+
+
+def test_library_versions(tmp_path):
+    library = tmp_path / "Lib.pretty"
+    old = [(library / f"F{n}.kicad_mod", 20240108) for n in range(7)]
+    warnings = file_versions.library_versions("footprint", {library: old}, "10.0.6")
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.startswith(
+        f"⚠️ The footprint library {library} has files of an older file version than KiCad "
+        f"10.0.6 writes (20260206): {library / 'F0.kicad_mod'} (version 20240108), "
+    )
+    assert "(version 20240108) and 2 more files. The tool reads them" in warning
+    assert f"run `kicad-cli fp upgrade {library}` of KiCad 10.0.6" in warning
+    current = [(library / "F.kicad_mod", 20260206)]
+    assert file_versions.library_versions("footprint", {library: current}, "10.0.6") == []
+    with pytest.raises(Error, match="KiCad 9.0.9 cannot read them. Tell the user: use the"):
+        file_versions.library_versions("footprint", {library: current}, "9.0.9")
+
+
+async def test_the_library_warnings_of_a_tool_call():
+    """The warnings come before the text, also of a tool that gives images; a tool that
+    an other decorated tool calls adds no warning."""
+
+    @file_versions.with_library_versions
+    async def inner() -> str:
+        file_versions.record_library_warnings(["⚠️ inner"])
+        return "inner text"
+
+    @file_versions.with_library_versions
+    async def images() -> list:
+        file_versions.record_library_warnings(["⚠️ a", "⚠️ a", "⚠️ b"])
+        return ["text", b"image"]
+
+    @file_versions.with_library_versions
+    async def outer() -> str:
+        return await inner()
+
+    assert await images() == ["⚠️ a\n\n⚠️ b\n\ntext", b"image"]
+    assert await outer() == "⚠️ inner\n\ninner text"
+    file_versions.record_library_warnings(["⚠️ outside a tool call"])  # no error

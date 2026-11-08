@@ -66,8 +66,14 @@ from ..parsers.sexpr import (
 )
 from ..parsers.sheet_list import kiid, kiid_path
 from ..server import mcp
+from ..utils import file_versions
 from ..utils.file_stamp import FileStamp, read_for_write_stamped
-from ..utils.file_versions import with_schematic_versions
+from ..utils.file_versions import (
+    FileVersionError,
+    record_library_warnings,
+    with_library_versions,
+    with_schematic_versions,
+)
 from ..utils.kicad_cli import kicad_cli_version_sync, no_kicad_message
 from ..utils.kicad_lock import writable_schematic_version, write_schematic, write_with_warning
 from ..utils.kicad_project import (
@@ -270,7 +276,9 @@ def _library_definition(
     error = f"❌ Cannot add component {lib_id}:"
     try:
         chain, row, problems = find_library_symbol(library_name, symbol_name, kicad, project)
-    except LibraryLookupError as e:
+        files = [(symbol.file, symbol.version) for symbol in chain]
+        warnings = file_versions.check_library_files("symbol", {row.path: files}, kicad)
+    except (LibraryLookupError, FileVersionError) as e:
         return f"{error} {e}"
     # Each symbol of the chain goes into the schematic in the format of its
     # library file. KiCad must read it there in the same way.
@@ -281,6 +289,7 @@ def _library_definition(
         text = flatten(chain, lib_id, rules_for_version(version).kicad)
     except KicadFileError as e:
         return f"{error} {e}"
+    record_library_warnings(warnings)
     return indent(text, 2), row.path, problems
 
 
@@ -1272,6 +1281,7 @@ def _add_component_from_library_sync(
 
 @mcp.tool()
 @with_schematic_versions("file_path", write=True)
+@with_library_versions
 async def add_component_from_library(
     file_path: str,
     library_name: str,

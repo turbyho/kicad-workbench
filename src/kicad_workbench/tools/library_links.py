@@ -33,7 +33,11 @@ from ..parsers.check_report_parser import (
 from ..parsers.kicad_versions import version_numbers
 from ..parsers.sexpr import SExprError
 from ..server import mcp
-from ..utils.file_versions import with_board_versions, with_schematic_versions
+from ..utils.file_versions import (
+    with_board_versions,
+    with_library_versions,
+    with_schematic_versions,
+)
 from ..utils.kicad_cli import (
     KicadCliError,
     decode_output,
@@ -518,6 +522,7 @@ async def _check_links(project_path: str) -> str:
 @mcp.tool()
 @with_board_versions("project_path")
 @with_schematic_versions("project_path")
+@with_library_versions
 async def check_library_links(project_path: str) -> str:
     """Check the links of a project to its symbol and footprint libraries and 3D models.
 

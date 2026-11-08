@@ -13,6 +13,7 @@ import pytest
 
 from kicad_workbench.parsers.kicad_versions import header_version
 from kicad_workbench.parsers.sexpr import quote
+from kicad_workbench.tools import pcb_layout as pcb_layout_module
 from kicad_workbench.tools.pcb_layout import _version_warning, setup_pcb_layout
 from kicad_workbench.utils import kicad_python
 from kicad_workbench.utils.kicad_cli import find_kicad_cli, run_kicad_cli_sync
@@ -43,8 +44,14 @@ def _fake_board(version: int | None, title: str, width: float, height: float) ->
 
 @pytest.fixture
 def fake_pcbnew(monkeypatch):
-    """Replace the pcbnew script run. Set "board" and "kicad" to change its output."""
+    """Replace the pcbnew script run. Set "board" and "kicad" to change its output;
+    kicad-cli is of the same KiCad (set "cli" for an other one)."""
     state = {"board": 20260206, "kicad": "10.0.6", "calls": []}
+
+    async def cli_version():
+        return state.get("cli", state["kicad"])
+
+    monkeypatch.setattr(pcb_layout_module, "get_kicad_version", cli_version)
 
     def run(args, timeout=120.0, input=None):
         state["calls"].append(args)
@@ -112,6 +119,18 @@ class TestNewBoard:
         result = setup(sch, width=50, height=40, overwrite=True)
         assert result.startswith("✅"), result
         assert "R_0603" not in pcb.read_text(encoding="utf-8")
+
+
+class TestOneKicad:
+    def test_pcbnew_of_an_other_kicad(self, tmp_path, fake_pcbnew):
+        fake_pcbnew.update(kicad="9.0.9", cli="10.0.6")
+        sch = write_schematic(tmp_path, 20260306)
+        result = setup(sch)
+        assert result.startswith(
+            "❌ kicad-cli is KiCad 10.0.6, but the Python with pcbnew is KiCad 9.0.9."
+        ), result
+        assert result.endswith("The tool did not write the board.")
+        assert not sch.with_suffix(".kicad_pcb").exists()
 
 
 class TestRefusal:

@@ -48,11 +48,25 @@ def no_pcbnew(monkeypatch):
     monkeypatch.setattr(kicad_cli, "find_kicad_cli", lambda: "/usr/bin/kicad-cli")
 
 
-def fake_pcbnew(monkeypatch, load_board, version="10.0.6"):
+def fake_pcbnew(monkeypatch, load_board, version="10.0.6", cli=None):
+    """A pcbnew of a KiCad version, and kicad-cli of the same version (or of cli)."""
     module = types.ModuleType("pcbnew")
     module.LoadBoard = load_board
     module.GetMajorMinorPatchVersion = lambda: version
     monkeypatch.setitem(sys.modules, "pcbnew", module)
+    async def cli_version():
+        return cli or version
+
+    monkeypatch.setattr(kicad_cli, "get_kicad_version", cli_version)
+
+
+def test_pcbnew_of_an_other_kicad(monkeypatch):
+    """The pcbnew of the server process and kicad-cli must be of one KiCad."""
+    fake_pcbnew(monkeypatch, lambda path: pytest.fail("no load"), "9.0.9", cli="10.0.6")
+    result = run("list_pcb_footprints", BOARD)
+    assert result.startswith(
+        "❌ kicad-cli is KiCad 10.0.6, but the pcbnew of the server process is KiCad 9.0.9."
+    ), result
 
 
 @pytest.mark.parametrize("tool, kwargs", TOOLS)

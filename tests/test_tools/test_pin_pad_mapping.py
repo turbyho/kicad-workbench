@@ -601,7 +601,7 @@ class TestCheckSchematicPinPadMapping:
         out = await library_tools.check_schematic_pin_pad_mapping(str(board["schematic"]))
         assert out.startswith(
             "❌ kicad-cli is KiCad 10.0.6, but the Python with pcbnew is KiCad 9.0.9."
-        )
+        ), out
 
     async def test_nightly_build(self, board, monkeypatch):
         set_version(board, monkeypatch, "10.99.0")

@@ -17,9 +17,9 @@ from ..parsers.sexpr import SExprError, parse
 from ..server import mcp
 from ..utils.file_stamp import FileStamp, file_stamp
 from ..utils.file_versions import with_board_versions, with_schematic_versions
-from ..utils.kicad_cli import decode_output, run_kicad_cli
+from ..utils.kicad_cli import decode_output, get_kicad_version, no_kicad_message, run_kicad_cli
 from ..utils.kicad_lock import check_board_not_open, write_board, write_with_warning
-from ..utils.kicad_python import KicadPythonError, board_text
+from ..utils.kicad_python import KicadPythonError, board_text, check_same_kicad
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from ..utils.tool_errors import error_answer
 
@@ -114,10 +114,14 @@ async def setup_pcb_layout(
             return checked
         stamp, version = checked
 
+        cli = await get_kicad_version()
+        if cli is None:
+            return f"❌ {no_kicad_message()}"
         try:
             pcb_content, kicad = await board_text(pcb_path.name, sch_path.stem, (w, h))
+            check_same_kicad(kicad, "the Python with pcbnew", cli)
         except (FileNotFoundError, KicadPythonError) as e:
-            return f"❌ {e}"
+            return f"❌ {e} The tool did not write the board."
         except subprocess.TimeoutExpired as e:
             return f"❌ pcbnew did not stop in {e.timeout:g} s. The tool did not write the board."
         board_version = header_version(pcb_content, "kicad_pcb")

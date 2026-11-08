@@ -85,3 +85,15 @@ class TestRunKicadPython:
             assert returncode == 0, stderr
             assert stdout.strip() == text
             assert stderr == text
+
+
+class TestCheckSameKicad:
+    def test_one_kicad(self):
+        kicad_python.check_same_kicad("10.0.6", "pcbnew", "10.0.7")  # one major and minor
+
+    def test_an_other_kicad(self):
+        with pytest.raises(kicad_python.KicadPythonError) as error:
+            kicad_python.check_same_kicad("9.0.9", "the Python with pcbnew", "10.0.6")
+        assert str(error.value).startswith(
+            "kicad-cli is KiCad 10.0.6, but the Python with pcbnew is KiCad 9.0.9."
+        )

@@ -623,9 +623,14 @@ class TestGetLibraryFootprint:
         assert "footprint editor" in out
 
     async def test_pcbnew_of_an_other_kicad(self, footprints):
+        # The reader prints the version of the pcbnew that read the footprint.
         footprints["result"]["value"] = ("9.0.9", footprint_info(script_result(kicad="9.0.9")))
         out = await library_tools.get_library_footprint("Lib:Test")
-        assert "kicad-cli is KiCad 10.0.6, but the Python with pcbnew is KiCad 9.0.9" in out
+        assert out.startswith(
+            "❌ Cannot read the footprint Lib:Test: kicad-cli is KiCad 10.0.6, but the Python "
+            "with pcbnew is KiCad 9.0.9."
+        ), out
+        assert "KICAD_PYTHON" in out
 
     async def test_pcbnew_error(self, footprints, monkeypatch):
         async def read(library, name):

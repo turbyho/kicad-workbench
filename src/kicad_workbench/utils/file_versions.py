@@ -369,6 +369,14 @@ def check_schematic_versions(path: Path, write: bool) -> FileVersions:
     return FileVersions(kicad, "\n\n".join(lines))
 
 
+def _with_warnings(result: str, warnings: list[str]) -> str:
+    """Put the warnings of a check before the text of a tool, or after it when the text
+    is an error: an error starts with "❌" (CLAUDE.md rule 7)."""
+    if result.startswith("❌"):
+        return "\n\n".join([result, *warnings])
+    return "\n\n".join([*warnings, result])
+
+
 def with_schematic_versions(argument: str, write: bool = False) -> Callable:
     """Compare the schematic files of the project of a tool argument with the installed
     KiCad before an async tool runs (check_schematic_versions).
@@ -413,7 +421,7 @@ def _with_check(check: str, argument: str, write: bool, what: str) -> Callable:
                 if token is not None:
                     reset_call_version(token)
             if checked.warning and isinstance(result, str):
-                return f"{checked.warning}\n\n{result}"
+                return _with_warnings(result, [checked.warning])
             return result
 
         return wrapper
@@ -689,7 +697,7 @@ def with_library_versions(function: Callable) -> Callable:
         if not warnings:
             return result
         if isinstance(result, str):
-            return "\n\n".join([*warnings, result])
+            return _with_warnings(result, warnings)
         if isinstance(result, list):
             # A tool that gives images (render_library_item): the text comes first.
             text = "\n\n".join(warnings)

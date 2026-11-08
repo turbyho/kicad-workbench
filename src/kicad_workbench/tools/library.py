@@ -53,6 +53,7 @@ from ..utils.kicad_cli import (
     no_kicad_message,
     run_kicad_cli_sync,
 )
+from ..utils.kicad_python import KicadPythonError, check_same_kicad
 from ..utils.kicad_text import KiCadEncodingError, decode_as_kicad, read_as_kicad
 from ..utils.library_footprint import (
     FootprintInfo,
@@ -984,14 +985,9 @@ async def _read_footprint(
     )
     try:
         reader, info = await read_library_footprint(row.path, footprint_name)
-    except FootprintReadError as e:
+        check_same_kicad(reader, "the Python with pcbnew", kicad)
+    except (FootprintReadError, KicadPythonError) as e:
         raise LibraryLookupError(str(e)) from e
-    if version_numbers(reader) != version_numbers(kicad):
-        raise LibraryLookupError(
-            f"kicad-cli is KiCad {kicad}, but the Python with pcbnew is KiCad {reader}. "
-            "The library tables and the reader of the footprint must be the same KiCad. "
-            f"Set KICAD_PYTHON to the Python of KiCad {kicad}."
-        )
     if info is None:
         raise LibraryLookupError(
             f"KiCad {reader} cannot read the file {file}. pcbnew does not give the "
@@ -1860,12 +1856,11 @@ async def schematic_footprints(
         reader, loaded = await read_footprints(list(files.values()), embedded)
     except FootprintReadError as e:
         return f"❌ pcbnew cannot read the footprints: {e}"
-    if files and version_numbers(reader) != version_numbers(kicad):
-        return (
-            f"❌ kicad-cli is KiCad {kicad}, but the Python with pcbnew is KiCad {reader}. "
-            "The netlist, the library tables and the reader of the footprints must be the "
-            f"same KiCad. Set KICAD_PYTHON to the Python of KiCad {kicad}."
-        )
+    try:
+        if files:
+            check_same_kicad(reader, "the Python with pcbnew", kicad)
+    except KicadPythonError as e:
+        return f"❌ {e}"
     items = {}
     for footprint, footprint_items in zip(files, loaded, strict=True):
         if footprint_items is None:

@@ -444,3 +444,17 @@ async def test_the_library_warnings_of_a_tool_call():
     assert await images() == ["⚠️ a\n\n⚠️ b\n\ntext", b"image"]
     assert await outer() == "⚠️ inner\n\ninner text"
     file_versions.record_library_warnings(["⚠️ outside a tool call"])  # no error
+
+
+async def test_an_error_of_the_tool_comes_before_the_warnings(tmp_path, monkeypatch):
+    folder = hier(tmp_path)
+    installed(monkeypatch, "10.0.6")
+
+    @file_versions.with_schematic_versions("file_path")
+    async def tool(file_path: str) -> str:
+        file_versions.record_library_warnings(["⚠️ library"])
+        return "❌ The tool failed."
+
+    out = await file_versions.with_library_versions(tool)(str(folder / "root.kicad_sch"))
+    assert out.startswith("❌ The tool failed.\n\n⚠️ The schematic files"), out
+    assert out.endswith("\n\n⚠️ library")

@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 from ..errors import WorkbenchError
+from ..parsers.kicad_versions import version_numbers
 from .kicad_cli import INSTALL_KICAD, find_kicad_cli, fs_encoding
 from .kicad_version import find_kicad_install
 
@@ -104,7 +105,9 @@ def run_kicad_python_sync(
     ``input`` is the stdin of the child (for data that is too large for an
     argument). With no input, the child gets no stdin.
 
-    Raises FileNotFoundError when no such interpreter can be located.
+    Raises FileNotFoundError when no such interpreter can be located. Each
+    script prints the version of its pcbnew: the caller compares it with
+    kicad-cli (check_same_kicad).
     """
     exe = find_kicad_python()
     if exe is None:
@@ -118,6 +121,30 @@ def run_kicad_python_sync(
         env=_child_env(),
         **stdin,
     )
+
+
+def check_same_kicad(pcbnew_version: str, reader: str, kicad: str) -> None:
+    """Make sure that pcbnew and kicad-cli are of one KiCad (the same major and minor
+    version): the files, the library tables and the checks are of the installed
+    KiCad, which kicad-cli gives (CLAUDE.md rule 4).
+
+    Args:
+        pcbnew_version: The KiCad version of the pcbnew that did the work
+            (GetMajorMinorPatchVersion: each pcbnew script prints it).
+        reader: The name of the pcbnew for the message.
+        kicad: The version of kicad-cli that the tool uses (get_kicad_version).
+
+    Raises:
+        KicadPythonError: The pcbnew is of an other KiCad.
+    """
+    if version_numbers(kicad) != version_numbers(pcbnew_version):
+        raise KicadPythonError(
+            f"kicad-cli is KiCad {kicad}, but {reader} is KiCad {pcbnew_version}. The tools "
+            "use the files, the library tables and the checks of one KiCad. Tell the user: "
+            f"give the Python of KiCad {kicad} in the environment variable KICAD_PYTHON (or "
+            f"install the server into it), or the kicad-cli of KiCad {pcbnew_version} in "
+            "KICAD_CLI."
+        )
 
 
 def _child_env() -> dict[str, str]:

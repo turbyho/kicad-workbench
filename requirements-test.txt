@@ -5,3 +5,6 @@ pytest-cov>=4.0.0
 
 # The build backend: tests/test_build_content.py builds the sdist and the wheel
 hatchling>=1.4.0
+
+# The protobuf messages of the IPC tests (the version of the extra "ipc")
+kicad-python==0.8.0

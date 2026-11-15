@@ -1,6 +1,6 @@
 # Tools
 
-The server has 52 tools. Each tool returns Markdown text (the image tools also return
+The server has 54 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -168,6 +168,8 @@ KiCad 10.0.6 now. More tools come in the next versions.
 | Tool | What it does |
 |---|---|
 | `ipc_status(board_path?)` | The state of the connection: the version of kicad-python and of the running KiCad, the open editors and boards, if the tools can write now, and the limits of the running KiCad version with the version that solves each limit |
+| `ipc_get_selection(board_path)` | The items that the user selected in the PCB editor: type, reference, net, layer, position and ID |
+| `ipc_select_items(board_path, references?, nets?, mode?)` | Selects footprints by reference, and the tracks, arcs, vias and shapes of nets (the item types of "Select All Tracks in Net"). The selection filter of the editor does not apply: the API cannot read it. `mode`: `replace`, `add`, `remove` or `clear`. The selection is no change of the board (no undo step) |
 
 ## Exports and images
 

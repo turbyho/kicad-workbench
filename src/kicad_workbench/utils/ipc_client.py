@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 from tempfile import gettempdir
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..errors import WorkbenchError
 from ..parsers.kicad_versions import (
@@ -108,6 +108,39 @@ LIMITS = {
             "11.0 (kicad-cli api-server, not released)",
             "plans/ipc-spike.md, group G",
         ),
+        Limit(
+            "no_data_tables_points",
+            "The API gives no data for tables, table cells and reference points.",
+            "10.0.7 (kicad-python 0.8.0 does not know these types)",
+            "PCB_TABLE, PCB_TABLECELL and PCB_POINT have no Serialize in 10.0.6; "
+            "commits 15eda6b8ec and d41d1e81f9 of 10.0.7",
+        ),
+        Limit(
+            "no_data_markers_patterns_targets",
+            "The API gives no data for DRC markers, tuning patterns and targets.",
+            "11.0 for DRC markers and tuning patterns (not released); no version for "
+            "targets (master 2026-11-15)",
+            "PCB_MARKER, PCB_TUNING_PATTERN and PCB_TARGET have no Serialize in 10.0.6 to "
+            "10.0.8; master serializes PCB_MARKER and PCB_TUNING_PATTERN",
+        ),
+        Limit(
+            "selection_filter",
+            "The API cannot read or use the selection filter of the PCB editor: the tools "
+            "select the items with no filter.",
+            "no version (master 2026-11-15)",
+            "SELECTION_TOOL::AddItemsToSel selects with no itemPassesFilter (10.0.6); no "
+            "selection filter in the .proto files of master",
+        ),
+        Limit(
+            "run_action_parameter",
+            "RunAction gives each action the parameter true (a bool). An action that reads "
+            'a parameter of an other type (for example the net code of "Select All Tracks '
+            'in Net") fails an assert of KiCad. The tools run no such action.',
+            "no version (master 2026-11-15)",
+            "handleRunAction calls TOOL_MANAGER::RunAction( aCtx.Request.action(), true ): "
+            "the template RunAction( const std::string&, T aParam ) stores true as the "
+            "parameter (10.0.6 to master); TOOL_EVENT::Parameter asserts on bad_any_cast",
+        ),
     )
 }
 
@@ -143,6 +176,10 @@ IPC_RULES = {
                 "update_from_schematic",
                 "modified_state",
                 "gui_only",
+                "no_data_tables_points",
+                "no_data_markers_patterns_targets",
+                "selection_filter",
+                "run_action_parameter",
             ),
             "spike/kicad-versions/ipc_client_check.py with KiCad 10.0.6 (2026-11-15)",
         ),
@@ -183,7 +220,22 @@ def kicad_python_version() -> str | None:
         return None
 
 
-def _import_kipy():
+@dataclass(frozen=True)
+class _Kipy:
+    """The modules and the names of kicad-python that the client uses."""
+
+    module: Any
+    client_class: Any
+    errors: Any
+    document_type: Any
+    object_type: Any
+    editor_commands: Any
+    board_commands: Any
+    unpack_any: Any
+    canonical_name: Any
+
+
+def _import_kipy() -> _Kipy:
     """Import kipy, and refuse a kicad-python of an other version than the rules."""
     installed = kicad_python_version()
     if installed is None:
@@ -197,10 +249,24 @@ def _import_kipy():
         import kipy
         import kipy.client
         import kipy.errors
-        from kipy.proto.common.types import DocumentType
+        from kipy.proto.board import board_commands_pb2
+        from kipy.proto.common.commands import editor_commands_pb2
+        from kipy.proto.common.types import DocumentType, KiCadObjectType
+        from kipy.util.board_layer import canonical_name
+        from kipy.util.proto import unpack_any
     except ImportError as error:
         raise IpcError(f"kicad-python cannot be imported: {error}. {INSTALL_STEP}") from None
-    return kipy, kipy.errors, DocumentType
+    return _Kipy(
+        module=kipy,
+        client_class=kipy.client.KiCadClient,
+        errors=kipy.errors,
+        document_type=DocumentType,
+        object_type=KiCadObjectType,
+        editor_commands=editor_commands_pb2,
+        board_commands=board_commands_pb2,
+        unpack_any=unpack_any,
+        canonical_name=canonical_name,
+    )
 
 
 def socket_path() -> tuple[str, str]:
@@ -303,13 +369,100 @@ class KicadState:
         return None
 
 
+@dataclass(frozen=True)
+class BoardItem:
+    """One item of the board as KiCad gives it through the API: a summary for the user.
+
+    kind is the name of the protobuf message (for example "FootprintInstance", "Track",
+    "Via", "Pad", "Zone"), or "" when KiCad gave no data. problem tells why the client
+    cannot read the item, or it is "".
+    """
+
+    kind: str
+    id: str = ""
+    text: str = ""
+    net: str = ""
+    layer: str = ""
+    position: tuple[int, int] | None = None
+    problem: str = ""
+
+
+# KiCad gives an empty message for an item type with no Serialize function
+# (SERIALIZABLE::Serialize of KiCad 10.0.6 only asserts).
+NO_DATA = (
+    "KiCad gave no data for this item: the API of this KiCad version cannot serialize "
+    "its type (for example a table, a reference point or a DRC marker)"
+)
+
+
+def describe_item(k: _Kipy, message) -> BoardItem:
+    """Return the summary of an item of an answer of KiCad (a google.protobuf.Any)."""
+    if not message.type_url:
+        return BoardItem("", problem=NO_DATA)
+    kind = message.type_url.rsplit(".", 1)[-1]
+    try:
+        item = k.unpack_any(message)
+    except NotImplementedError:
+        return BoardItem(
+            kind,
+            problem=f"kicad-python {KICAD_PYTHON_VERSION} does not know the type "
+            f"{message.type_url}",
+        )
+    except ValueError as error:
+        return BoardItem(kind, problem=f"kicad-python cannot read the item: {error}")
+    fields = item.DESCRIPTOR.fields_by_name
+    item_id = ""
+    if "id" in fields and fields["id"].message_type.full_name == "kiapi.common.types.KIID":
+        item_id = item.id.value
+    if kind == "FootprintInstance":
+        text = item.reference_field.text.text.text
+    elif kind == "Pad":
+        text = item.number
+    elif kind in ("Zone", "Group"):
+        text = item.name
+    elif kind == "Field":
+        text = f"{item.name}: {item.text.text.text}"
+    elif kind in ("BoardText", "Dimension"):
+        text = item.text.text
+    elif kind == "BoardTextBox":
+        text = item.textbox.text
+    elif kind == "Barcode":
+        text = item.text
+    else:
+        text = ""
+    if "net" in fields:
+        net = item.net.name
+    elif kind == "Zone":
+        # The net of a copper zone (CopperZoneSettings).
+        net = item.copper_settings.net.name
+    else:
+        net = ""
+    if "layer" in fields:
+        layers = [item.layer]
+    elif "layers" in fields:
+        layers = list(item.layers)
+    elif "pad_stack" in fields:
+        # The layers of a via or a pad (PadStack).
+        layers = list(item.pad_stack.layers)
+    else:
+        layers = []
+    layer = ", ".join(k.canonical_name(layer) for layer in layers)
+    if "position" in fields:
+        position = (item.position.x_nm, item.position.y_nm)
+    elif "start" in fields:
+        position = (item.start.x_nm, item.start.y_nm)
+    else:
+        position = None
+    return BoardItem(kind, item_id, text, net, layer, position)
+
+
 class IpcSession:
     """A connection to the running KiCad for one tool call (open_session)."""
 
-    def __init__(self, kicad: KiCad, errors, document_type, state: KicadState):
+    def __init__(self, k: _Kipy, client, kicad: KiCad, state: KicadState):
+        self._k = k
+        self.client = client
         self.kicad = kicad
-        self._errors = errors
-        self._document_type = document_type
         self.state = state
 
     def call(self, request: str, function, *args, **kwargs):
@@ -320,8 +473,16 @@ class IpcSession:
         """
         try:
             return function(*args, **kwargs)
-        except (self._errors.ConnectionError, self._errors.ApiError) as error:
-            raise _translate(error, self._errors, request) from None
+        except (self._k.errors.ConnectionError, self._k.errors.ApiError) as error:
+            raise _translate(error, self._k.errors, request) from None
+
+    def send(self, command, response_type):
+        """Send a protobuf command to KiCad, and return its answer.
+
+        The item commands go directly to the client: the wrappers of kicad-python 0.8.0
+        stop on an item that KiCad gives with no data (unpack_any refuses an empty
+        message), and describe_item reads each item."""
+        return self.call(type(command).__name__, self.client.send, command, response_type)
 
     def board(self, board_path: str | Path) -> Board:
         """Return the board of the PCB editor, when it is the board of the tool argument.
@@ -335,8 +496,8 @@ class IpcSession:
             "GetOpenDocuments",
             _open_documents,
             self.kicad,
-            self._errors,
-            self._document_type.DOCTYPE_PCB,
+            self._k.errors,
+            self._k.document_type.DOCTYPE_PCB,
         )
         if not documents:
             raise IpcError(NO_PCB_EDITOR)
@@ -359,11 +520,98 @@ class IpcSession:
         Raises:
             IpcError: The reason (KicadState.write_problem).
         """
-        state = _read_state(self.kicad, self._errors, self._document_type, self.state.version)
+        state = _read_state(self.kicad, self._k, self.state.version)
         self.state = state
         problem = state.write_problem()
         if problem:
             raise IpcError(problem)
+
+    # The items of the board.
+
+    def footprints(self, board: Board) -> list[BoardItem]:
+        """Return the footprints of the board (GetItems)."""
+        command = self._k.editor_commands.GetItems()
+        command.header.document.CopyFrom(board.document)
+        command.types.append(self._k.object_type.KOT_PCB_FOOTPRINT)
+        answer = self.send(command, self._k.editor_commands.GetItemsResponse)
+        return [describe_item(self._k, item) for item in answer.items]
+
+    def net_names(self, board: Board) -> list[str]:
+        """Return the names of the nets of the board (GetNets)."""
+        command = self._k.board_commands.GetNets()
+        command.board.CopyFrom(board.document)
+        answer = self.send(command, self._k.board_commands.NetsResponse)
+        return [net.name for net in answer.nets]
+
+    def net_items(self, board: Board, nets: list[str]) -> list[BoardItem]:
+        """Return the tracks, arcs, vias and shapes of the nets: the item types that
+        "Select All Tracks in Net" selects (PCB_SELECTION_TOOL::SelectAllItemsOnNet of
+        KiCad 10.0.6), through GetItemsByNet. The selection filter of the editor does not
+        apply (limit selection_filter)."""
+        types = self._k.object_type
+        command = self._k.board_commands.GetItemsByNet()
+        command.header.document.CopyFrom(board.document)
+        command.types.extend(
+            [types.KOT_PCB_TRACE, types.KOT_PCB_ARC, types.KOT_PCB_VIA, types.KOT_PCB_SHAPE]
+        )
+        for name in nets:
+            command.nets.add().name = name
+        answer = self.send(command, self._k.editor_commands.GetItemsResponse)
+        return [describe_item(self._k, item) for item in answer.items]
+
+    def check_busy(self, board: Board) -> None:
+        """Give the busy error when KiCad cannot do a request that changes the editor.
+
+        The request is GetBoundingBox with no item: handleGetBoundingBox of KiCad 10.0.6
+        calls checkForBusy first, and gives an empty answer for no item.
+
+        Raises:
+            IpcError: KiCad is busy (BUSY), or an other error of the request.
+        """
+        command = self._k.editor_commands.GetBoundingBox()
+        command.header.document.CopyFrom(board.document)
+        self.send(command, self._k.editor_commands.GetBoundingBoxResponse)
+
+    # The selection of the PCB editor. The selection is no change of the board: no
+    # commit, no undo step.
+
+    def selection(self, board: Board) -> list[BoardItem]:
+        """Return the selected items of the PCB editor (GetSelection)."""
+        command = self._k.editor_commands.GetSelection()
+        command.header.document.CopyFrom(board.document)
+        answer = self.send(command, self._k.editor_commands.SelectionResponse)
+        return [describe_item(self._k, item) for item in answer.items]
+
+    def clear_selection(self, board: Board) -> None:
+        """Clear the selection of the PCB editor (ClearSelection)."""
+        command = self._k.editor_commands.ClearSelection()
+        command.header.document.CopyFrom(board.document)
+        self.send(command, _empty())
+
+    def add_to_selection(self, board: Board, ids: list[str]) -> list[BoardItem]:
+        """Add items to the selection (AddToSelection), and return the new selection.
+
+        KiCad ignores an ID that it does not find (handleAddToSelection)."""
+        return self._change_selection(self._k.editor_commands.AddToSelection(), board, ids)
+
+    def remove_from_selection(self, board: Board, ids: list[str]) -> list[BoardItem]:
+        """Remove items from the selection (RemoveFromSelection), and return the new
+        selection. KiCad ignores an ID that it does not find."""
+        return self._change_selection(self._k.editor_commands.RemoveFromSelection(), board, ids)
+
+    def _change_selection(self, command, board: Board, ids: list[str]) -> list[BoardItem]:
+        command.header.document.CopyFrom(board.document)
+        for item_id in ids:
+            command.items.add().value = item_id
+        answer = self.send(command, self._k.editor_commands.SelectionResponse)
+        return [describe_item(self._k, item) for item in answer.items]
+
+
+def _empty():
+    """The class of the empty answer (google.protobuf.Empty)."""
+    from google.protobuf.empty_pb2 import Empty
+
+    return Empty
 
 
 def _open_documents(kicad: KiCad, errors, document_type) -> list:
@@ -377,17 +625,18 @@ def _open_documents(kicad: KiCad, errors, document_type) -> list:
         raise
 
 
-def _read_state(kicad: KiCad, errors, document_type, version: str | None = None) -> KicadState:
+def _read_state(kicad: KiCad, k: _Kipy, version: str | None = None) -> KicadState:
     """Read the version and the open editors of the running KiCad."""
+    errors = k.errors
     try:
         if version is None:
             version = kicad.get_version().full_version
         rules = rules_for(version)
         boards = tuple(
             Path(d.project.path) / d.board_filename
-            for d in _open_documents(kicad, errors, document_type.DOCTYPE_PCB)
+            for d in _open_documents(kicad, errors, k.document_type.DOCTYPE_PCB)
         )
-        schematic_open = bool(_open_documents(kicad, errors, document_type.DOCTYPE_SCHEMATIC))
+        schematic_open = bool(_open_documents(kicad, errors, k.document_type.DOCTYPE_SCHEMATIC))
     except (errors.ConnectionError, errors.ApiError) as error:
         raise _translate(error, errors, "GetVersion and GetOpenDocuments") from None
     return KicadState(version, rules, boards, schematic_open)
@@ -397,6 +646,18 @@ def _read_state(kicad: KiCad, errors, document_type, version: str | None = None)
 # KiCad does the requests of all clients one after the other. Reentrant: a session in a
 # session of the same thread gets its own connection.
 _SESSION_LOCK = threading.RLock()
+
+
+def _new_client(k: _Kipy):
+    """Make the client of kicad-python for one session: its own client name, the socket
+    of socket_path, and the token of kicad-python 0.8.0 (kipy/kicad.py,
+    _default_kicad_token)."""
+    return k.client_class(
+        socket_path()[0],
+        f"kicad-workbench-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+        os.environ.get("KICAD_API_TOKEN", ""),
+        TIMEOUT_MS,
+    )
 
 
 @contextmanager
@@ -415,19 +676,13 @@ def open_session() -> Iterator[IpcSession]:
         IpcError: kicad-python is not installed, KiCad does not answer, or the server
             has no IPC rules for the running KiCad.
     """
-    kipy, errors, document_type = _import_kipy()
+    k = _import_kipy()
     with _SESSION_LOCK:
-        client = kipy.client.KiCadClient(
-            socket_path()[0],
-            f"kicad-workbench-{os.getpid()}-{uuid.uuid4().hex[:8]}",
-            # The token of kicad-python 0.8.0 (kipy/kicad.py, _default_kicad_token).
-            os.environ.get("KICAD_API_TOKEN", ""),
-            TIMEOUT_MS,
-        )
+        client = _new_client(k)
         try:
-            kicad = kipy.KiCad.from_client(client)
-            state = _read_state(kicad, errors, document_type)
-            yield IpcSession(kicad, errors, document_type, state)
+            kicad = k.module.KiCad.from_client(client)
+            state = _read_state(kicad, k)
+            yield IpcSession(k, client, kicad, state)
         finally:
             _close(client)
 

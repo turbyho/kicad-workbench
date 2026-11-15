@@ -1,153 +1,262 @@
-"""Tests of the IPC client (utils/ipc_client.py) and of ipc_status, with a fake kipy.
+"""Tests of the IPC session (utils/ipc_client.py) and of the IPC tools with kicad-python.
 
-The answers of the fake KiCad are the answers that KiCad 10.0.6 gave to
-spike/ipc/probe_3a.py (2026-11-15): spike/kicad-versions/ipc_client_check.py compares
-the client with the real KiCad.
+The tests use kicad-python 0.8.0 (the extra "test") with a fake client: the fake KiCad
+answers the protobuf commands as KiCad 10.0.6 answered them in the checks
+(spike/ipc/probe_3a.py, spike/kicad-versions/ipc_client_check.py and
+ipc_selection_check.py, 2026-11-15). test_ipc_rules.py has the tests that need no
+kicad-python.
 """
 
 import asyncio
-import types
 from pathlib import Path
 
 import pytest
 
-from kicad_workbench.utils import ipc_client
-from kicad_workbench.utils.ipc_client import IpcError
+pytest.importorskip("kipy")
 
+from google.protobuf.any_pb2 import Any  # noqa: E402
+from kipy.errors import ApiError, ConnectionError  # noqa: E402
+from kipy.proto.board import board_types_pb2  # noqa: E402
+from kipy.proto.board.board_types_pb2 import BoardLayer  # noqa: E402
+from kipy.proto.common.types import DocumentType, KiCadObjectType  # noqa: E402
 
-class FakeConnectionError(Exception):
-    pass
+from kicad_workbench.tools import ipc  # noqa: E402
+from kicad_workbench.utils import ipc_client  # noqa: E402
+from kicad_workbench.utils.ipc_client import IpcError  # noqa: E402
 
-
-class FakeApiError(Exception):
-    def __init__(self, message, code):
-        super().__init__(message)
-        self.code = code
-
-
-ERRORS = types.SimpleNamespace(ConnectionError=FakeConnectionError, ApiError=FakeApiError)
-DOCUMENT_TYPE = types.SimpleNamespace(DOCTYPE_SCHEMATIC=1, DOCTYPE_PCB=3)
-NO_HANDLER = FakeApiError(
-    "KiCad returned error: no handler available for request of type "
-    "kiapi.common.commands.GetOpenDocuments",
-    ipc_client.AS_UNHANDLED,
+NO_HANDLER = "KiCad returned error: no handler available for request of type {}"
+KINDS = (
+    board_types_pb2.FootprintInstance,
+    board_types_pb2.Via,
+    board_types_pb2.Track,
+    board_types_pb2.Pad,
+    board_types_pb2.Zone,
 )
+# The item types of PCB_SELECTION_TOOL::SelectAllItemsOnNet (KiCad 10.0.6).
+NET_SELECTION_KINDS = ("Track", "Arc", "Via", "BoardGraphicShape")
 
 
-def document(path: Path):
-    return types.SimpleNamespace(
-        board_filename=path.name,
-        project=types.SimpleNamespace(name=path.stem, path=str(path.parent)),
-    )
+def packed(message) -> Any:
+    container = Any()
+    container.Pack(message)
+    return container
 
 
-class FakeClient:
-    """The KiCadClient of kicad-python 0.8.0: the socket is _conn while connected."""
+def footprint(item_id: str, reference: str, x_mm: float = 1.5) -> Any:
+    item = board_types_pb2.FootprintInstance()
+    item.id.value = item_id
+    item.reference_field.text.text.text = reference
+    item.layer = BoardLayer.BL_F_Cu
+    item.position.x_nm = int(x_mm * 1_000_000)
+    item.position.y_nm = -2_000_000
+    return packed(item)
 
-    clients: list = []
 
-    def __init__(self, socket_path, client_name, kicad_token, timeout_ms):
-        self.socket_path = socket_path
-        self.client_name = client_name
-        self.connected = True
-        self._conn = types.SimpleNamespace(closed=False)
-        self._conn.close = lambda: setattr(self._conn, "closed", True)
-        FakeClient.clients.append(self)
+def via(item_id: str, net: str) -> Any:
+    item = board_types_pb2.Via()
+    item.id.value = item_id
+    item.net.name = net
+    item.position.x_nm = 100_000_001
+    item.pad_stack.layers.extend([BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu])
+    return packed(item)
+
+
+def track(item_id: str, net: str) -> Any:
+    item = board_types_pb2.Track()
+    item.id.value = item_id
+    item.net.name = net
+    item.layer = BoardLayer.BL_B_Cu
+    item.start.x_nm = 3_000_000
+    return packed(item)
+
+
+def pad(item_id: str, net: str) -> Any:
+    item = board_types_pb2.Pad()
+    item.id.value = item_id
+    item.number = "1"
+    item.net.name = net
+    return packed(item)
+
+
+def zone(item_id: str, net: str) -> Any:
+    item = board_types_pb2.Zone()
+    item.id.value = item_id
+    item.name = "fill | top"
+    item.copper_settings.net.name = net
+    item.layers.append(BoardLayer.BL_F_Cu)
+    return packed(item)
+
+
+def info(item: Any) -> tuple[str, str, str]:
+    """The ID, the type and the net of a packed item."""
+    for kind in KINDS:
+        if item.Is(kind.DESCRIPTOR):
+            message = kind()
+            item.Unpack(message)
+            net = message.copper_settings.net.name if kind is board_types_pb2.Zone else ""
+            if hasattr(message, "net"):
+                net = message.net.name
+            return message.id.value, kind.DESCRIPTOR.name, net
+    return "", "", ""
 
 
 class FakeKiCad:
-    """A KiCad with an optional board in the PCB editor and an optional schematic editor."""
+    """The state of a running KiCad 10.0.6 with a board in the PCB editor."""
 
-    board_path: Path | None = None
-    schematic_open = False
-    version = "10.0.6"
-    failure: Exception | None = None
-    footprints_failure: Exception | None = None
+    def __init__(self, board_path: Path):
+        self.version = "10.0.6"
+        self.board_path: Path | None = board_path
+        self.schematic_open = False
+        self.failure: Exception | None = None
+        self.busy = False
+        self.footprints = [footprint("fp-r1", "R1"), footprint("fp-u3", "U3", 2.25)]
+        self.net_items = {
+            "GND": [pad("pad-g", "GND"), via("via-1", "GND"), via("via-2", "GND")],
+            "/SDA": [track("trk-1", "/SDA"), zone("zone-1", "/SDA")],
+            "+3V3": [],
+        }
+        self.other_items = {"table-1": Any()}  # an item with no Serialize (no data)
+        self.selected: list[str] = []
+        self.clients: list = []
+        self.requests: list[str] = []
+        # A request that fails one time (its name and the error), for the restore of the
+        # selection.
+        self.fail_once: tuple[str, Exception] | None = None
 
-    @classmethod
-    def from_client(cls, client):
-        kicad = cls()
-        kicad.client = client
-        return kicad
+    def all_items(self) -> list[Any]:
+        return self.footprints + [i for items in self.net_items.values() for i in items]
 
-    def get_version(self):
+    def item(self, wanted: str) -> Any | None:
+        for item in self.all_items():
+            if info(item)[0] == wanted:
+                return item
+        return self.other_items.get(wanted)
+
+    def answer(self, command, response_type):
+        name = type(command).__name__
+        self.requests.append(name)
         if self.failure:
             raise self.failure
-        return types.SimpleNamespace(full_version=self.version)
+        if self.fail_once and name == self.fail_once[0]:
+            error = self.fail_once[1]
+            self.fail_once = None
+            raise error
+        if name == "GetVersion":
+            response = response_type()
+            response.version.full_version = self.version
+            return response
+        if name == "GetOpenDocuments":
+            return self._open_documents(command, response_type)
+        if self.board_path is None:
+            raise ApiError(NO_HANDLER.format(name), code=ipc_client.AS_UNHANDLED)
+        if self.busy and name != "GetSelection":
+            # GetSelection does not call checkForBusy (KiCad 10.0.6).
+            raise ApiError("KiCad returned error: busy", code=ipc_client.AS_BUSY)
+        response = response_type()
+        if name == "GetItems":
+            assert list(command.types) == [KiCadObjectType.KOT_PCB_FOOTPRINT]
+            response.items.extend(self.footprints)
+        elif name == "GetNets":
+            for net in self.net_items:
+                response.nets.add().name = net
+        elif name == "GetItemsByNet":
+            assert list(command.types) == [
+                KiCadObjectType.KOT_PCB_TRACE,
+                KiCadObjectType.KOT_PCB_ARC,
+                KiCadObjectType.KOT_PCB_VIA,
+                KiCadObjectType.KOT_PCB_SHAPE,
+            ]
+            for net in command.nets:
+                response.items.extend(
+                    item
+                    for item in self.net_items.get(net.name, [])
+                    if info(item)[1] in NET_SELECTION_KINDS
+                )
+        elif name == "GetBoundingBox":
+            assert list(command.items) == []
+        elif name == "ClearSelection":
+            self.selected = []
+        elif name in ("AddToSelection", "RemoveFromSelection", "GetSelection"):
+            ids = [item.value for item in getattr(command, "items", [])]
+            if name == "AddToSelection":
+                # KiCad ignores an ID that it does not find (handleAddToSelection).
+                self.selected += [i for i in ids if self.item(i) and i not in self.selected]
+            if name == "RemoveFromSelection":
+                self.selected = [i for i in self.selected if i not in ids]
+            response.items.extend(self.item(i) for i in self.selected)
+        else:
+            raise AssertionError(f"no fake answer for {name}")
+        return response
 
-    def get_open_documents(self, doc_type):
-        if self.failure:
-            raise self.failure
-        if doc_type == DOCUMENT_TYPE.DOCTYPE_PCB and self.board_path:
-            return [document(self.board_path)]
-        if doc_type == DOCUMENT_TYPE.DOCTYPE_SCHEMATIC and self.schematic_open:
+    def _open_documents(self, command, response_type):
+        response = response_type()
+        if command.type == DocumentType.DOCTYPE_PCB and self.board_path:
+            document = response.documents.add()
+            document.type = DocumentType.DOCTYPE_PCB
+            document.board_filename = self.board_path.name
+            document.project.name = self.board_path.stem
+            document.project.path = str(self.board_path.parent)
+            return response
+        if command.type == DocumentType.DOCTYPE_SCHEMATIC and self.schematic_open:
             # KiCad 10.0.6 gives the file name of the schematic and no project.
-            return [types.SimpleNamespace(board_filename="x.kicad_sch", project=None)]
-        raise NO_HANDLER
+            response.documents.add().board_filename = "x.kicad_sch"
+            return response
+        raise ApiError(NO_HANDLER.format("GetOpenDocuments"), code=ipc_client.AS_UNHANDLED)
 
-    def get_board(self):
-        def get_footprints():
-            if self.footprints_failure:
-                raise self.footprints_failure
-            return [object()] * 56
 
-        return types.SimpleNamespace(
-            document=document(self.board_path), get_footprints=get_footprints
-        )
+class FakeClient:
+    """The KiCadClient of kicad-python 0.8.0: send, connected and the socket _conn."""
+
+    def __init__(self, kicad: FakeKiCad, socket_path, client_name):
+        self.kicad = kicad
+        self.socket_path = socket_path
+        self.client_name = client_name
+        self.connected = True
+        self.closed = False
+        self._conn = self
+
+    def close(self):
+        self.closed = True
+
+    def send(self, command, response_type):
+        return self.kicad.answer(command, response_type)
 
 
 @pytest.fixture
 def kicad(monkeypatch, tmp_path):
     """The fake KiCad of open_session, with the board tmp_path/board.kicad_pcb open."""
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("(kicad_pcb)", encoding="utf-8")
+    fake = FakeKiCad(board)
+    real_new_client = ipc_client._new_client
 
-    class Instance(FakeKiCad):
-        board_path = tmp_path / "board.kicad_pcb"
+    def new_client(k):
+        real = real_new_client(k)
+        client = FakeClient(fake, real._socket_path, real._client_name)
+        fake.clients.append(client)
+        return client
 
-    Instance.board_path.write_text("(kicad_pcb)", encoding="utf-8")
-    FakeClient.clients = []
-    kipy = types.SimpleNamespace(
-        KiCad=Instance, client=types.SimpleNamespace(KiCadClient=FakeClient)
-    )
-    monkeypatch.setattr(ipc_client, "_import_kipy", lambda: (kipy, ERRORS, DOCUMENT_TYPE))
-    return Instance
-
-
-def test_rules_of_the_known_version():
-    rules = ipc_client.rules_for("10.0.6")
-    assert rules.name == "10.0.6"
-    assert rules.has_limit("schematic_editor_commit")
-    assert all(key in ipc_client.LIMITS for key in rules.limits)
+    monkeypatch.setattr(ipc_client, "_new_client", new_client)
+    monkeypatch.setattr(ipc_client, "kicad_python_version", lambda: "0.8.0")
+    return fake
 
 
-@pytest.mark.parametrize(
-    "version", ["10.0.7", "10.0.8", "9.0.9", "10.99.0", "10.0.6-rc1", "10.0.6-12-g1234abc"]
-)
-def test_a_version_with_no_rules(version):
-    with pytest.raises(IpcError, match=f"no IPC rules for KiCad {version}. It knows only"):
-        ipc_client.rules_for(version)
+def run(coroutine) -> str:
+    return asyncio.run(coroutine)
 
 
-def test_no_kicad_python(monkeypatch):
-    monkeypatch.setattr(ipc_client, "kicad_python_version", lambda: None)
-    with pytest.raises(IpcError, match=r"kicad-python is not installed\. Tell the user: install"):
-        ipc_client._import_kipy()
-
-
-def test_an_other_kicad_python(monkeypatch):
-    monkeypatch.setattr(ipc_client, "kicad_python_version", lambda: "0.9.0")
-    with pytest.raises(IpcError, match="needs kicad-python 0.8.0, but 0.9.0 is installed"):
-        ipc_client._import_kipy()
+# The session.
 
 
 def test_kicad_not_running(kicad):
-    kicad.failure = FakeConnectionError("Failed to connect to KiCad: Connection refused")
+    kicad.failure = ConnectionError("Failed to connect to KiCad: Connection refused")
     with pytest.raises(IpcError, match="KiCad is not running, or its API server is off"):
         with ipc_client.open_session():
             pass
 
 
 def test_kicad_does_not_answer(kicad):
-    kicad.failure = FakeConnectionError("Error receiving reply from KiCad: Timed out")
+    kicad.failure = ConnectionError("Error receiving reply from KiCad: Timed out")
     with pytest.raises(
         IpcError,
         match=r"did not answer the request GetVersion and GetOpenDocuments \(Error receiving "
@@ -158,14 +267,14 @@ def test_kicad_does_not_answer(kicad):
 
 
 def test_kicad_busy(kicad):
-    kicad.failure = FakeApiError("KiCad returned error: KiCad is busy", ipc_client.AS_BUSY)
+    kicad.failure = ApiError("KiCad returned error: busy", code=ipc_client.AS_BUSY)
     with pytest.raises(IpcError, match="KiCad is busy: a dialog is open"):
         with ipc_client.open_session():
             pass
 
 
 def test_an_other_api_error(kicad):
-    kicad.failure = FakeApiError("KiCad returned error: bad", 3)
+    kicad.failure = ApiError("KiCad returned error: bad", code=3)
     with pytest.raises(IpcError, match="KiCad refused the request GetVersion"):
         with ipc_client.open_session():
             pass
@@ -184,7 +293,7 @@ def test_the_state_of_kicad(kicad):
         assert session.state.boards == (kicad.board_path,)
         assert not session.state.schematic_open
         assert session.state.write_problem() is None
-        assert session.kicad.client.client_name.startswith("kicad-workbench-")
+        assert session.client.client_name.startswith("kicad-workbench-")
 
 
 def test_each_session_has_its_own_client_and_closes_it(kicad):
@@ -192,48 +301,24 @@ def test_each_session_has_its_own_client_and_closes_it(kicad):
     with ipc_client.open_session():
         with ipc_client.open_session():  # reentrant in the same thread
             pass
-    first, second = FakeClient.clients
+    first, second = kicad.clients
     assert first.client_name != second.client_name
-    assert first._conn.closed and second._conn.closed
+    assert first.closed and second.closed
 
 
 def test_the_session_closes_the_client_on_an_error(kicad):
-    kicad.failure = FakeApiError("busy", ipc_client.AS_BUSY)
+    kicad.failure = ApiError("busy", code=ipc_client.AS_BUSY)
     with pytest.raises(IpcError):
         with ipc_client.open_session():
             pass
-    assert FakeClient.clients[0]._conn.closed
+    assert kicad.clients[0].closed
 
 
-def test_the_socket_of_kicad_api_socket(kicad, monkeypatch):
+def test_the_session_uses_the_socket(kicad, monkeypatch):
     monkeypatch.setenv("KICAD_API_SOCKET", "ipc:///x/api.sock")
     with ipc_client.open_session():
         pass
-    assert FakeClient.clients[0].socket_path == "ipc:///x/api.sock"
-    assert ipc_client.socket_text() == "`ipc:///x/api.sock` (KICAD_API_SOCKET)"
-
-
-@pytest.mark.parametrize(
-    "system, flatpak, expected",
-    [
-        ("Linux", False, "ipc:///tmp/kicad/api.sock"),
-        ("Darwin", False, "ipc:///tmp/kicad/api.sock"),
-        ("Linux", True, "ipc://{home}/.var/app/org.kicad.KiCad/cache/tmp/kicad/api.sock"),
-        ("Windows", False, "ipc://{temp}\\kicad\\api.sock"),
-    ],
-)
-def test_the_default_socket(monkeypatch, tmp_path, system, flatpak, expected):
-    """The rules of _default_socket_path of kicad-python 0.8.0."""
-    monkeypatch.delenv("KICAD_API_SOCKET", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(ipc_client.platform, "system", lambda: system)
-    monkeypatch.setattr(ipc_client, "gettempdir", lambda: "T")
-    if flatpak:
-        socket = tmp_path / ".var/app/org.kicad.KiCad/cache/tmp/kicad/api.sock"
-        socket.parent.mkdir(parents=True)
-        socket.touch()
-    path, _ = ipc_client.socket_path()
-    assert path == expected.format(home=tmp_path, temp="T")
+    assert kicad.clients[0].socket_path == "ipc:///x/api.sock"
 
 
 def test_no_pcb_editor(kicad):
@@ -253,14 +338,13 @@ def test_the_pcb_editor_closes_in_the_session(kicad):
 
 
 def test_a_request_with_no_editor(kicad):
-    def unhandled():
-        raise NO_HANDLER
-
     with ipc_client.open_session() as session:
+        board = session.board(kicad.board_path)
+        kicad.board_path = None
         with pytest.raises(
             IpcError, match="No open editor of KiCad answers the request GetItems. The PCB"
         ):
-            session.call("GetItems", unhandled)
+            session.footprints(board)
 
 
 def test_the_board_of_the_argument(kicad, tmp_path, monkeypatch):
@@ -291,74 +375,227 @@ def test_the_guard_reads_the_state_again(kicad):
             session.check_write()
 
 
-def test_session_call_translates_the_errors(kicad):
-    def busy():
-        raise FakeApiError("busy", ipc_client.AS_BUSY)
+# The items of the board.
 
-    with ipc_client.open_session() as session:
-        assert session.call("GetItems", lambda: 56) == 56
-        with pytest.raises(IpcError, match="KiCad is busy"):
-            session.call("GetItems", busy)
+
+def test_describe_items(kicad):
+    k = ipc_client._import_kipy()
+    item = ipc_client.describe_item(k, footprint("fp-1", "R1"))
+    assert item == ipc_client.BoardItem(
+        "FootprintInstance", "fp-1", "R1", "", "F.Cu", (1_500_000, -2_000_000)
+    )
+    item = ipc_client.describe_item(k, track("trk-1", "/SDA"))
+    assert (item.kind, item.net, item.layer, item.position) == (
+        "Track",
+        "/SDA",
+        "B.Cu",
+        (3_000_000, 0),
+    )
+    item = ipc_client.describe_item(k, via("via-1", "GND"))
+    assert (item.net, item.layer) == ("GND", "F.Cu, B.Cu")
+    item = ipc_client.describe_item(k, zone("zone-1", "/SDA"))
+    assert (item.text, item.net, item.layer) == ("fill | top", "/SDA", "F.Cu")
+    field = board_types_pb2.Field()
+    field.name = "Value"
+    field.text.text.text = "10k"
+    assert ipc_client.describe_item(k, packed(field)).text == "Value: 10k"
+
+
+def test_describe_an_item_with_no_data(kicad):
+    """KiCad 10.0.6 gives an empty message for a type with no Serialize (a table)."""
+    item = ipc_client.describe_item(ipc_client._import_kipy(), Any())
+    assert item.kind == "" and item.problem == ipc_client.NO_DATA
+
+
+def test_describe_an_unknown_type(kicad):
+    unknown = Any(type_url="type.googleapis.com/kiapi.board.types.Table", value=b"")
+    item = ipc_client.describe_item(ipc_client._import_kipy(), unknown)
+    assert item.kind == "Table"
+    assert "kicad-python 0.8.0 does not know the type" in item.problem
+
+
+# ipc_status.
 
 
 def test_ipc_status(kicad, tmp_path):
-    from kicad_workbench.tools.ipc import ipc_status
-
     kicad.schematic_open = True
-    text = asyncio.run(ipc_status(str(tmp_path / "board.kicad_pcb")))
+    text = run(ipc.ipc_status(str(tmp_path / "board.kicad_pcb")))
     assert "- KiCad: 10.0.6 (running)" in text
     assert f"- PCB editor: open, board `{kicad.board_path}`" in text
     assert "- Schematic editor: open" in text
     assert "✅ open in the PCB editor" in text
-    assert "- Footprints on the board: 56" in text
+    assert "- KiCad busy: no" in text
     assert "- Writes: ❌ not possible now. KiCad 10.0.6 stops on a commit" in text
     assert "fixed in KiCad 10.0.7" in text
     assert "## Limits of KiCad 10.0.6" in text
     assert "| KiCad 11.0 (PlaceFootprintFromLibrary, not released) |" in text
+    assert "The API gives no data for tables, table cells and reference points." in text
 
 
 def test_ipc_status_writes_possible(kicad):
-    from kicad_workbench.tools.ipc import ipc_status
-
-    text = asyncio.run(ipc_status())
-    assert "- Footprints on the board: 56" in text
+    text = run(ipc.ipc_status())
     assert "- Writes: ✅ possible now" in text
     assert "Known KiCad versions of the IPC tools: 10.0.6." in text
 
 
 def test_ipc_status_with_no_pcb_editor(kicad):
-    from kicad_workbench.tools.ipc import ipc_status
-
     kicad.board_path = None
-    text = asyncio.run(ipc_status())
+    text = run(ipc.ipc_status())
     assert "- PCB editor: not open" in text
     assert "- Writes: ❌ not possible now. no board is open in the PCB editor" in text
 
 
 def test_ipc_status_with_an_other_board(kicad, tmp_path):
-    from kicad_workbench.tools.ipc import ipc_status
-
-    text = asyncio.run(ipc_status(str(tmp_path / "other.kicad_pcb")))
+    text = run(ipc.ipc_status(str(tmp_path / "other.kicad_pcb")))
     assert "other.kicad_pcb`: ❌ The PCB editor has the board" in text
     assert "- Writes: ❌ not possible now. The PCB editor has the board" in text
     assert "✅" not in text
 
 
 def test_ipc_status_with_a_dialog(kicad):
-    """A modal dialog: GetVersion and GetOpenDocuments answer, GetItems gives AS_BUSY
-    (measured with KiCad 10.0.6)."""
-    from kicad_workbench.tools.ipc import ipc_status
-
-    kicad.footprints_failure = FakeApiError("busy", ipc_client.AS_BUSY)
-    text = asyncio.run(ipc_status())
+    """A modal dialog: GetVersion and GetOpenDocuments answer, GetBoundingBox gives
+    AS_BUSY (handleGetBoundingBox calls checkForBusy first)."""
+    kicad.busy = True
+    text = run(ipc.ipc_status())
     assert "- Board: ❌ KiCad is busy" in text
     assert "- Writes: ❌ not possible now. KiCad is busy" in text
 
 
 def test_ipc_status_with_no_kicad(kicad):
-    from kicad_workbench.tools.ipc import ipc_status
-
-    kicad.failure = FakeConnectionError("Failed to connect to KiCad: Connection refused")
-    text = asyncio.run(ipc_status())
+    kicad.failure = ConnectionError("Failed to connect to KiCad: Connection refused")
+    text = run(ipc.ipc_status())
     assert text.startswith("❌ KiCad does not answer on ")
     assert "Traceback" not in text
+
+
+# ipc_get_selection.
+
+
+def test_get_selection(kicad):
+    kicad.selected = ["fp-r1", "via-1", "zone-1", "table-1"]
+    text = run(ipc.ipc_get_selection(str(kicad.board_path)))
+    assert text.startswith("# Selection in the PCB editor: 4 items")
+    assert "Items: (no data) 1, FootprintInstance 1, Via 1, Zone 1" in text
+    assert "| FootprintInstance | R1 |  | F.Cu | 1.5, -2 | fp-r1 |" in text
+    assert "| Via |  | GND | F.Cu, B.Cu | 100.000001, 0 | via-1 |" in text
+    assert "| Zone | fill \\| top | /SDA | F.Cu |  | zone-1 |" in text
+    assert f"| (no data) | ⚠️ {ipc_client.NO_DATA} | | | | |" in text
+    assert "⚠️ The tool cannot read 1 of the items (1 of them in the table)." in text
+
+
+def test_get_selection_of_an_other_board(kicad, tmp_path):
+    text = run(ipc.ipc_get_selection(str(tmp_path / "other.kicad_pcb")))
+    assert text.startswith("❌ The PCB editor has the board")
+
+
+# ipc_select_items.
+
+
+def test_select_references_and_nets(kicad):
+    kicad.selected = ["fp-u3"]
+    text = run(ipc.ipc_select_items(str(kicad.board_path), ["R1"], ["GND"]))
+    assert text.startswith("✅ The selection has 3 items")
+    # The pad of the net is not in the item types of "Select All Tracks in Net".
+    assert kicad.selected == ["fp-r1", "via-1", "via-2"]
+    assert "ℹ️ A net gives its tracks, arcs, vias and shapes" in text
+    assert "The selection filter of the PCB editor does not apply" in text
+
+
+def test_a_net_with_no_items(kicad):
+    text = run(ipc.ipc_select_items(str(kicad.board_path), nets=["+3V3"]))
+    assert text.startswith("✅ The selection has 0 items")
+    assert "ℹ️ The net +3V3 has no tracks, arcs, vias or shapes." in text
+
+
+def test_a_missing_reference_or_net_changes_nothing(kicad):
+    kicad.selected = ["fp-u3"]
+    text = run(ipc.ipc_select_items(str(kicad.board_path), ["R1", "r9"], ["gnd"]))
+    assert text.startswith("❌ The board has no reference r9, no net gnd. The tool did not")
+    assert kicad.selected == ["fp-u3"]
+
+
+def test_a_reference_on_two_footprints(kicad):
+    kicad.footprints.append(footprint("fp-r1b", "R1"))
+    text = run(ipc.ipc_select_items(str(kicad.board_path), ["R1", "R1"]))
+    assert "⚠️ 2 footprints have the reference R1." in text
+    assert kicad.selected == ["fp-r1", "fp-r1b"]
+
+
+def test_add_remove_and_clear(kicad):
+    board = str(kicad.board_path)
+    run(ipc.ipc_select_items(board, ["R1"]))
+    text = run(ipc.ipc_select_items(board, ["R1", "U3"], mode="add"))
+    assert text.startswith("✅ Added 1 item: the selection has 2 items")
+    assert kicad.selected == ["fp-r1", "fp-u3"]
+    text = run(ipc.ipc_select_items(board, nets=["/SDA"], mode="add"))
+    assert text.startswith("✅ Added 1 item: the selection has 3 items")
+    assert sorted(kicad.selected) == ["fp-r1", "fp-u3", "trk-1"]
+    text = run(ipc.ipc_select_items(board, ["R1"], nets=["/SDA"], mode="remove"))
+    assert text.startswith("✅ Removed 2 items: the selection has 1 item")
+    assert kicad.selected == ["fp-u3"]
+    text = run(ipc.ipc_select_items(board, ["R1"], mode="remove"))
+    assert text.startswith("✅ Removed 0 items: the selection has 1 item")
+    text = run(ipc.ipc_select_items(board, mode="clear"))
+    assert text.startswith("✅ Cleared the selection (1 item): it has 0 items")
+    assert kicad.selected == []
+
+
+def test_add_keeps_the_items_with_no_id(kicad):
+    kicad.selected = ["fp-u3", "table-1"]
+    text = run(ipc.ipc_select_items(str(kicad.board_path), nets=["/SDA"], mode="add"))
+    assert text.startswith("✅ Added 1 item: the selection has 3 items")
+    assert kicad.selected == ["fp-u3", "table-1", "trk-1"]
+
+
+def test_the_selection_comes_back_after_an_error(kicad):
+    kicad.selected = ["fp-u3"]
+    kicad.fail_once = ("AddToSelection", ConnectionError("Error receiving reply: Timed out"))
+    text = run(ipc.ipc_select_items(str(kicad.board_path), nets=["GND"]))
+    assert text.startswith("❌ KiCad did not answer the request AddToSelection")
+    assert text.endswith("The tool set the selection of the start again.")
+    assert kicad.selected == ["fp-u3"]
+
+
+def test_the_selection_comes_back_after_an_unexpected_error(kicad):
+    kicad.selected = ["fp-u3"]
+    kicad.fail_once = ("AddToSelection", RuntimeError("decode"))
+    text = run(ipc.ipc_select_items(str(kicad.board_path), ["R1"]))
+    assert text.startswith("❌ Error changing the selection: decode")
+    assert kicad.selected == ["fp-u3"]
+
+
+def test_the_restore_can_fail(kicad):
+    kicad.selected = ["fp-u3"]
+    kicad.fail_once = ("AddToSelection", ConnectionError("Error receiving reply: Timed out"))
+    real = kicad.answer
+
+    def answer(command, response_type):
+        if type(command).__name__ == "ClearSelection" and kicad.selected == []:
+            raise ConnectionError("Error receiving reply: Timed out")
+        return real(command, response_type)
+
+    kicad.answer = answer
+    text = run(ipc.ipc_select_items(str(kicad.board_path), ["R1"]))
+    assert "it could not set the selection of the start again" in text
+
+
+@pytest.mark.parametrize(
+    "references, nets, mode, message",
+    [
+        (["R1"], [], "toggle", "mode must be one of replace, add, remove, clear"),
+        (["R1"], [], "clear", 'mode "clear" takes no references and no nets'),
+        ([], [], "add", 'mode "add" needs references, nets or the two'),
+    ],
+)
+def test_select_arguments(kicad, references, nets, mode, message):
+    text = run(ipc.ipc_select_items(str(kicad.board_path), references, nets, mode))
+    assert text.startswith(f"❌ {message}")
+    assert "Traceback" not in text
+
+
+def test_select_when_kicad_is_busy(kicad):
+    kicad.selected = ["fp-u3"]
+    kicad.busy = True
+    text = run(ipc.ipc_select_items(str(kicad.board_path), ["R1"]))
+    assert text.startswith("❌ KiCad is busy")
+    assert kicad.selected == ["fp-u3"]

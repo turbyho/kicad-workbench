@@ -1,6 +1,6 @@
 # Tools
 
-The server has 51 tools. Each tool returns Markdown text (the image tools also return
+The server has 52 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -156,6 +156,18 @@ KiCad. `create_kicad_project` makes new files. See [editing.md](editing.md).
 | `add_hierarchical_label(file_path, reference, pin, label_name?, shape?, x?, y?, snap_to_grid?)` | A hierarchical label on a pin of a component |
 | `set_symbol_fields(schematic_path, changes)` | Writes fields of placed symbols, as KiCad writes them: each unit of a reference, a new field hidden, the fields of a variant of KiCad 10. It checks all changes and files first |
 | `setup_pcb_layout(schematic_path, width?, height?, unit?, overwrite?)` | A new board with an outline, written by `pcbnew` of the installed KiCad. It does not replace an existing board without `overwrite=True` |
+
+## Live board edits (IPC)
+
+The IPC tools change the board that is open in the PCB editor of a running KiCad, through
+the IPC API of KiCad. KiCad does each change itself. They need the extra `ipc` of the
+server, and the KiCad API in the KiCad settings (see
+[installation.md](installation.md#the-ipc-tools)). The server has IPC rules only for
+KiCad 10.0.6 now. More tools come in the next versions.
+
+| Tool | What it does |
+|---|---|
+| `ipc_status(board_path?)` | The state of the connection: the version of kicad-python and of the running KiCad, the open editors and boards, if the tools can write now, and the limits of the running KiCad version with the version that solves each limit |
 
 ## Exports and images
 

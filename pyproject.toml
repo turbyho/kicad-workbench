@@ -44,6 +44,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ipc = [
+    # The IPC API of KiCad 10 (utils/ipc_client.py). The rules of the server are for
+    # this version only (KICAD_PYTHON_VERSION); a new version needs a check with KiCad.
+    "kicad-python==0.8.0",
+]
 test = [
     # tests/test_build_content.py builds the sdist and the wheel.
     "hatchling>=1.4.0",

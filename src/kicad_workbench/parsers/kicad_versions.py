@@ -96,6 +96,12 @@ def is_release_candidate(version: str) -> bool:
     return _RELEASE_CANDIDATE.match(version) is not None
 
 
+def is_development_build(version: str) -> bool:
+    """True for a development build of a release branch, for example
+    "10.0.6-12-g1234abcd" (_DEVELOPMENT)."""
+    return _DEVELOPMENT.match(version) is not None
+
+
 def unverified_reason(version: str) -> str | None:
     """Return why the server did not compare its rules with a KiCad release, or None:
     a development build of a release branch, or a patch release after the newest
@@ -106,7 +112,7 @@ def unverified_reason(version: str) -> str | None:
     numbers = version_triple(version)
     if release is None or numbers is None:
         return None
-    if _DEVELOPMENT.match(version):
+    if is_development_build(version):
         return f"a development build of the release branch {release.name}"
     if numbers > release.verified:
         return f"a patch release after KiCad {release.verified_name}"

@@ -40,6 +40,7 @@ from .tools import (  # noqa: F401, E402
     bom,
     field_check,
     hierarchical_analysis,
+    ipc,
     library,
     netlist,
     parts_registry,

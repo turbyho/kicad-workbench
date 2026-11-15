@@ -115,6 +115,25 @@ All tools work, except that the board tools read the board file as text (see
 pipx install kicad-workbench
 ```
 
+## The IPC tools
+
+The IPC tools (`ipc_status`) operate on the board that is open in the PCB editor of a
+running KiCad. They use [kicad-python](https://pypi.org/project/kicad-python/) 0.8.0,
+the extra `ipc` of the server:
+
+```sh
+pipx install --python /usr/bin/python3 --system-site-packages "kicad-workbench[ipc]"
+```
+
+Then turn on the API server of KiCad: in KiCad, select Preferences > Preferences >
+Plugins, and set "Enable KiCad API". The server connects to the default socket of
+kicad-python (Linux and macOS: `/tmp/kicad/api.sock`), or to the socket of
+`KICAD_API_SOCKET`.
+
+The server has IPC rules only for KiCad 10.0.6 now. With KiCad 10.0.6, the IPC tools
+do not write while the schematic editor is open: a commit then stops KiCad (KiCad bug
+#24966, fixed in KiCad 10.0.7). `ipc_status` shows the limits of the running KiCad.
+
 ## MCP clients
 
 The server is an MCP server on stdio. The examples use the name `kicad`: the tools
@@ -175,6 +194,7 @@ of Claude Desktop).
 | `KICAD_STOCK_DATA_HOME` | Windows: the folder of the stock libraries, as for KiCad |
 | `KICAD_DOCUMENTS_HOME` | The base of the documents folder of KiCad, as for KiCad: the server adds `kicad/<major>.<minor>` (`KiCad/<major>.<minor>` on Windows and macOS). The documents folder gives the default of `KICAD_USER_TEMPLATE_DIR` and `KICAD<major>_3RD_PARTY` |
 | `KICAD_PYTHON` | The Python with `pcbnew` for the tools that run it in a different process |
+| `KICAD_API_SOCKET` | The socket of the KiCad API for the IPC tools (default: the default socket of kicad-python) |
 | `KICAD_WORKBENCH_NO_UPDATE_CHECK` | A value other than empty and `0` stops the request to PyPI (see "Release notices") |
 | `PARTS_REGISTRY_URL` | The API of the parts registry (default `https://partreel.com/api/v1`) |
 | `PARTS_REGISTRY_ASSET_HOSTS` | More hosts (comma list) from which `download_registry_part` can download files |

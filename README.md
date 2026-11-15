@@ -79,6 +79,9 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   older schematic or board, because KiCad saves an edit of it in its own version. A
   file of a newer version than the installed KiCad is an error, as in KiCad: the
   output tells the user to install a newer KiCad.
+- **Live board edits (IPC).** The state of the connection to the board in the PCB
+  editor of a running KiCad 10.0.6 (`ipc_status`, extra `ipc`). The edit tools come in
+  the next versions.
 - **Parts registry.** A search in an open registry of KiCad parts
   ([PartReel](https://partreel.com)), and the download of their symbols and
   footprints (on request also their 3D models).

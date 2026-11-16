@@ -83,6 +83,9 @@ class TestHierarchicalLabel:
         block = m.group(0)
         assert "(shape bidirectional)" in block
         assert "(at 101.6 97.79 90)" in block
+        # SCH_HIERLABEL::SetSpinStyle: at 90 the text is left justified, the vertical
+        # justify is the center (not written).
+        assert "(justify left))" in block
         # property blocks must not carry inner uuids (KiCad 9 format)
         assert "property" not in block
 
@@ -112,6 +115,8 @@ class TestGlobalLabel:
         assert m, "global_label block missing"
         assert "(shape input)" in m.group(0)
         assert '(property "Intersheetrefs" "${INTERSHEET_REFS}"' in m.group(0)
+        # Pin 2 of R1 is below the body: the angle 270, right justified.
+        assert "(at 101.6 105.41 270)" in m.group(0) and "(justify right))" in m.group(0)
 
     def test_requires_name(self, built):
         # a global label without a name would be meaningless

@@ -210,7 +210,27 @@ def _append_top_level(content: str, entry: str) -> str:
 
 _LABEL_SHAPES = ("input", "output", "bidirectional", "tri_state", "passive")
 
-_JUSTIFY = {0: "left", 180: "right", 90: "bottom", 270: "top"}
+# SCH_LABEL_BASE::SetSpinStyle (KiCad 8, 9 and 10): the text of a label goes away from
+# its point, to the right (0), up (90), to the left (180) or down (270); KiCad keeps the
+# text upright. Thus the horizontal justify is "left" at 0 and 90 and "right" at 180 and
+# 270. The vertical justify of a local label is "bottom" (the text is on the wire); a
+# global or a hierarchical label has the center (SCH_GLOBALLABEL::SetSpinStyle,
+# SCH_HIERLABEL::SetSpinStyle), which EDA_TEXT::Format does not write. The saver writes
+# the angle of the spin style (SCH_IO_KICAD_SEXPR::saveText), and the parser reads only
+# 0, 90, 180 and 270.
+LABEL_ANGLES = (0, 90, 180, 270)
+
+
+def label_justify(kind: str, angle: int) -> str:
+    """The text of (justify ...) that KiCad writes for a label at an angle.
+
+    Raises:
+        InputError: The kind is not a label, or the angle is not 0, 90, 180 or 270.
+    """
+    if kind not in ("label", "global_label", "hierarchical_label") or angle not in LABEL_ANGLES:
+        raise InputError(f"KiCad writes no {kind} at the angle {angle}.")
+    horizontal = "left" if angle in (0, 90) else "right"
+    return f"{horizontal} bottom" if kind == "label" else horizontal
 
 
 def _multiline_label_error(name: str) -> str | None:
@@ -950,7 +970,7 @@ def _add_pin_label_sync(
     content, stamp, point = target.content, target.stamp, target.point
     angle, where, note = target.angle, target.where, target.note
 
-    justify = _JUSTIFY.get(angle, "left")
+    justify = label_justify(kind, angle)
     # A global label has the field of the references to the other sheets.
     references = (
         '\t\t(property "Intersheetrefs" "${INTERSHEET_REFS}" (at 0 0 0)\n'
@@ -989,7 +1009,11 @@ async def add_hierarchical_label(
 
     A hierarchical label in a sub-sheet connects its net to the pin with the same
     name of the sheet symbol in the parent sheet. The tool puts the label on the
-    connection point of the pin (with the rotation and the mirror of the symbol).
+    connection point of the pin (with the rotation and the mirror of the symbol), with
+    the angle that points away from the body of the symbol. The text goes from the
+    point to the right at 0 degrees, up at 90, to the left at 180 and down at 270, as
+    KiCad draws it: a label at 180 has its text to the left of the point. This is
+    correct, not a defect. With x and y, the angle is 0.
     Make sure that the connection is in the netlist: generate_netlist.
 
     Args:
@@ -1045,7 +1069,12 @@ async def add_global_label(
 ) -> str:
     """Add a global label on a pin of a component.
 
-    A global label connects the nets with its name in all sheets of the project.
+    A global label connects the nets with its name in all sheets of the project. The
+    tool puts the label on the connection point of the pin, with the angle that points
+    away from the body of the symbol. The text goes from the point to the right at 0
+    degrees, up at 90, to the left at 180 and down at 270, as KiCad draws it: a label
+    at 180 has its text to the left of the point. This is correct, not a defect. With x
+    and y, the angle is 0.
 
     Args:
         file_path: The .kicad_sch file.
@@ -1554,14 +1583,15 @@ def _add_label_sync(
     path = Path(file_path)
     if not path.exists():
         return f"❌ The file {file_path} does not exist."
+    angle = int(orientation)
     content, stamp = read_for_write_stamped(path)
     found = _label_position(path, content, x, y, snap_to_grid)
     if isinstance(found, str):
         return found
     point, where, note = found
     label_entry = (
-        f"\t(label {quote(text)} (at {_xy(point)} {orientation})\n"
-        "\t\t(effects (font (size 1.27 1.27)) (justify left))\n"
+        f"\t(label {quote(text)} (at {_xy(point)} {angle})\n"
+        f"\t\t(effects (font (size 1.27 1.27)) (justify {label_justify('label', angle)}))\n"
         f'\t\t(uuid "{uuid.uuid4()}")\n'
         "\t)\n"
     )
@@ -1585,17 +1615,31 @@ async def add_label(
 ) -> str:
     """Add a local label (text label) to the schematic.
 
+    The text goes from the point to the right at 0 degrees, up at 90, to the left at 180
+    and down at 270, and KiCad keeps it upright: a label at 180 has its text to the left
+    of the point (right justified), as KiCad draws it. This is correct, not a defect. The
+    point is the connection point: put it on the end of a wire or on a pin.
+
     Args:
         file_path: The .kicad_sch file.
         text: The label text.
-        x, y: The position in mm.
-        orientation: The angle of the label.
+        x, y: The position in mm of the connection point.
+        orientation: The angle: 0, 90, 180 or 270 (KiCad reads no other angle of a
+            label). Use the angle that points away from the wire or the pin, thus the
+            text does not cover them.
         snap_to_grid: True: move the label to the nearest point of the
             connection grid of the project (default 1.27 mm), except on a
             connection point of the sheet (a pin, a wire, a label).
     """
     if error := _multiline_label_error(text):
         return error
+    if orientation not in LABEL_ANGLES:
+        # SCH_IO_KICAD_SEXPR_PARSER: an other angle of a label gives an assert, and KiCad
+        # reads the label at 0 (SPIN_STYLE::RIGHT).
+        return (
+            f"❌ The orientation {orientation} is not 0, 90, 180 or 270. KiCad saves a label "
+            "only at these angles, and reads an other angle as 0."
+        )
     try:
         return await _run_edit(_add_label_sync, file_path, text, x, y, orientation, snap_to_grid)
     except Exception as e:

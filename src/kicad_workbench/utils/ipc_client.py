@@ -350,6 +350,7 @@ class _Kipy:
     board_types: Any
     board: Any
     base_types: Any
+    enums: Any
     layer_from_name: Any
 
 
@@ -369,7 +370,12 @@ def _import_kipy() -> _Kipy:
         import kipy.errors
         from kipy.proto.board import board_commands_pb2, board_pb2, board_types_pb2
         from kipy.proto.common.commands import editor_commands_pb2
-        from kipy.proto.common.types import DocumentType, KiCadObjectType, base_types_pb2
+        from kipy.proto.common.types import (
+            DocumentType,
+            KiCadObjectType,
+            base_types_pb2,
+            enums_pb2,
+        )
         from kipy.util.board_layer import canonical_name, layer_from_canonical_name
         from kipy.util.proto import unpack_any
     except ImportError as error:
@@ -392,6 +398,7 @@ def _import_kipy() -> _Kipy:
         board_types=board_types_pb2,
         board=board_pb2,
         base_types=base_types_pb2,
+        enums=enums_pb2,
         layer_from_name=layer_from_canonical_name,
     )
 
@@ -923,6 +930,10 @@ class IpcSession:
         for point in points:
             self._point(polygon.nodes.add().point, point)
         shape.shape.attributes.stroke.width.value_nm = width
+        # The documented default style (enums.proto: SLS_DEFAULT). An unset style is
+        # SLS_UNKNOWN: KiCad 10.0.6 and 10.0.7 take it as "Unhandled case"
+        # (FromProtoEnum<StrokeLineStyle>), only 10.0.8 reads it as the default.
+        shape.shape.attributes.stroke.style = self._k.enums.SLS_DEFAULT
         shape.shape.attributes.fill.fill_type = self._k.base_types.GFT_UNFILLED
         return shape
 

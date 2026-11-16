@@ -29,6 +29,7 @@ from kipy.proto.common.types import (  # noqa: E402
     DocumentType,
     KiCadObjectType,
     base_types_pb2,
+    enums_pb2,
 )
 from kipy.util.proto import unpack_any  # noqa: E402
 
@@ -1441,6 +1442,7 @@ def test_add_the_board_outline(kicad):
     (shape,) = created_messages(kicad)
     assert shape.layer == BoardLayer.BL_Edge_Cuts
     assert shape.shape.attributes.stroke.width.value_nm == 100_000
+    assert shape.shape.attributes.stroke.style == enums_pb2.SLS_DEFAULT
     assert len(shape.shape.polygon.polygons[0].outline.nodes) == 4
 
 

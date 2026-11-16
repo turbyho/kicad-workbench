@@ -15,18 +15,32 @@ change, and its next write of the table would remove it.
 import asyncio
 import os
 import shutil
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..errors import InputError
+from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_versions import KICAD10, kicad_release, verified_triple
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, file_locks, save_file, save_files
-from ..utils.file_stamp import file_stamp
+from ..utils.file_stamp import FileStamp, file_stamp, read_stamped
 from ..utils.file_versions import FileVersionError, check_library_versions, library_file_version
 from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
 from ..utils.kicad_lock import check_project_not_open
-from ..utils.library_tables import LibraryRow, LibraryTableError, kicad_environment, library_rows
+from ..utils.library_tables import (
+    LibraryRow,
+    LibraryTableError,
+    expand,
+    kicad_environment,
+    library_rows,
+    project_variables,
+)
+from ..utils.library_upgrade import (
+    convert,
+    footprint_files,
+    git_note,
+    symbol_names,
+)
 from ..utils.project_library_tables import (
     FOOTPRINT_EXTENSION,
     KICAD_TYPE,
@@ -50,7 +64,7 @@ from ..utils.project_library_tables import (
     with_row,
 )
 from ..utils.tool_errors import error_answer
-from .library import project_file
+from .library import cell, project_file
 
 _RELOAD_NOTE = (
     "KiCad reads the project tables when it opens the project: open the project in "
@@ -66,13 +80,13 @@ class _Context:
     kicad: str
 
 
-async def _context(project_path: str, kind: str) -> _Context:
+async def _context(project_path: str, kind: str | None) -> _Context:
     """Check the arguments, the installed KiCad and the lock of the project.
 
     Raises:
         InputError: The check failed. The message is the answer of the tool.
     """
-    if kind not in KINDS:
+    if kind is not None and kind not in KINDS:
         raise InputError(f"The kind {kind!r} is not 'symbol' or 'footprint'.")
     found = await asyncio.to_thread(project_file, project_path)
     if found is None:
@@ -536,5 +550,205 @@ async def set_library_table_row(
     """
     try:
         return await _run(project_path, kind, _set_row, nickname, enabled, visible)
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+# The upgrade of the project libraries (phase 4, step 3).
+
+
+@dataclass
+class _Upgrade:
+    """The result of one library of upgrade_project_libraries."""
+
+    nickname: str
+    kind: str
+    path: str
+    result: str
+    versions: str = ""
+    items: str = ""
+    notes: list[str] = field(default_factory=list)
+
+
+def _versions_text(versions: list[int | None]) -> str:
+    texts = {"none" if version is None else str(version) for version in versions}
+    return ", ".join(sorted(texts))
+
+
+def _upgrade_one(
+    context: _Context, kind: str, nickname: str, path: Path, named: bool, include_outside: bool
+) -> _Upgrade:
+    """Check, convert and write one library. An error of this library goes into its
+    result: the other libraries of the call continue."""
+    item = _Upgrade(nickname, kind, str(path), "")
+    try:
+        _upgrade_library(context, item, path, named, include_outside)
+    except (InputError, OSError, WorkbenchError) as e:
+        item.result = f"❌ {e}"
+    return item
+
+
+def _upgrade_library(
+    context: _Context, item: _Upgrade, path: Path, named: bool, include_outside: bool
+) -> None:
+    kind = item.kind
+    written = KICAD10.symbol_library if kind == "symbol" else KICAD10.board
+    if not path.exists():
+        item.result = "❌ the library does not exist"
+        return
+    if kind == "symbol" and path.is_dir():
+        item.result = (
+            "❌ a folder of symbol files: the tool has no verified rules for its upgrade "
+            "(SCH_IO_KICAD_SEXPR_LIB_CACHE saves a folder in an other way). Convert it in "
+            "KiCad"
+        )
+        return
+    if kind == "footprint" and not path.is_dir():
+        item.result = "❌ a footprint library must be a folder"
+        return
+    if not path.is_relative_to(context.project.parent) and not (include_outside or named):
+        item.result = (
+            "skipped: outside the project folder (other projects can use it). Give its "
+            "nickname in libraries, or include_outside=True"
+        )
+        return
+    files = footprint_files(path) if kind == "footprint" else [path]
+    if not files:
+        item.result = "skipped: the library has no files"
+        return
+    stamps: dict[Path, FileStamp] = {}
+    versions: list[int | None] = []
+    data = b""
+    for file in files:
+        data, stamps[file] = read_stamped(file)
+        # A file with no version (for example a footprint of KiCad 5) is older: KiCad
+        # reads it with GetFileFormatVersionAtLoad 0 (kicad-cli gives the error when it
+        # cannot read the file).
+        versions.append(library_file_version(file, kind))
+    item.versions = _versions_text(versions)
+    known = [version for version in versions if version is not None]
+    if known and max(known) > written:
+        item.result = (
+            f"❌ files of a newer version than KiCad {context.kicad} writes ({written}): "
+            "KiCad cannot read them"
+        )
+        return
+    names = {file.name for file in files} if kind == "footprint" else set(symbol_names(data, path))
+    item.items = str(len(names))
+    if None not in versions and min(known) == written:
+        item.result = "✅ in the version of the installed KiCad: no change"
+        return
+    # The state of git before the write: after it, the files have the changes of the tool.
+    note = git_note(path)
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-upgrade-") as work:
+        new_files = convert(kind, path, Path(work), names)
+    with file_locks(list(new_files)):
+        _check_not_open(context.project)
+        for file, stamp in stamps.items():
+            if file_stamp(file) != stamp:
+                item.result = f"❌ {file} changed after this tool read it: the tool wrote no file"
+                return
+        try:
+            warnings = save_files(list(new_files.items()))
+        except SaveFilesError as e:
+            item.result = f"❌ {e}"
+            return
+    item.result = f"✅ converted to {written}, and KiCad saved the result again with no change"
+    if note:
+        item.notes.append(f"{item.nickname} ({kind}): {note}.")
+    item.notes += warnings
+
+
+def _upgrade(context: _Context, _kind, libraries: list[str] | None, include_outside: bool) -> str:
+    env = kicad_environment(context.kicad)
+    variables = project_variables(context.project)
+    wanted = set(libraries or [])
+    found: set[str] = set()
+    results: list[_Upgrade] = []
+    for kind in KINDS:
+        table = _read_table(context, kind)
+        for row in table.rows:
+            nickname = row.text("name")
+            names = {nickname} | {n for n in wanted if rows_with_nickname([row], n)}
+            if wanted and not (names & wanted):
+                continue
+            found |= names & wanted
+            if row.text("type") != KICAD_TYPE:
+                results.append(
+                    _Upgrade(nickname, kind, row.text("uri"), "skipped: not the KiCad format")
+                )
+                continue
+            expanded = expand(row.text("uri"), env, variables)
+            if not os.path.isabs(expanded):
+                results.append(
+                    _Upgrade(nickname, kind, expanded, "❌ the URI is not an absolute path")
+                )
+                continue
+            # LIBRARY_MANAGER::ExpandURI makes the path absolute (wxFileName::MakeAbsolute
+            # removes "." and "..").
+            path = Path(os.path.abspath(expanded))
+            results.append(
+                _upgrade_one(context, kind, nickname, path, bool(names & wanted), include_outside)
+            )
+    lines = [
+        "# The upgrade of the project libraries",
+        "",
+        f"KiCad {context.kicad} (kicad-cli) converts each library of an older file version "
+        "of the project tables. The check: KiCad saves the result again with no change, "
+        "and the names of the symbols or footprints stay.",
+        "",
+        "| Library | Kind | Versions before | Items | Result |",
+        "|---|---|---|---|---|",
+    ]
+    for item in results:
+        lines.append(
+            f"| {cell(item.nickname)} | {item.kind} | {item.versions} | {item.items} | "
+            f"{cell(item.result)} |"
+        )
+    if not results:
+        lines.append("| (no library) | | | | |")
+    missing = sorted(wanted - found)
+    if missing:
+        lines += ["", f"❌ The project tables have no library {', '.join(missing)}."]
+    notes = [note for item in results for note in item.notes]
+    if notes:
+        lines += ["", "⚠️ No way back for these libraries:", *[f"- {note}" for note in notes]]
+    if any(item.result.startswith("✅ converted") for item in results):
+        lines += [
+            "",
+            "An older KiCad cannot read a converted library. Open the project in KiCad "
+            "again to use the converted libraries.",
+        ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def upgrade_project_libraries(
+    project_path: str, libraries: list[str] | None = None, include_outside: bool = False
+) -> str:
+    """Convert the libraries of the project tables to the file version of the installed
+    KiCad 10, with kicad-cli (`kicad-cli sym upgrade`, `kicad-cli fp upgrade`).
+
+    KiCad converts each library of an older version into a temporary folder. Then
+    KiCad saves the result again: the bytes must not change, and the names of the
+    symbols or the footprints must stay. Only then the tool writes the files of that
+    library, all or none. The tool makes no backup: git gives the way back, and the
+    output names a library that git cannot give back. A converted library cannot be
+    read by an older KiCad. A library outside the project folder (other projects can
+    use it) is converted only when libraries names it or include_outside is True. A
+    library of a newer version, and a folder of symbol files, give an error. KiCad must
+    not have the project open. The installed KiCad must be KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        libraries: The nicknames of the libraries to convert. Default: all libraries
+            of the project tables.
+        include_outside: True also converts the libraries outside the project folder.
+
+    Returns:
+        A table with the result of each library, or an error.
+    """
+    try:
+        return await _run(project_path, None, _upgrade, libraries, include_outside)
     except Exception as e:
         return error_answer(e, "Error")

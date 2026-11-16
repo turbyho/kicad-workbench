@@ -17,7 +17,8 @@ mcp = FastMCP(
     - Checks: ERC and DRC of kicad-cli, the pin conflicts of the netlist, the pin and
       pad checks, the library links.
     - Libraries: the library tables, the search, symbols and footprints, PNG images,
-      new project libraries and the rows of the project tables.
+      new project libraries, the rows of the project tables, the upgrade of older
+      project libraries.
     - BOM: the BOM of kicad-cli, and the check of the confirmed MPNs.
     - Edits: symbols, wires, labels, the fields of placed symbols, new projects and
       boards.

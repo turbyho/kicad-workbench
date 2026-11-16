@@ -67,7 +67,8 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
 - **Libraries.** The library tables of KiCad and of the project, a search as in the
   choosers of KiCad, the content of symbols and footprints, and PNG images. New
   project libraries, and the add, the remove and the flags of the rows of the project
-  tables, as KiCad 10 does them (KiCad 10.0).
+  tables, as KiCad 10 does them (KiCad 10.0). The upgrade of the older project
+  libraries through kicad-cli, with a check of the result.
 - **BOM.** The BOM of kicad-cli with the fields, the groups, the DNP filter and the
   variants of KiCad 10.
 - **Edits.** New projects, symbols from the libraries, wires, labels and junctions as
@@ -77,7 +78,9 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   writes the file in its own version. The server does not convert files: the user
   converts them in KiCad. A schematic, a board or a library of an older version than
   the installed KiCad gives a warning with the step for the user (for a library:
-  `kicad-cli sym upgrade` or `kicad-cli fp upgrade`). A tool that writes refuses an
+  `kicad-cli sym upgrade` or `kicad-cli fp upgrade`). The one exception: on request,
+  `upgrade_project_libraries` lets kicad-cli convert the older libraries of the
+  project tables, with a check of the result. A tool that writes refuses an
   older schematic or board, because KiCad saves an edit of it in its own version. A
   file of a newer version than the installed KiCad is an error, as in KiCad: the
   output tells the user to install a newer KiCad.

@@ -59,7 +59,7 @@ def symbol_names(data: bytes, path: Path) -> list[str]:
     return sorted(node.value(0, "") for node in root.children("symbol"))
 
 
-def _upgrade(kind: str, source: Path, output: Path, force: bool) -> None:
+def run_upgrade(kind: str, source: Path, output: Path, force: bool) -> None:
     """Run ``kicad-cli sym upgrade`` or ``kicad-cli fp upgrade`` into output (a path that
     must not exist).
 
@@ -103,8 +103,8 @@ def convert(kind: str, library: Path, work: Path, names: set[str]) -> dict[Path,
     first.mkdir()
     second.mkdir()
     out, again = first / library.name, second / library.name
-    _upgrade(kind, library, out, force=False)
-    _upgrade(kind, out, again, force=True)
+    run_upgrade(kind, library, out, force=False)
+    run_upgrade(kind, out, again, force=True)
     if kind == "symbol":
         new_data = out.read_bytes()
         if set(symbol_names(new_data, out)) != names:

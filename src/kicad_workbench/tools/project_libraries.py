@@ -21,12 +21,26 @@ from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_versions import KICAD10, kicad_release, verified_triple
+from ..parsers.lib_symbols import read_library, symbol_chain
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, file_locks, save_file, save_files
 from ..utils.file_stamp import FileStamp, file_stamp, read_stamped
 from ..utils.file_versions import FileVersionError, check_library_versions, library_file_version
 from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
 from ..utils.kicad_lock import check_project_not_open
+from ..utils.kicad_text import decode_as_kicad
+from ..utils.library_copy import (
+    ASCII_SPACE,
+    dialog_symbol_name,
+    footprint_copy,
+    footprint_name_problem,
+    kicad_save_symbols,
+    library_text,
+    symbol_conflicts,
+    symbol_copy,
+    symbols_in_version,
+)
+from ..utils.library_lookup import find_kicad_library, find_library_symbol
 from ..utils.library_tables import (
     LibraryRow,
     LibraryTableError,
@@ -141,6 +155,38 @@ def _global_rows(context: _Context, kind: str, nickname: str) -> list[LibraryRow
     return [row for row in rows if row.name == nickname]
 
 
+def _save_guarded(
+    context: _Context,
+    files: list[tuple[Path, bytes]],
+    stamps: dict[Path, FileStamp | None],
+    prepare=None,
+) -> list[str]:
+    """Write files as one change, with the lock of each file. Just before the write, the
+    lock of the project and the stamps are checked again: KiCad can have opened the
+    project, or an other program can have changed a file (a stamp None: no file).
+
+    Args:
+        prepare: An optional function that runs under the locks before the save, and
+            gives warnings.
+
+    Raises:
+        InputError: The project is open, a file changed, or the save failed.
+    """
+    with file_locks([path for path, _data in files]):
+        _check_not_open(context.project)
+        for path, stamp in stamps.items():
+            if file_stamp(path) != stamp:
+                raise InputError(
+                    f"The file {path} changed after this tool read it. Thus the tool wrote no "
+                    "file, to keep that change. Do this operation again."
+                )
+        warnings = prepare() if prepare is not None else []
+        try:
+            return warnings + save_files(files)
+        except SaveFilesError as e:
+            raise InputError(str(e)) from e
+
+
 def _write(
     context: _Context,
     table: ProjectTable,
@@ -162,28 +208,20 @@ def _write(
     """
     data = format_table(table.kind, rows)
     files = [(table.path, data)] + ([library] if library else [])
-    with file_locks([path for path, _data in files]):
-        # Again, just before the write: KiCad can have opened the project in the
-        # meantime, and it then has the old table in memory.
-        _check_not_open(context.project)
-        if file_stamp(table.path) != table.stamp:
-            raise InputError(
-                f"The file {table.path} changed after this tool read it. Thus the tool "
-                "wrote no file, to keep that change. Do this operation again."
-            )
-        if library and library[0].exists():
-            raise InputError(f"The library {library[0]} exists now. The tool wrote no file.")
-        warnings = []
-        backup = table.path.with_name(table.path.name + ".bak")
-        if table.stamp is not None and verified_triple(context.kicad) >= (10, 0, 7):
-            try:
-                save_file(backup, table.data)
-            except OSError as e:
-                warnings.append(f"The copy of the old table to {backup} failed: {e}")
+    # A new library file must not exist (its stamp None).
+    stamps = {table.path: table.stamp} | ({library[0]: None} if library else {})
+
+    def backup() -> list[str]:
+        path = table.path.with_name(table.path.name + ".bak")
+        if table.stamp is None or verified_triple(context.kicad) < (10, 0, 7):
+            return []
         try:
-            return warnings + save_files(files)
-        except SaveFilesError as e:
-            raise InputError(str(e)) from e
+            save_file(path, table.data)
+        except OSError as e:
+            return [f"The copy of the old table to {path} failed: {e}"]
+        return []
+
+    return _save_guarded(context, files, stamps, backup)
 
 
 def _row_text(row: TableRow) -> str:
@@ -642,17 +680,10 @@ def _upgrade_library(
     note = git_note(path)
     with tempfile.TemporaryDirectory(prefix="kicad-workbench-upgrade-") as work:
         new_files = convert(kind, path, Path(work), names)
-    with file_locks(list(new_files)):
-        _check_not_open(context.project)
-        for file, stamp in stamps.items():
-            if file_stamp(file) != stamp:
-                item.result = f"❌ {file} changed after this tool read it: the tool wrote no file"
-                return
-        try:
-            warnings = save_files(list(new_files.items()))
-        except SaveFilesError as e:
-            item.result = f"❌ {e}"
-            return
+    # The files of the first read: a file that came in the meantime has no stamp (None),
+    # thus it gives the error of a changed file.
+    all_stamps = {file: stamps.get(file) for file in new_files} | stamps
+    warnings = _save_guarded(context, list(new_files.items()), all_stamps)
     item.result = f"✅ converted to {written}, and KiCad saved the result again with no change"
     if note:
         item.notes.append(f"{item.nickname} ({kind}): {note}.")
@@ -750,5 +781,266 @@ async def upgrade_project_libraries(
     """
     try:
         return await _run(project_path, None, _upgrade, libraries, include_outside)
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+# The copy of a symbol or a footprint into a project library (phase 4, step 4).
+
+
+def _project_library(context: _Context, kind: str, nickname: str) -> tuple[Path, list[str]]:
+    """The library of a row of the project table, in the version of the installed KiCad.
+
+    Returns:
+        (the library, warnings).
+
+    Raises:
+        InputError: No such row, not the KiCad format, the wrong form (a folder of
+            symbol files, a footprint file), or an other file version.
+    """
+    table = _read_table(context, kind)
+    row = table.rows[_one_row(table, nickname)]
+    warnings = []
+    if row.disabled:
+        # The Save As dialogs list the disabled rows too (LIBRARY_MANAGER::Rows).
+        warnings.append(
+            f"The row of '{nickname}' is disabled: KiCad does not load the library, thus "
+            "KiCad does not show the copy until the row is enabled."
+        )
+    if row.text("type") != KICAD_TYPE:
+        raise InputError(f"The library '{nickname}' is not of the KiCad format.")
+    env = kicad_environment(context.kicad)
+    expanded = expand(row.text("uri"), env, project_variables(context.project))
+    if not os.path.isabs(expanded):
+        raise InputError(f"The URI of the library '{nickname}' is not an absolute path.")
+    path = Path(os.path.abspath(expanded))
+    if kind == "symbol" and not path.is_file():
+        raise InputError(
+            f"The library '{nickname}' ({path}) is not a .kicad_sym file. The tool writes "
+            "only into a symbol library file."
+        )
+    if kind == "footprint" and not path.is_dir():
+        raise InputError(f"The library '{nickname}' ({path}) is not a folder.")
+    files = [path] if kind == "symbol" else footprint_files(path)
+    versions = [(file, library_file_version(file, kind)) for file in files]
+    unknown = [file.name for file, version in versions if version is None]
+    if unknown:
+        raise InputError(
+            f"The library '{nickname}' has files with no file version that the server can "
+            f"read: {', '.join(unknown[:5])}."
+        )
+    check = check_library_versions(kind, {path: versions}, context.kicad)
+    if check.problems:
+        raise InputError(" ".join(check.problems))
+    if check.warnings:
+        raise InputError(
+            f"The library '{nickname}' has files of an older version than the installed "
+            "KiCad writes. A tool that writes into a library refuses it: convert it first "
+            "with upgrade_project_libraries."
+        )
+    return path, warnings
+
+
+def _split_id(lib_id: str, kind: str) -> tuple[str, str]:
+    library, _sep, name = lib_id.partition(":")
+    if not library or not name:
+        example = "Device:R" if kind == "symbol" else "Resistor_SMD:R_0603_1608Metric"
+        raise InputError(
+            f'The library ID {lib_id!r} is not "<library>:<name>", for example "{example}".'
+        )
+    return library, name
+
+
+def _copy_symbol(
+    context: _Context,
+    _kind,
+    lib_id: str,
+    target_library: str,
+    new_name: str | None,
+    flatten_symbol: bool,
+    overwrite: bool,
+) -> str:
+    library, name = _split_id(lib_id, "symbol")
+    chain, row, _problems = find_library_symbol(library, name, context.kicad, context.project)
+    written = KICAD10.symbol_library
+    if any(symbol.version is not None and symbol.version > written for symbol in chain):
+        raise InputError(
+            f"The library '{library}' has a newer file version than KiCad {context.kicad} "
+            "writes: KiCad cannot read it."
+        )
+    target, warnings = _project_library(context, "symbol", target_library)
+    source_file = chain[0].file
+    leaf_name = dialog_symbol_name(new_name) if new_name is not None else chain[0].name
+    if not leaf_name:
+        raise InputError("Symbol must have a name.")
+    same = library == target_library
+    target_data, stamp = read_stamped(target)
+    target_symbols = read_library(target)
+    if file_stamp(target) != stamp:
+        raise InputError(f"The file {target} changed while the tool read it. Do it again.")
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-copy-") as work:
+        if any(symbol.version != written for symbol in chain):
+            if row.path is None or not row.path.is_file():
+                raise InputError(
+                    f"The library '{library}' is an older folder of symbol files: the tool "
+                    "has no verified rules for its conversion."
+                )
+            chain = symbol_chain(symbols_in_version(row.path, Path(work), written), name)
+        copy = symbol_copy(chain, leaf_name, same, flatten_symbol)
+        conflicts = symbol_conflicts(copy, target_symbols, chain, same)
+        if conflicts and not overwrite:
+            if len(copy.symbols) == 1:
+                text = f"Symbol '{leaf_name}' already exists in library '{target_library}'."
+            else:
+                text = (
+                    f"The following symbols in the inheritance chain of '{leaf_name}' already "
+                    f"exist in library '{target_library}': {', '.join(conflicts)}."
+                )
+            raise InputError(
+                f"{text} Give overwrite=True to overwrite (KiCad: Overwrite / Overwrite All), "
+                "or an other new_name."
+            )
+        text = library_text(decode_as_kicad(target_data, target), copy, conflicts)
+        names = set(target_symbols) | {symbol for symbol, _text in copy.symbols}
+        data = kicad_save_symbols(text, target, Path(work), names)
+    warnings += _save_guarded(context, [(target, data)], {target: stamp})
+    copied = [symbol for symbol, _text in copy.symbols]
+    lines = [
+        f"- From: {lib_id} ({source_file})",
+        f"- Into: {target_library} ({target})",
+        f"- Symbols written: {', '.join(copied)}"
+        + (" (the parents of the derived symbol too, as KiCad does)" if len(copied) > 1 else ""),
+    ]
+    if conflicts:
+        lines.append(f"- Replaced: {', '.join(conflicts)}")
+    if flatten_symbol:
+        lines.append("- Flattened: the symbol has no parent in the target.")
+    lines.append("- KiCad saved the library (kicad-cli), and a second save gave the same bytes.")
+    return "\n".join(
+        [f"✅ The symbol '{leaf_name}' is in the library '{target_library}'.", "", *lines]
+        + [f"\n⚠️ {warning}" for warning in warnings]
+    )
+
+
+def _copy_footprint(
+    context: _Context,
+    _kind,
+    lib_id: str,
+    target_library: str,
+    new_name: str | None,
+    overwrite: bool,
+) -> str:
+    library, name = _split_id(lib_id, "footprint")
+    row, _problems = find_kicad_library("footprint", library, context.kicad, context.project)
+    source = row.path / f"{name}.kicad_mod" if row.path is not None else None
+    if source is None or source not in footprint_files(row.path):
+        raise InputError(f'The library "{library}" has no footprint "{name}".')
+    version = library_file_version(source, "footprint")
+    if version is not None and version > KICAD10.board:
+        raise InputError(
+            f"The footprint {lib_id} has a newer file version than KiCad {context.kicad} "
+            "writes: KiCad cannot read it."
+        )
+    target_dir, warnings = _project_library(context, "footprint", target_library)
+    # SAVE_AS_DIALOG: wxString::Trim (ASCII white space).
+    new = new_name.strip(ASCII_SPACE) if new_name is not None else name
+    if problem := footprint_name_problem(new):
+        raise InputError(problem)
+    target = target_dir / f"{new}.kicad_mod"
+    # KiCad asks to overwrite, also for the footprint itself.
+    if target.exists() and not overwrite:
+        raise InputError(
+            f"Footprint {new} already exists in {target_library}. Give overwrite=True to "
+            "overwrite it (KiCad: Overwrite), or an other new_name."
+        )
+    stamp = file_stamp(target)
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-copy-") as work:
+        _file_name, data = footprint_copy(source, new, Path(work))
+    replaced = stamp is not None
+    warnings += _save_guarded(context, [(target, data)], {target: stamp})
+    lines = [
+        f"- From: {lib_id} ({source})",
+        f"- Into: {target_library} ({target})" + (" (replaced)" if replaced else ""),
+        "- KiCad saved the footprint (kicad-cli), and a second save gave the same bytes.",
+    ]
+    return "\n".join(
+        [f"✅ The footprint '{new}' is in the library '{target_library}'.", "", *lines]
+        + [f"\n⚠️ {warning}" for warning in warnings]
+    )
+
+
+@mcp.tool()
+async def copy_symbol_to_library(
+    project_path: str,
+    lib_id: str,
+    target_library: str,
+    new_name: str | None = None,
+    flatten: bool = False,
+    overwrite: bool = False,
+) -> str:
+    """Copy a symbol into a library of the project table, as "Save As" of the symbol
+    editor of KiCad 10 does.
+
+    To an other library, a derived symbol goes with its parents (KiCad copies the full
+    parent chain; only the symbol gets the new name). flatten=True saves only the
+    flattened symbol, as the "Flatten" check box. The Value gets the new name when it
+    was equal to the old name. KiCad saves the library (kicad-cli), and a second save
+    must give the same bytes. The target must be a symbol library file of the project
+    table in the version of the installed KiCad (else: upgrade_project_libraries
+    first). KiCad must not have the project open. The installed KiCad must be KiCad
+    10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        lib_id: The symbol, "<library>:<symbol>", for example "Device:R".
+        target_library: The nickname of the target in the project symbol table.
+        new_name: The new name. KiCad changes spaces to "_". Default: the old name.
+        flatten: True saves only the flattened symbol, with no parent.
+        overwrite: True replaces the symbols with the same names in the target
+            (KiCad: Overwrite / Overwrite All). False refuses them.
+
+    Returns:
+        The written symbols, or an error.
+    """
+    try:
+        return await _run(
+            project_path, None, _copy_symbol, lib_id, target_library, new_name, flatten, overwrite
+        )
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+@mcp.tool()
+async def copy_footprint_to_library(
+    project_path: str,
+    lib_id: str,
+    target_library: str,
+    new_name: str | None = None,
+    overwrite: bool = False,
+) -> str:
+    """Copy a footprint into a library of the project table, as "Save As" of the
+    footprint editor of KiCad 10 does.
+
+    The Value gets the new name when it was equal to the old name. KiCad saves the
+    footprint (kicad-cli), and a second save must give the same bytes. The target must
+    be a footprint library of the project table in the version of the installed KiCad
+    (else: upgrade_project_libraries first). A footprint that is not on F.Cu is refused.
+    KiCad must not have the project open. The installed KiCad must be KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        lib_id: The footprint, "<library>:<footprint>".
+        target_library: The nickname of the target in the project footprint table.
+        new_name: The new name. Default: the old name.
+        overwrite: True replaces a footprint with the same name in the target (KiCad:
+            Overwrite). False refuses it.
+
+    Returns:
+        The written footprint, or an error.
+    """
+    try:
+        return await _run(
+            project_path, None, _copy_footprint, lib_id, target_library, new_name, overwrite
+        )
     except Exception as e:
         return error_answer(e, "Error")

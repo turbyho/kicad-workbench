@@ -530,13 +530,16 @@ def _embedded_files(chain: list[LibrarySymbol], kicad: int) -> list[str]:
     return added
 
 
-def flatten(chain: list[LibrarySymbol], lib_id: str, kicad: int) -> str:
+def flatten(chain: list[LibrarySymbol], lib_id: str, kicad: int, library_item: bool = False) -> str:
     """Return the text of a symbol for the lib_symbols section of a schematic.
 
     Args:
         chain: The symbol and its parents (symbol_chain).
         lib_id: The name in the schematic, "<library>:<symbol>".
         kicad: 9 for the rules of KiCad 8 and 9, 10 for KiCad 10 and later.
+        library_item: True gives the symbol for a library file: its name is the
+            symbol name of lib_id, with no library (SaveSymbol writes
+            GetLibItemName).
 
     Raises:
         KicadFileError: KiCad cannot read the name of a sub-symbol of the
@@ -548,7 +551,7 @@ def flatten(chain: list[LibrarySymbol], lib_id: str, kicad: int) -> str:
     edits: list[tuple[int, int, str]] = []
 
     name_atom = root.atoms()[0]
-    edits.append((name_atom.start, name_atom.end, quote(lib_id)))
+    edits.append((name_atom.start, name_atom.end, quote(item_name if library_item else lib_id)))
     # KiCad saves the name of a sub-symbol with the numbers that it read
     # (SCH_IO_KICAD_SEXPR_LIB_CACHE::saveSymbol: "%s_%d_%d").
     for unit, style, sub in sub_symbols(root):

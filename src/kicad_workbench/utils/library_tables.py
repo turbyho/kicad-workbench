@@ -354,15 +354,51 @@ def _expand_once(text: str, env: KicadEnvironment, project: dict[str, str]) -> s
     return "".join(result)
 
 
-def read_table(path: Path, kind: str) -> list[dict]:
-    """Read the rows of one library table file.
+def read_table(path: Path, kind: str, kicad: tuple[int, int]) -> list[dict]:
+    """Read the rows of one library table file as the installed KiCad reads it.
+
+    KiCad 10.0 and the nightly builds 10.99 read a table with a PEGTL grammar
+    (LIBRARY_TABLE_PARSER, see _parse_table). KiCad 8 and 9 keep the reader of this
+    server from before this rule (_read_table_before_10).
+
+    Args:
+        path: The table file.
+        kind: "symbol", "footprint" or "design_block".
+        kicad: The major and minor version of the installed KiCad, for example
+            (10, 0). (10, 99) is a nightly build of branch master.
 
     Raises:
-        LibraryTableError: The file cannot be read, or it is not a table of
-            the kind.
+        LibraryTableError: The file cannot be read, it is not a table of the kind, or
+            the server has no rules for the KiCad version.
     """
+    if kicad[0] < 10:
+        return _read_table_before_10(path, kind)
+    if kicad[0] > 10:
+        raise LibraryTableError(
+            f"The server has no rules for the library tables of KiCad {kicad[0]}.{kicad[1]}."
+        )
+    master = kicad[1] >= 99
     try:
-        # KiCad 10 reads a file of 0 or 1 byte as a table with no rows (LIBRARY_TABLE).
+        data = path.read_bytes()
+    except OSError as e:
+        raise LibraryTableError(f"The library table {path} cannot be read: {e}") from e
+    # LIBRARY_TABLE::LIBRARY_TABLE: KiCad 10.0 reads a file of 0 or 1 byte ("1 byte
+    # allowed for BOM") as a table with no rows. Master reads only an empty file so.
+    if len(data) <= (0 if master else 1):
+        return []
+    head, rows = _parse_table(data, master, path)
+    if head != _TABLE_HEADS[kind]:
+        raise LibraryTableError(
+            f"The library table {path} is a {head!r} table, not {_TABLE_HEADS[kind]!r}."
+        )
+    return rows
+
+
+def _read_table_before_10(path: Path, kind: str) -> list[dict]:
+    """The table reader of this server from before the PEGTL rules of KiCad 10: an
+    S-expression parse that decodes the escapes. It is not compared with the reader of
+    KiCad 8 and 9 (LIB_TABLE::Parse): new work has the rules of KiCad 10 only."""
+    try:
         if path.stat().st_size <= 1:
             return []
         root = parse(read_as_kicad(path))
@@ -382,6 +418,186 @@ def read_table(path: Path, kind: str) -> list[dict]:
         values["hidden"] = lib.first("hidden") is not None
         rows.append(values)
     return rows
+
+
+# The characters of the PEGTL rules. ``space`` is the ASCII white space of PEGTL
+# (tao::pegtl::ascii::space); TOKEN stops only at a parenthesis, a space, a tab, a
+# line feed and a carriage return.
+_PEG_SPACE = b" \t\n\r\v\f"
+_TOKEN_STOP = b"() \t\n\r"
+_TABLE_KEYWORDS = (b"sym_lib_table", b"fp_lib_table", b"design_block_lib_table")
+# The properties of a row (LIB_PROPERTY_KEY), with the key of the row dict.
+_ROW_KEYS = {b"name": "name", b"type": "type", b"uri": "uri", b"options": "options",
+             b"descr": "descr"}  # fmt: skip
+# The escapes of the QUOTED_TEXT action of master (library_table_parser.cpp).
+_MASTER_ESCAPES = {ord("n"): b"\n", ord("r"): b"\r", ord("\\"): b"\\", ord('"'): b'"'}
+
+
+def _parse_table(data: bytes, escapes: bool, path: Path) -> tuple[str, list[dict]]:
+    """Parse a table as LIBRARY_TABLE_PARSER of KiCad 10 does: the rules of
+    LIBRARY_TABLE_GRAMMAR (``include/libraries/library_table_grammar.h``, tag 10.0.6)
+    and the actions of ``common/libraries/library_table_parser.cpp``.
+
+    - The file must start with "(" and the table keyword, with no space between
+      them. ``(version N)`` is optional. Each row is ``(lib`` and one or more
+      members: a property ``(name V)``, ``(type V)``, ``(uri V)``, ``(options V)``,
+      ``(descr V)``, or the markers ``(hidden)`` and ``(disabled)``. A property has
+      no space after "(" and before ")". Each other text is an error.
+    - A value is a quoted text or a token. KiCad 10.0 takes the text between the
+      quotes with no change, and the first '"' ends it. Master (``escapes``) reads
+      the escapes ``\\n``, ``\\r``, ``\\\\`` and ``\\"`` (``ESCAPE``); an other escape stays
+      as it is.
+    - A property that comes more than one time gets its last value. A missing
+      property is empty.
+    - A value that is not valid UTF-8 becomes empty (``wxString::FromUTF8`` in
+      ``LIBRARY_TABLE::addRowFromIR``).
+
+    Returns:
+        The table keyword and the rows.
+
+    Raises:
+        LibraryTableError: The grammar does not accept the file. The message has the
+            text of LIBRARY_TABLE_PARSER::Parse.
+    """
+    size = len(data)
+    pos = 0
+
+    def kicad_error(message: str) -> LibraryTableError:
+        return LibraryTableError(
+            f"The library table {path} cannot be read: KiCad gives {message!r}."
+        )
+
+    def syntax_error(at: int) -> LibraryTableError:
+        # parse_error of an if_must rule: the position where the rule failed.
+        line = data.count(b"\n", 0, at) + 1
+        column = at - (data.rfind(b"\n", 0, at) + 1) + 1
+        return kicad_error(f"Syntax error at line {line}, column {column}")
+
+    def no_parse() -> LibraryTableError:
+        # parse() gives false: the rule that failed has no if_must.
+        return kicad_error("An unexpected error occurred while reading library table")
+
+    def spaces(at: int) -> int:
+        while at < size and data[at] in _PEG_SPACE:
+            at += 1
+        return at
+
+    def value(at: int) -> tuple[bytes, int] | None:
+        """PROPERTY_VALUE: QUOTED_TEXT or TOKEN."""
+        if at < size and data[at] == ord('"'):
+            end = at + 1
+            while True:
+                if end >= size:
+                    # if_must: the closing quote must come.
+                    raise syntax_error(at + 1)
+                if data[end] == ord('"'):
+                    break
+                end += 2 if escapes and data[end] == ord("\\") and end + 1 < size else 1
+            inner = data[at + 1 : end]
+            return (_unescape(inner) if escapes else inner), end + 1
+        end = at
+        while end < size and data[end] not in _TOKEN_STOP:
+            end += 1
+        return (data[at:end], end) if end > at else None
+
+    def keyword_value(at: int, keywords: tuple[bytes, ...]) -> tuple[bytes, bytes, int] | None:
+        """seq< LPAREN, keyword, plus< space >, PROPERTY_VALUE, RPAREN >."""
+        if at >= size or data[at] != ord("("):
+            return None
+        key = next((k for k in keywords if data.startswith(k, at + 1)), None)
+        if key is None:
+            return None
+        after = at + 1 + len(key)
+        start = spaces(after)
+        if start == after:
+            return None
+        found = value(start)
+        if found is None:
+            return None
+        text, end = found
+        if end >= size or data[end] != ord(")"):
+            return None
+        return key, text, end + 1
+
+    if not data.startswith(b"("):
+        raise no_parse()
+    head = next((k for k in _TABLE_KEYWORDS if data.startswith(k, 1)), None)
+    if head is None:
+        raise syntax_error(1)
+    pos = 1 + len(head)
+    # pad_opt< TABLE_VERSION, space >
+    pos = spaces(pos)
+    version = keyword_value(pos, (b"version",))
+    if version is not None:
+        pos = spaces(version[2])
+    rows: list[dict] = []
+    # star< pad< LIB_ROW, space > >
+    while True:
+        start = spaces(pos)
+        if start >= size or data[start] != ord("("):
+            break
+        # LIB_ROW: if_must< pad< LPAREN, space >, "lib", plus< space >,
+        # plus< pad< LIB_ROW_MEMBER, space > >, pad< RPAREN, space > >
+        at = spaces(start + 1)
+        if not data.startswith(b"lib", at):
+            raise syntax_error(at)
+        at += 3
+        if spaces(at) == at:
+            raise syntax_error(at)
+        at = spaces(at)
+        row: dict = dict.fromkeys(_ROW_KEYS.values(), "")
+        row["disabled"] = row["hidden"] = False
+        members = 0
+        while True:
+            member = keyword_value(at, tuple(_ROW_KEYS))
+            if member is not None:
+                row[_ROW_KEYS[member[0]]] = _from_utf8(member[1])
+                at = member[2]
+            elif data.startswith(b"(hidden)", at):
+                row["hidden"] = True
+                at += len(b"(hidden)")
+            elif data.startswith(b"(disabled)", at):
+                row["disabled"] = True
+                at += len(b"(disabled)")
+            else:
+                break
+            members += 1
+            at = spaces(at)
+        if members == 0:
+            raise syntax_error(at)
+        if at >= size or data[at] != ord(")"):
+            raise syntax_error(at)
+        pos = spaces(at + 1)
+        rows.append(row)
+    # pad< RPAREN, space >, then eof
+    if pos >= size or data[pos] != ord(")"):
+        raise syntax_error(pos)
+    if spaces(pos + 1) != size:
+        raise no_parse()
+    return head.decode(), rows
+
+
+def _unescape(inner: bytes) -> bytes:
+    """The QUOTED_TEXT action of master: a backslash and the next byte."""
+    out = bytearray()
+    index = 0
+    while index < len(inner):
+        byte = inner[index]
+        if byte != ord("\\") or index + 1 == len(inner):
+            out.append(byte)
+        else:
+            index += 1
+            out += _MASTER_ESCAPES.get(inner[index], b"\\" + bytes([inner[index]]))
+        index += 1
+    return bytes(out)
+
+
+def _from_utf8(value: bytes) -> str:
+    """wxString::FromUTF8: an empty string when the bytes are not valid UTF-8."""
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
 
 
 def library_rows(
@@ -482,7 +698,7 @@ def _add_rows(kind, scope, table, hidden, env, project, rows, problems, seen) ->
         return
     seen.add(real)
     try:
-        values = read_table(table, kind)
+        values = read_table(table, kind, (env.major, env.minor))
     except LibraryTableError as e:
         problems.append(str(e))
         return

@@ -16,6 +16,7 @@ from kicad_workbench.utils.library_tables import (
     find_library,
     kicad_environment,
     library_rows,
+    read_table,
 )
 
 from .symbol_tables import row
@@ -373,6 +374,124 @@ class TestVariables:
         env = library_tables.KicadEnvironment(10, 0, library_tables.Path("/c"), {"LIBS": "D:/libs"})
         assert expand("%LIBS%/a", env) == "D:/libs/a"
         assert expand("100\\%", env) == "100%"
+
+
+KICAD_10 = (10, 0)
+MASTER = (10, 99)
+KICAD_9 = (9, 0)
+# A table as LIBRARY_TABLE::Format and Prettify of KiCad 10.0.6 write it.
+WRITTEN = (
+    b"(sym_lib_table\n\t(version 7)\n"
+    b'\t(lib (name "A") (type "KiCad") (uri "${KIPRJMOD}/a.kicad_sym") (options "") '
+    b'(descr "") (disabled))\n'
+    b'\t(lib (name "B") (type "KiCad") (uri "/libs/b.kicad_sym") (options "x=1") '
+    b'(descr "B lib") (disabled) (hidden))\n'
+    b")\n"
+)
+
+
+def read(tmp_path, data: bytes, kicad=KICAD_10, kind="symbol"):
+    path = tmp_path / "sym-lib-table"
+    path.write_bytes(data)
+    return read_table(path, kind, kicad)
+
+
+def one_row(descr: bytes) -> bytes:
+    return b'(sym_lib_table\n\t(lib (name "A") (uri "/a") (descr "' + descr + b'"))\n)\n'
+
+
+class TestTableGrammarOfKicad10:
+    """read_table copies LIBRARY_TABLE_GRAMMAR and LIBRARY_TABLE_PARSER of KiCad 10.0.6
+    (raw quoted text) and of master (escapes)."""
+
+    def test_table_that_kicad_writes(self, tmp_path):
+        rows = read(tmp_path, WRITTEN)
+        assert rows == [
+            {
+                "name": "A", "type": "KiCad", "uri": "${KIPRJMOD}/a.kicad_sym",
+                "options": "", "descr": "", "disabled": True, "hidden": False,
+            },
+            {
+                "name": "B", "type": "KiCad", "uri": "/libs/b.kicad_sym",
+                "options": "x=1", "descr": "B lib", "disabled": True, "hidden": True,
+            },
+        ]  # fmt: skip
+
+    def test_quote_in_a_value(self, tmp_path):
+        # KiCad 10.0 writes '"' as '\\"' (OUTPUTFORMATTER::Quotes), but its grammar ends
+        # the text at the first '"': it cannot read the table. Master reads the escape.
+        with pytest.raises(LibraryTableError, match="Syntax error at line 2"):
+            read(tmp_path, one_row(b'a \\"q\\" b'))
+        assert read(tmp_path, one_row(b'a \\"q\\" b'), MASTER)[0]["descr"] == 'a "q" b'
+
+    def test_backslash_in_a_value(self, tmp_path):
+        assert read(tmp_path, one_row(b"a \\\\ b"))[0]["descr"] == "a \\\\ b"
+        assert read(tmp_path, one_row(b"a \\\\ b"), MASTER)[0]["descr"] == "a \\ b"
+        assert read(tmp_path, one_row(b"\\n\\t"), MASTER)[0]["descr"] == "\n\\t"
+
+    def test_kicad_9_keeps_the_reader_before_kicad_10(self, tmp_path):
+        assert read(tmp_path, one_row(b'a \\"q\\" b'), KICAD_9)[0]["descr"] == 'a "q" b'
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            # Each value is a token; a property can come more than one time (the last
+            # value wins); spaces before and after "lib" and the members.
+            b"(sym_lib_table(version 7)( lib  (name A)(name B)\n(uri  /b) (hidden))  )\n\n",
+            b'(sym_lib_table (lib (name "B") (uri "/b") (hidden)))',
+        ],
+    )
+    def test_accepted_forms(self, tmp_path, data):
+        rows = read(tmp_path, data)
+        assert [(r["name"], r["uri"], r["type"], r["hidden"]) for r in rows] == [
+            ("B", "/b", "", True)
+        ]
+
+    @pytest.mark.parametrize(
+        ("data", "message"),
+        [
+            # A byte order mark or a space before the table: parse() gives false.
+            (b"\xef\xbb\xbf" + WRITTEN, "An unexpected error"),
+            (b" " + WRITTEN, "An unexpected error"),
+            (WRITTEN + b"x", "An unexpected error"),
+            (b"( sym_lib_table)", "line 1, column 2"),
+            (b'(sym_lib_table (lib ( name "A")))', "line 1, column 21"),
+            (b'(sym_lib_table (lib (name "A" )))', "line 1, column 21"),
+            (b"(sym_lib_table (lib (foo x)))", "line 1, column 21"),
+            (b"(sym_lib_table (lib))", "line 1, column 20"),
+            (b"(sym_lib_table (library (name A)))", "line 1, column 20"),
+            (b"(sym_lib_table (lib (name A) (hidden )))", "line 1, column 30"),
+            (b'(sym_lib_table (lib (name "A)))', "line 1, column 28"),
+            (b"(sym_lib_table (version) (lib (name A)))", "line 1, column 17"),
+            (b"(sym_lib_table (lib (name A))", "line 1, column 30"),
+        ],
+    )
+    def test_refused_forms(self, tmp_path, data, message):
+        with pytest.raises(LibraryTableError, match=re.escape(message)):
+            read(tmp_path, data)
+
+    def test_value_that_is_not_utf8(self, tmp_path):
+        rows = read(tmp_path, b'(sym_lib_table (lib (name "A\xff") (uri "/\xc3\xa9")))')
+        assert (rows[0]["name"], rows[0]["uri"]) == ("", "/\u00e9")
+
+    @pytest.mark.parametrize(("data", "kicad", "rows"), [(b"\n", KICAD_10, []), (b"", MASTER, [])])
+    def test_empty_file(self, tmp_path, data, kicad, rows):
+        assert read(tmp_path, data, kicad) == rows
+
+    def test_one_byte_in_master(self, tmp_path):
+        # Master reads only a file of 0 bytes as an empty table.
+        with pytest.raises(LibraryTableError, match="An unexpected error"):
+            read(tmp_path, b"\n", MASTER)
+
+    def test_version_with_no_rules(self, tmp_path):
+        with pytest.raises(
+            LibraryTableError, match="no rules for the library tables of KiCad 11.0"
+        ):
+            read(tmp_path, WRITTEN, (11, 0))
+
+    def test_table_of_an_other_kind(self, tmp_path):
+        with pytest.raises(LibraryTableError, match="is a 'fp_lib_table' table"):
+            read(tmp_path, b"(fp_lib_table)")
 
 
 def library_tables_folder() -> str:

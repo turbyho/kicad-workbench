@@ -20,10 +20,12 @@ def table(*rows: str) -> str:
 
 
 def row(name: str, uri: Path | str, flags: str = "", kind: str = "KiCad", descr: str = "") -> str:
-    """One (lib ...) row of a library table, as KiCad writes it (quote escapes the
-    backslashes of a Windows path). The tests make each table row with this function."""
+    """One (lib ...) row of a library table, as KiCad writes it: LIBRARY_TABLE::Format
+    of KiCad 10 writes each backslash of the URI as "/", because KiCad 10.0 reads a
+    quoted text with no escapes. The tests make each table row with this function."""
+    uri = str(uri).replace("\\", "/")
     return (
-        f"(lib (name {quote(name)})(type {quote(kind)})(uri {quote(str(uri))})"
+        f"(lib (name {quote(name)})(type {quote(kind)})(uri {quote(uri)})"
         f'(options "")(descr {quote(descr)}){flags})'
     )
 

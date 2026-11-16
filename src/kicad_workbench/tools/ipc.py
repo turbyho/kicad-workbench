@@ -5,6 +5,7 @@ with the board open in the PCB editor, and the extra "ipc" of the server (kicad-
 """
 
 import asyncio
+import math
 import os
 import time
 from collections import Counter
@@ -24,6 +25,8 @@ from ..utils.ipc_client import (
     TIMEOUT_MS,
     BoardItem,
     IpcError,
+    NetClassSizes,
+    ZoneSettings,
     kicad_python_version,
     known_versions,
     open_session,
@@ -747,3 +750,527 @@ async def ipc_refill_zones(board_path: str, timeout_s: float = 120) -> str:
         return await asyncio.to_thread(_refill_zones, board_path, timeout_s)
     except Exception as error:
         return error_answer(error, "Error filling the zones")
+
+
+# Step 3D: new items (tracks, vias, a copper zone, the board outline). Each tool makes
+# one commit (BeginCommit, EndCommit): one undo step with its message.
+
+UNDO_PREFIX = "kicad-workbench: "
+# Zone.priority is a uint32 (board_types.proto).
+UINT32_MAX = 2**32 - 1
+# The limits of the zone dialog (zones.h of KiCad 10.0.6).
+ZONE_THICKNESS_MIN_MM = 0.025  # ZONE_THICKNESS_MIN_VALUE_MM
+ZONE_CLEARANCE_MAX_MM = 100.0  # ZONE_CLEARANCE_MAX_VALUE_MM
+HATCH_PITCH_MIN_MM = 0.1  # ZONE_BORDER_HATCH_MINDIST_MM
+HATCH_PITCH_MAX_MM = 2.0  # ZONE_BORDER_HATCH_MAXDIST_MM
+DRC_NOTE = (
+    "⚠️ KiCad ran no DRC: the API cannot run it, and KiCad checks no clearance of the "
+    "items that a tool adds (limit no_drc). Tell the user: save the board "
+    "(ipc_save_board), then run DRC (run_drc), or run DRC in the PCB editor."
+)
+
+
+class Point(BaseModel):
+    """A point of the board in mm."""
+
+    x_mm: float = Field(description="The X position in mm.")
+    y_mm: float = Field(description="The Y position in mm.")
+
+
+class TrackSegment(BaseModel):
+    """One straight track."""
+
+    start: Point = Field(description="The start of the track.")
+    end: Point = Field(description="The end of the track.")
+    layer: str = Field(description="A copper layer of the board, for example F.Cu or In1.Cu.")
+
+
+# KiCad stores a coordinate or a length of the board as an int of nm (about 2147 mm).
+MAX_NM = 2**31 - 1
+
+
+def _storable(mm: float, error: str) -> int:
+    """A value in mm as nm, when KiCad can store it (finite, an int of nm)."""
+    if not math.isfinite(mm) or abs(mm) * 1_000_000 > MAX_NM:
+        raise InputError(error)
+    return round(mm * 1_000_000)
+
+
+def _nm(mm: float, name: str, *, minimum: float | None = None, maximum: float | None = None) -> int:
+    """A length in mm as nm, in its range: with no minimum, more than 0; else minimum or
+    more, and maximum or less when it is given (as UNIT_BINDER::Validate of a KiCad
+    dialog). Raises InputError out of the range."""
+    nm = _storable(mm, f"{name} is not a length that KiCad can store: {mm}.")
+    if minimum is None:
+        if not mm > 0:
+            raise InputError(f"{name} must be more than 0 mm, not {mm:g}.")
+    elif maximum is not None:
+        if not minimum <= mm <= maximum:
+            raise InputError(f"{name} must be {minimum:g} to {maximum:g} mm, not {mm:g}.")
+    elif mm < minimum:
+        raise InputError(f"{name} must be {minimum:g} mm or more, not {mm:g}.")
+    return nm
+
+
+def _xy(point: Point) -> tuple[int, int]:
+    error = f"A point has no position that KiCad can store: ({point.x_mm}, {point.y_mm})."
+    return _storable(point.x_mm, error), _storable(point.y_mm, error)
+
+
+def _cross(o: tuple[int, int], a: tuple[int, int], b: tuple[int, int]) -> int:
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _segments_touch(p1, p2, q1, q2) -> bool:
+    """True when the segments p1-p2 and q1-q2 have a common point."""
+    d1, d2 = _cross(q1, q2, p1), _cross(q1, q2, p2)
+    d3, d4 = _cross(p1, p2, q1), _cross(p1, p2, q2)
+    if ((d1 > 0) != (d2 > 0)) and d1 and d2 and ((d3 > 0) != (d4 > 0)) and d3 and d4:
+        return True
+
+    def on(a, b, c):
+        return (
+            _cross(a, b, c) == 0
+            and min(a[0], b[0]) <= c[0] <= max(a[0], b[0])
+            and min(a[1], b[1]) <= c[1] <= max(a[1], b[1])
+        )
+
+    return on(q1, q2, p1) or on(q1, q2, p2) or on(p1, p2, q1) or on(p1, p2, q2)
+
+
+def _polygon(outline: list[Point]) -> list[tuple[int, int]]:
+    """The corners of a closed polygon in nm. Refuse a repeated corner (also the first
+    corner again at the end) and a polygon with no area."""
+    points = [_xy(point) for point in outline]
+    if len(points) < 3:
+        raise InputError(f"outline must have 3 or more points, not {len(points)}.")
+    for index, point in enumerate(points):
+        if point == points[index - 1]:
+            raise InputError(
+                f"outline has the same point two times one after the other (point "
+                f"{index + 1 if index else len(points)}). Do not give the first point again "
+                "at the end: the polygon is closed."
+            )
+    edges = list(zip(points, points[1:] + points[:1], strict=True))
+    for i, (a1, a2) in enumerate(edges):
+        for j in range(i + 1, len(edges)):
+            if j == i + 1 or (i == 0 and j == len(edges) - 1):
+                continue  # Neighbors share a corner.
+            b1, b2 = edges[j]
+            if _segments_touch(a1, a2, b1, b2):
+                raise InputError(
+                    f"outline intersects itself: the edges {i + 1} and {j + 1} have a common point."
+                )
+    area = sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in edges)
+    if area == 0:
+        raise InputError("outline has no area.")
+    return points
+
+
+def _check_net(session, board, net: str) -> None:
+    """Refuse an empty net name, and a net that the board does not have: CreateItems
+    makes a new net for an unknown name (limit unknown_net)."""
+    if not net:
+        raise InputError("net is empty: give the name of a net of the board.")
+    if net not in session.net_names(board):
+        raise InputError(
+            f"The board has no net {net!r} (net names are case-sensitive). The tool changed "
+            "nothing."
+        )
+
+
+def _check_layers(session, board, layers: list[str]) -> None:
+    copper = session.copper_layers(board)
+    bad = sorted({layer for layer in layers if layer not in copper})
+    if bad:
+        raise InputError(
+            f"{', '.join(bad)}: not a copper layer of the board (the board has "
+            f"{', '.join(copper)}). The tool changed nothing."
+        )
+
+
+def _created_table(created: list[BoardItem]) -> list[str]:
+    lines = ["| Item | Layer | Position (mm) | ID |", "|---|---|---|---|"]
+    for item in created:
+        position = f"{_mm(item.position[0])}, {_mm(item.position[1])}" if item.position else ""
+        lines.append(f"| {item.kind} | {cell(item.layer)} | {position} | {item.id} |")
+    return lines
+
+
+def _size(value: float | None, name: str, netclass_value: int | None, netclass: str):
+    """The size of an argument, or of the netclass: (nm, source)."""
+    if value is not None:
+        return _nm(value, name), f"the argument {name}"
+    if netclass_value is None:
+        raise InputError(f"The netclass {netclass} gives no {name}: give {name}.")
+    return netclass_value, f"the netclass {netclass}"
+
+
+def _add_tracks(
+    board_path: str,
+    net: str,
+    tracks: list[TrackSegment],
+    vias: list[Point],
+    width_mm: float | None,
+    via_size_mm: float | None,
+    via_drill_mm: float | None,
+) -> str:
+    if not tracks and not vias:
+        raise InputError("tracks and vias are empty.")
+    for track in tracks:
+        if _xy(track.start) == _xy(track.end):
+            raise InputError(
+                f"A track has the same start and end ({track.start.x_mm:g}, "
+                f"{track.start.y_mm:g}). The tool changed nothing."
+            )
+    with open_session() as session:
+        board = session.board(board_path)
+        if vias and session.state.rules.has_limit("free_via"):
+            # A via on a track end is not free, as the PCB editor makes it.
+            ends = {_xy(point) for track in tracks for point in (track.start, track.end)}
+            alone = [v for v in vias if _xy(v) not in ends]
+            if alone:
+                raise InputError(
+                    f"{_count(len(alone), 'via')} not at an end of a new track (first: "
+                    f"{alone[0].x_mm:g}, {alone[0].y_mm:g}): KiCad "
+                    f"{session.state.version} cannot add a free via. "
+                    f"{LIMITS['free_via'].text} Tell the user: add such a via in the PCB "
+                    "editor. The tool changed nothing."
+                )
+        _check_net(session, board, net)
+        if tracks:
+            _check_layers(session, board, [track.layer for track in tracks])
+        # The netclass for a size that the arguments do not give, and for a via (its via
+        # stack gives the form of the pad stack of a through via).
+        sizes = (
+            session.netclass(net)
+            if vias or width_mm is None
+            else NetClassSizes("", None, None, None, None)
+        )
+        lines_sizes = []
+        items = []
+        if tracks:
+            width, source = _size(width_mm, "width_mm", sizes.track_width, sizes.name)
+            lines_sizes.append(f"Track width: {_mm(width)} mm ({source}).")
+            items += [
+                session.track_message(_xy(t.start), _xy(t.end), width, t.layer, net) for t in tracks
+            ]
+        if vias:
+            size, size_source = _size(via_size_mm, "via_size_mm", sizes.via_size, sizes.name)
+            drill, drill_source = _size(via_drill_mm, "via_drill_mm", sizes.via_drill, sizes.name)
+            if sizes.via_stack is None or not sizes.via_stack.copper_layers:
+                raise InputError(
+                    f"The netclass {sizes.name} gives no via stack with a copper layer: the "
+                    "tool cannot make a via."
+                )
+            if drill >= size:
+                raise InputError(
+                    f"The via drill ({_mm(drill)} mm) must be smaller than the via size "
+                    f"({_mm(size)} mm). The tool changed nothing."
+                )
+            lines_sizes.append(
+                f"Via: through, size {_mm(size)} mm ({size_source}), drill {_mm(drill)} mm "
+                f"({drill_source})."
+            )
+            items += [session.via_message(_xy(v), size, drill, sizes.via_stack, net) for v in vias]
+        message = f"{UNDO_PREFIX}tracks and vias on {net}"
+        created = session.commit_items(board, items, message)
+    return "\n".join(
+        [
+            f"✅ KiCad added {_count(len(tracks), 'track')} and {_count(len(vias), 'via')} on "
+            f'the net `{net}` in one undo step ("{message}").',
+            "",
+            *lines_sizes,
+            "",
+            *_created_table(created),
+            "",
+            DRC_NOTE,
+        ]
+    )
+
+
+@mcp.tool()
+async def ipc_add_tracks(
+    board_path: str,
+    net: str,
+    tracks: list[TrackSegment] | None = None,
+    vias: list[Point] | None = None,
+    width_mm: float | None = None,
+    via_size_mm: float | None = None,
+    via_drill_mm: float | None = None,
+) -> str:
+    """Add straight tracks and through vias on one net of the board in the PCB editor.
+
+    KiCad adds the items in one undo step. The sizes come from the netclass of the net,
+    or from the arguments (the router of the PCB editor uses the sizes that the user
+    selected in the editor, which can be other sizes). KiCad checks no
+    clearance: the answer tells the user to run DRC. The tool refuses a net that the
+    board does not have. KiCad 10.0.6 must have the schematic editor closed (KiCad bug
+    #24966).
+
+    Args:
+        board_path: The path of the .kicad_pcb file that is open in the PCB editor.
+        net: The name of the net, for example "GND" or "/SDA" (case-sensitive).
+        tracks: The tracks: start, end (mm) and copper layer of each one.
+        vias: The positions of the through vias (mm).
+        width_mm: The track width. Default: the track width of the netclass.
+        via_size_mm: The via diameter. Default: the via size of the netclass.
+        via_drill_mm: The via drill. Default: the via drill of the netclass.
+
+    Returns:
+        Markdown: the result, the sizes and their source, a table of the new items with
+        their IDs, and the DRC warning.
+    """
+    try:
+        return await asyncio.to_thread(
+            _add_tracks,
+            board_path,
+            net,
+            tracks or [],
+            vias or [],
+            width_mm,
+            via_size_mm,
+            via_drill_mm,
+        )
+    except Exception as error:
+        return error_answer(error, "Error adding the tracks")
+
+
+def _add_zone(board_path: str, net: str, layer: str, outline: list[Point], **settings) -> str:
+    points = _polygon(outline)
+    if not 0 <= settings["priority"] <= UINT32_MAX:
+        raise InputError(f"priority must be 0 to {UINT32_MAX}, not {settings['priority']}.")
+    # The checks of the zone dialog (PANEL_ZONE_PROPERTIES::AcceptOptions, zones.h of
+    # KiCad 10.0.6).
+    min_thickness = _nm(
+        settings["min_thickness_mm"], "min_thickness_mm", minimum=ZONE_THICKNESS_MIN_MM
+    )
+    spoke = _nm(settings["thermal_spoke_width_mm"], "thermal_spoke_width_mm", minimum=0)
+    if spoke < min_thickness:
+        raise InputError("Thermal spoke width cannot be smaller than the minimum width.")
+    zone = ZoneSettings(
+        # The clearance of a zone is a local clearance: DRC_ENGINE::EvalRules uses the
+        # larger of it and the clearance of the netclass and the rules ("local clearances
+        # (such as zones) ... have to be max'ed with netclass values"). No clearance: 0,
+        # thus the current clearance of the netclass and the rules applies.
+        clearance=0
+        if settings["clearance_mm"] is None
+        else _nm(
+            settings["clearance_mm"], "clearance_mm", minimum=0, maximum=ZONE_CLEARANCE_MAX_MM
+        ),
+        min_thickness=min_thickness,
+        connection=settings["connection"],
+        # The zone dialog does not check the gap (AcceptOptions validates no
+        # m_antipadClearance): only a value that KiCad can store.
+        thermal_gap=_storable(
+            settings["thermal_gap_mm"],
+            f"thermal_gap_mm is not a length that KiCad can store: {settings['thermal_gap_mm']}.",
+        ),
+        thermal_spoke_width=spoke,
+        island_removal=settings["island_removal"],
+        priority=settings["priority"],
+        border_style=settings["border_style"],
+        border_pitch=_nm(
+            settings["border_pitch_mm"],
+            "border_pitch_mm",
+            minimum=HATCH_PITCH_MIN_MM,
+            maximum=HATCH_PITCH_MAX_MM,
+        ),
+        name=settings["name"],
+    )
+    with open_session() as session:
+        board = session.board(board_path)
+        _check_net(session, board, net)
+        _check_layers(session, board, [layer])
+        if zone.name and zone.name in session.zone_names(board):
+            # The zone dialog makes the name unique (BOARD::GetUniqueZoneName).
+            raise InputError(
+                f"The board has a zone with the name {zone.name!r}. Give an other name. The "
+                "tool changed nothing."
+            )
+        message = f"{UNDO_PREFIX}zone on {net}"
+        created = session.commit_items(
+            board,
+            [session.zone_message(layer, points, net, zone)],
+            message,
+        )
+    rows = [
+        ("Net, layer", f"{net}, {layer}"),
+        (
+            "Clearance",
+            f"{_mm(zone.clearance)} mm of the zone: KiCad uses the larger of it and the "
+            "current clearance of the netclass and the rules"
+            if zone.clearance
+            else "none of the zone (0): KiCad uses the current clearance of the netclass and "
+            "the rules",
+        ),
+        ("Minimum width", f"{_mm(zone.min_thickness)} mm"),
+        ("Pad connection", zone.connection),
+        ("Thermal gap", f"{_mm(zone.thermal_gap)} mm"),
+        ("Thermal spoke width", f"{_mm(zone.thermal_spoke_width)} mm"),
+        ("Fill", "solid"),
+        ("Island removal", zone.island_removal),
+        ("Priority", str(zone.priority)),
+        ("Border", f"{zone.border_style}, pitch {_mm(zone.border_pitch)} mm"),
+    ]
+    return "\n".join(
+        [
+            f'✅ KiCad added a copper zone on the net `{net}` in one undo step ("{message}").',
+            "",
+            "| Setting | Value |",
+            "|---|---|",
+            *(f"| {name} | {cell(value)} |" for name, value in rows),
+            "",
+            *_created_table(created),
+            "",
+            "ℹ️ The zone has no fill yet. Fill the zones with ipc_refill_zones.",
+            DRC_NOTE,
+        ]
+    )
+
+
+@mcp.tool()
+async def ipc_add_zone(
+    board_path: str,
+    net: str,
+    layer: str,
+    outline: list[Point],
+    min_thickness_mm: float,
+    connection: Literal["thermal", "solid", "none", "thermal_pth"],
+    island_removal: Literal["always", "never"],
+    priority: int,
+    border_style: Literal["solid", "hatched_edge", "hatched_full"],
+    border_pitch_mm: float,
+    thermal_gap_mm: float,
+    thermal_spoke_width_mm: float,
+    clearance_mm: float | None = None,
+    name: str = "",
+) -> str:
+    """Add a copper zone with a solid fill on one net and one copper layer of the board in
+    the PCB editor.
+
+    The API gives no default zone settings: the settings are required arguments. When
+    the user did not give them, ask the user. KiCad adds the zone in one undo step, with
+    no fill: fill it with ipc_refill_zones. KiCad checks no clearance: the answer tells
+    the user to run DRC. KiCad 10.0.6 must have the schematic editor closed (KiCad bug
+    #24966).
+
+    Args:
+        board_path: The path of the .kicad_pcb file that is open in the PCB editor.
+        net: The name of the net, for example "GND" (case-sensitive).
+        layer: A copper layer of the board, for example F.Cu.
+        outline: The corners of the zone outline in mm (3 or more points, the first point
+            not again at the end).
+        min_thickness_mm: The minimum width of the fill, 0.025 mm or more.
+        connection: The connection of pads: "thermal" (thermal reliefs), "solid",
+            "none", or "thermal_pth" (thermal reliefs for through-hole pads only).
+        island_removal: Remove isolated islands of the fill: "always" or "never". (The
+            mode with a minimum area is not possible: the API gives no unit for it.)
+        priority: The zone priority (0 or more).
+        border_style: The border of the zone in the editor: "solid", "hatched_edge" or
+            "hatched_full".
+        border_pitch_mm: The pitch of the border hatch, 0.1 to 2 mm.
+        thermal_gap_mm: The thermal relief gap (KiCad keeps it also for a solid
+            connection: a pad can have its own thermal connection).
+        thermal_spoke_width_mm: The thermal spoke width, not smaller than
+            min_thickness_mm.
+        clearance_mm: An own clearance of the zone, 0 to 100 mm: KiCad uses the larger
+            of it and the current clearance of the netclass and the rules. Default:
+            none (0), thus only the netclass and the rules apply.
+        name: The name of the zone (optional, not the name of an other zone).
+
+    Returns:
+        Markdown: the result, the settings, the new zone with its ID, and the DRC
+        warning.
+    """
+    try:
+        return await asyncio.to_thread(
+            _add_zone,
+            board_path,
+            net,
+            layer,
+            outline,
+            min_thickness_mm=min_thickness_mm,
+            connection=connection,
+            island_removal=island_removal,
+            priority=priority,
+            border_style=border_style,
+            border_pitch_mm=border_pitch_mm,
+            clearance_mm=clearance_mm,
+            thermal_gap_mm=thermal_gap_mm,
+            thermal_spoke_width_mm=thermal_spoke_width_mm,
+            name=name,
+        )
+    except Exception as error:
+        return error_answer(error, "Error adding the zone")
+
+
+def _add_board_outline(board_path: str, outline: list[Point], line_width_mm: float | None) -> str:
+    points = _polygon(outline)
+    with open_session() as session:
+        board = session.board(board_path)
+        existing, unreadable = session.edge_cuts_shapes(board)
+        if unreadable:
+            raise IpcError(
+                f"KiCad gave {_count(unreadable, 'shape')} of the board that the tool cannot "
+                "read: the tool cannot tell if they are on Edge.Cuts. The tool changed "
+                "nothing."
+            )
+        if existing:
+            # The tools delete no items (limit delete_results of KiCad 10.0.6).
+            raise InputError(
+                f"The board has {_count(len(existing), 'shape')} on Edge.Cuts. The tool adds "
+                "an outline only to a board with none. Tell the user: delete the Edge.Cuts "
+                "shapes in the PCB editor, then call the tool again. The tool changed nothing."
+            )
+        if line_width_mm is not None:
+            width, source = _nm(line_width_mm, "line_width_mm"), "the argument line_width_mm"
+        else:
+            width = session.edge_line_width(board)
+            if width is None:
+                raise InputError("KiCad gave no line width for Edge.Cuts: give line_width_mm.")
+            source = "the graphics defaults of the board for Edge.Cuts"
+        message = f"{UNDO_PREFIX}board outline"
+        created = session.commit_items(board, [session.outline_message(points, width)], message)
+    return "\n".join(
+        [
+            f"✅ KiCad added the board outline (a polygon of {len(outline)} corners) on "
+            f'Edge.Cuts in one undo step ("{message}").',
+            "",
+            f"Line width: {_mm(width)} mm ({source}).",
+            "",
+            *_created_table(created),
+            "",
+            DRC_NOTE,
+        ]
+    )
+
+
+@mcp.tool()
+async def ipc_add_board_outline(
+    board_path: str, outline: list[Point], line_width_mm: float | None = None
+) -> str:
+    """Add the board outline: one closed polygon on Edge.Cuts of the board in the PCB
+    editor, when the board has no Edge.Cuts shapes.
+
+    KiCad adds the outline in one undo step. A board that has Edge.Cuts shapes gives an
+    error: the tools delete no items (KiCad 10.0.6 gives no result of a delete, limit
+    delete_results); the user deletes the old outline in the PCB editor. Footprints can
+    have Edge.Cuts shapes too: the tool does not count them. KiCad 10.0.6 must have the
+    schematic editor closed (KiCad bug #24966).
+
+    Args:
+        board_path: The path of the .kicad_pcb file that is open in the PCB editor.
+        outline: The corners of the outline in mm (3 or more points, the first point not
+            again at the end).
+        line_width_mm: The line width. Default: the graphics defaults of the board for
+            Edge.Cuts.
+
+    Returns:
+        Markdown: the result, the line width and its source, the new shape with its ID,
+        and the DRC warning.
+    """
+    try:
+        return await asyncio.to_thread(_add_board_outline, board_path, outline, line_width_mm)
+    except Exception as error:
+        return error_answer(error, "Error adding the board outline")

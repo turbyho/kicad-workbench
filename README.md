@@ -81,9 +81,10 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   output tells the user to install a newer KiCad.
 - **Live board edits (IPC).** The state of the connection to the board in the PCB
   editor of a running KiCad 10.0.6: the selection of the editor (read it, select
-  footprints by reference and the tracks of nets), the side of footprints, the zone fill
-  and the save of the board (extra `ipc`). KiCad does each change, and one tool call is
-  one undo step. More edit tools come with KiCad 10.0.8.
+  footprints by reference and the tracks of nets), the side of footprints, new tracks,
+  vias, copper zones and the board outline, the zone fill and the save of the board
+  (extra `ipc`). KiCad does each change, and one tool call is one undo step. The API
+  of KiCad 10 cannot run DRC: the tools tell you to run it.
 - **Parts registry.** A search in an open registry of KiCad parts
   ([PartReel](https://partreel.com)), and the download of their symbols and
   footprints (on request also their 3D models).

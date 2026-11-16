@@ -20,6 +20,7 @@ from google.protobuf.any_pb2 import Any  # noqa: E402
 from kipy.errors import ApiError, ConnectionError  # noqa: E402
 from kipy.proto.board import (
     board_commands_pb2,  # noqa: E402
+    board_pb2,  # noqa: E402
     board_types_pb2,  # noqa: E402
 )
 from kipy.proto.board.board_types_pb2 import BoardLayer  # noqa: E402
@@ -29,6 +30,7 @@ from kipy.proto.common.types import (  # noqa: E402
     KiCadObjectType,
     base_types_pb2,
 )
+from kipy.util.proto import unpack_any  # noqa: E402
 
 from kicad_workbench.tools import ipc  # noqa: E402
 from kicad_workbench.utils import ipc_client  # noqa: E402
@@ -137,6 +139,14 @@ class FakeKiCad:
         # The number of AS_BUSY answers after RefillZones (board_commands.proto: KiCad
         # gives AS_BUSY to each request until the fill has completed).
         self.busy_after_refill = 0
+        # Step 3D: the shapes of the board, the commits (action, message), the created
+        # items, and a status code for each created item that fails.
+        self.shapes: list[Any] = []
+        self.commits: list[tuple[int, str]] = []
+        self.created: list[Any] = []
+        self.deleted: list[str] = []
+        self.create_status: int | None = None
+        self.request_status = base_types_pb2.IRS_OK
         self.selected: list[str] = []
         self.clients: list = []
         self.requests: list[str] = []
@@ -185,7 +195,11 @@ class FakeKiCad:
             self.busy_after_refill -= 1
             raise ApiError("KiCad returned error: busy", code=ipc_client.AS_BUSY)
         response = response_type()
-        if name == "GetItems" and list(command.types) == [KiCadObjectType.KOT_PCB_ZONE]:
+        if name in STEP_3D_REQUESTS:
+            return self._answer_3d(name, command, response)
+        if name == "GetItems" and list(command.types) == [KiCadObjectType.KOT_PCB_SHAPE]:
+            response.items.extend(self.shapes)
+        elif name == "GetItems" and list(command.types) == [KiCadObjectType.KOT_PCB_ZONE]:
             response.items.extend(self.zones)
         elif name == "GetItems":
             assert list(command.types) == [KiCadObjectType.KOT_PCB_FOOTPRINT]
@@ -248,6 +262,55 @@ class FakeKiCad:
             response.items.extend(self.item(i) for i in self.selected)
         else:
             raise AssertionError(f"no fake answer for {name}")
+        return response
+
+    def _answer_3d(self, name, command, response):
+        if name == "GetBoardEnabledLayers":
+            response.copper_layer_count = 2
+            response.layers.extend(
+                [BoardLayer.BL_F_Cu, BoardLayer.BL_B_Cu, BoardLayer.BL_Edge_Cuts]
+            )
+        elif name == "GetNetClassForNets":
+            for net in command.net:
+                netclass = response.classes[net.name]
+                netclass.name = "Default"
+                netclass.board.clearance.value_nm = 200_000
+                netclass.board.track_width.value_nm = 250_000
+                stack = netclass.board.via_stack
+                stack.drill.diameter.x_nm = stack.drill.diameter.y_nm = 300_000
+                layer = stack.copper_layers.add()
+                layer.layer = BoardLayer.BL_F_Cu
+                layer.size.x_nm = layer.size.y_nm = 600_000
+        elif name == "GetGraphicsDefaults":
+            layer = response.defaults.layers.add()
+            layer.layer = board_pb2.BLC_EDGES
+            layer.line_thickness.value_nm = 100_000
+        elif name == "BeginCommit":
+            response.id.value = "commit-1"
+        elif name == "EndCommit":
+            self.commits.append((command.action, command.message))
+        elif name == "DeleteItems":
+            response.status = self.request_status
+            for item in command.item_ids:
+                result = response.deleted_items.add()
+                result.id.value = item.value
+                result.status = editor_commands_pb2.IDS_OK
+                self.deleted.append(item.value)
+        elif name == "CreateItems":
+            # KiCad 10.0.6 gives IRS_OK (measured, spike/ipc/probe_create.py).
+            response.status = self.request_status
+            for index, item in enumerate(command.items):
+                result = response.created_items.add()
+                if self.create_status is not None and index == len(command.items) - 1:
+                    result.status.code = self.create_status
+                    result.status.error_message = "refused"
+                    continue
+                message = unpack_any(item)
+                message.id.value = f"new-{len(self.created) + 1}"
+                created = packed(message)
+                self.created.append(created)
+                result.item.CopyFrom(created)
+                result.status.code = editor_commands_pb2.ISC_OK
         return response
 
     def _open_documents(self, command, response_type):
@@ -491,6 +554,17 @@ def test_describe_an_unknown_type(kicad):
     item = ipc_client.describe_item(ipc_client._import_kipy(), unknown)
     assert item.kind == "Table"
     assert "kicad-python 0.8.0 does not know the type" in item.problem
+
+
+STEP_3D_REQUESTS = {
+    "GetBoardEnabledLayers",
+    "GetNetClassForNets",
+    "GetGraphicsDefaults",
+    "BeginCommit",
+    "EndCommit",
+    "CreateItems",
+    "DeleteItems",
+}
 
 
 # ipc_status.
@@ -1127,3 +1201,320 @@ def test_a_save_with_the_same_bytes_and_time(kicad):
     kicad.answer = answer
     text = run(ipc.ipc_save_board(str(kicad.board_path)))
     assert text.startswith("✅ KiCad saved the board")
+
+
+# Step 3D: ipc_add_tracks, ipc_add_zone, ipc_add_board_outline.
+
+
+def created_messages(kicad):
+    return [unpack_any(item) for item in kicad.created]
+
+
+def add_tracks(kicad, **kwargs):
+    kwargs.setdefault("net", "GND")
+    return run(ipc.ipc_add_tracks(str(kicad.board_path), **kwargs))
+
+
+TRACK = {"start": {"x_mm": 0, "y_mm": 0}, "end": {"x_mm": 5, "y_mm": 0}, "layer": "F.Cu"}
+
+
+def test_add_tracks_with_the_sizes_of_the_netclass(kicad):
+    text = add_tracks(
+        kicad,
+        tracks=[ipc.TrackSegment(**TRACK)],
+        vias=[ipc.Point(x_mm=5, y_mm=0)],
+    )
+    assert text.startswith(
+        "✅ KiCad added 1 track and 1 via on the net `GND` in one undo step "
+        '("kicad-workbench: tracks and vias on GND").'
+    )
+    assert "Track width: 0.25 mm (the netclass Default)." in text
+    assert "Via: through, size 0.6 mm (the netclass Default), drill 0.3 mm" in text
+    assert "⚠️ KiCad ran no DRC" in text
+    track, via = created_messages(kicad)
+    assert (track.net.name, track.width.value_nm, track.layer) == (
+        "GND",
+        250_000,
+        BoardLayer.BL_F_Cu,
+    )
+    assert (via.net.name, via.type) == ("GND", board_types_pb2.VT_THROUGH)
+    assert via.pad_stack.drill.diameter.x_nm == 300_000
+    assert via.pad_stack.copper_layers[0].size.x_nm == 600_000
+    # The drill of a through via, as the PCB_VIA constructor: F.Cu to B.Cu, a circle.
+    drill = via.pad_stack.drill
+    assert (drill.start_layer, drill.end_layer, drill.shape) == (
+        BoardLayer.BL_F_Cu,
+        BoardLayer.BL_B_Cu,
+        board_types_pb2.DS_CIRCLE,
+    )
+    assert kicad.commits == [
+        (editor_commands_pb2.CMA_COMMIT, "kicad-workbench: tracks and vias on GND")
+    ]
+
+
+def test_add_tracks_with_sizes_of_the_arguments(kicad):
+    text = add_tracks(
+        kicad,
+        tracks=[ipc.TrackSegment(**TRACK)],
+        vias=[ipc.Point(x_mm=5, y_mm=0)],
+        width_mm=0.4,
+        via_size_mm=0.8,
+        via_drill_mm=0.4,
+    )
+    assert "Track width: 0.4 mm (the argument width_mm)." in text
+    track, via = created_messages(kicad)
+    assert track.width.value_nm == 400_000
+    assert via.pad_stack.copper_layers[0].size.x_nm == 800_000
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({}, "tracks and vias are empty."),
+        ({"net": "gnd", "tracks": [TRACK]}, "The board has no net 'gnd'"),
+        (
+            {"tracks": [{**TRACK, "layer": "Edge.Cuts"}]},
+            "Edge.Cuts: not a copper layer of the board",
+        ),
+        (
+            {"tracks": [{**TRACK, "end": TRACK["start"]}]},
+            "A track has the same start and end",
+        ),
+        (
+            {"tracks": [TRACK], "vias": [{"x_mm": 5, "y_mm": 0}], "via_drill_mm": 0.6},
+            "The via drill (0.6 mm) must be smaller than the via size (0.6 mm).",
+        ),
+        (
+            {"tracks": [TRACK], "vias": [{"x_mm": 1, "y_mm": 1}]},
+            "1 via not at an end of a new track (first: 1, 1): KiCad 10.0.6 cannot add a free via.",
+        ),
+        ({"tracks": [TRACK], "width_mm": 0}, "width_mm must be more than 0 mm, not 0."),
+    ],
+)
+def test_add_tracks_arguments(kicad, kwargs, message):
+    """Each check comes before the commit: CreateItems makes a new net for an unknown
+    name (limit unknown_net)."""
+    kwargs = dict(kwargs)
+    kwargs["tracks"] = [ipc.TrackSegment(**t) for t in kwargs.get("tracks", [])]
+    kwargs["vias"] = [ipc.Point(**v) for v in kwargs.get("vias", [])]
+    text = add_tracks(kicad, **kwargs)
+    assert text.startswith(f"❌ {message}")
+    assert "BeginCommit" not in kicad.requests
+
+
+def test_add_tracks_with_the_schematic_editor_open(kicad):
+    """KiCad 10.0.6 stops on a commit while the schematic editor is open (bug #24966)."""
+    kicad.schematic_open = True
+    text = add_tracks(kicad, tracks=[ipc.TrackSegment(**TRACK)])
+    assert text.startswith("❌ KiCad 10.0.6 stops on a commit while the schematic editor is open")
+    assert "BeginCommit" not in kicad.requests
+
+
+def test_an_item_that_kicad_refuses_drops_the_commit(kicad):
+    kicad.create_status = editor_commands_pb2.ISC_INVALID_DATA
+    text = add_tracks(kicad, tracks=[ipc.TrackSegment(**TRACK)], vias=[ipc.Point(x_mm=5, y_mm=0)])
+    assert text.startswith("❌ KiCad created 1 of 2 items (ISC_INVALID_DATA: refused).")
+    assert 'The tool dropped the commit (CMA_DROP: "Cancel this commit").' in text
+    assert kicad.commits == [(editor_commands_pb2.CMA_DROP, "")]
+
+
+ZONE = {
+    "net": "GND",
+    "layer": "F.Cu",
+    "outline": [{"x_mm": 0, "y_mm": 0}, {"x_mm": 5, "y_mm": 0}, {"x_mm": 5, "y_mm": 5}],
+    "min_thickness_mm": 0.25,
+    "connection": "thermal",
+    "island_removal": "always",
+    "priority": 0,
+    "border_style": "hatched_edge",
+    "border_pitch_mm": 0.5,
+    "thermal_gap_mm": 0.5,
+    "thermal_spoke_width_mm": 0.5,
+}
+
+
+def add_zone(kicad, **changes):
+    arguments = {**ZONE, **changes}
+    arguments["outline"] = [ipc.Point(**p) for p in arguments["outline"]]
+    return run(ipc.ipc_add_zone(str(kicad.board_path), **arguments))
+
+
+def test_add_a_zone(kicad):
+    text = add_zone(kicad)
+    assert text.startswith(
+        "✅ KiCad added a copper zone on the net `GND` in one undo step "
+        '("kicad-workbench: zone on GND").'
+    )
+    assert "| Clearance | none of the zone (0): KiCad uses the current clearance" in text
+    assert "ℹ️ The zone has no fill yet." in text
+    (zone,) = created_messages(kicad)
+    settings = zone.copper_settings
+    assert (zone.type, list(zone.layers)) == (board_types_pb2.ZT_COPPER, [BoardLayer.BL_F_Cu])
+    # No clearance (0): DRC_ENGINE::EvalRules uses the larger of it and the netclass.
+    assert (settings.net.name, settings.clearance.value_nm) == ("GND", 0)
+    assert "GetNetClassForNets" not in kicad.requests
+    assert settings.connection.zone_connection == board_types_pb2.ZCS_THERMAL
+    assert settings.connection.thermal_spokes.gap.value_nm == 500_000
+    assert (settings.fill_mode, settings.island_mode) == (
+        board_types_pb2.ZFM_SOLID,
+        board_types_pb2.IRM_ALWAYS,
+    )
+    assert (zone.border.style, zone.border.pitch.value_nm) == (
+        board_types_pb2.ZBS_DIAGONAL_EDGE,
+        500_000,
+    )
+    assert len(zone.outline.polygons[0].outline.nodes) == 3
+
+
+def test_add_a_zone_with_an_own_clearance(kicad):
+    text = add_zone(kicad, clearance_mm=0.3, connection="solid")
+    assert "| Clearance | 0.3 mm of the zone: KiCad uses the larger of it and" in text
+    (zone,) = created_messages(kicad)
+    assert zone.copper_settings.clearance.value_nm == 300_000
+    # KiCad keeps the thermal settings also for a solid connection.
+    assert zone.copper_settings.connection.thermal_spokes.gap.value_nm == 500_000
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        (
+            {"thermal_spoke_width_mm": 0.2},
+            "Thermal spoke width cannot be smaller than the minimum width.",
+        ),
+        ({"min_thickness_mm": 0.01}, "min_thickness_mm must be 0.025 mm or more, not 0.01."),
+        ({"border_pitch_mm": 3}, "border_pitch_mm must be 0.1 to 2 mm, not 3."),
+        ({"clearance_mm": 101}, "clearance_mm must be 0 to 100 mm, not 101."),
+        ({"name": "fill | top"}, "The board has a zone with the name 'fill | top'."),
+        (
+            {
+                "outline": [
+                    {"x_mm": 0, "y_mm": 0},
+                    {"x_mm": 10, "y_mm": 10},
+                    {"x_mm": 10, "y_mm": 0},
+                    {"x_mm": 0, "y_mm": 10},
+                ]
+            },
+            "outline intersects itself: the edges 1 and 3 have a common point.",
+        ),
+        ({"min_thickness_mm": float("inf")}, "min_thickness_mm is not a length that KiCad"),
+        ({"outline": ZONE["outline"][:2]}, "outline must have 3 or more points, not 2."),
+        ({"net": "NO"}, "The board has no net 'NO'"),
+        ({"priority": -1}, "priority must be 0 to 4294967295, not -1."),
+        ({"priority": 2**32}, "priority must be 0 to 4294967295"),
+        ({"net": ""}, "net is empty"),
+        (
+            {"outline": [*ZONE["outline"], ZONE["outline"][0]]},
+            "outline has the same point two times one after the other",
+        ),
+        (
+            {"outline": [{"x_mm": 0, "y_mm": 0}, {"x_mm": 1, "y_mm": 1}, {"x_mm": 2, "y_mm": 2}]},
+            "outline has no area",
+        ),
+        (
+            {"outline": [{"x_mm": float("nan"), "y_mm": 0}, *ZONE["outline"][1:]]},
+            "A point has no position that KiCad can store",
+        ),
+    ],
+)
+def test_add_zone_arguments(kicad, changes, message):
+    text = add_zone(kicad, **changes)
+    assert text.startswith(f"❌ {message}")
+    assert "BeginCommit" not in kicad.requests
+
+
+def edge_shape(item_id, locked=1):
+    shape = board_types_pb2.BoardGraphicShape()
+    shape.id.value = item_id
+    shape.layer = BoardLayer.BL_Edge_Cuts
+    shape.locked = locked  # 1 LS_UNLOCKED, 2 LS_LOCKED
+    return packed(shape)
+
+
+OUTLINE = [ipc.Point(x_mm=x, y_mm=y) for x, y in ((0, 0), (20, 0), (20, 10), (0, 10))]
+
+
+def test_add_the_board_outline(kicad):
+    text = run(ipc.ipc_add_board_outline(str(kicad.board_path), OUTLINE))
+    assert text.startswith("✅ KiCad added the board outline (a polygon of 4 corners)")
+    assert "Line width: 0.1 mm (the graphics defaults of the board for Edge.Cuts)." in text
+    (shape,) = created_messages(kicad)
+    assert shape.layer == BoardLayer.BL_Edge_Cuts
+    assert shape.shape.attributes.stroke.width.value_nm == 100_000
+    assert len(shape.shape.polygon.polygons[0].outline.nodes) == 4
+
+
+def test_an_outline_on_a_board_with_an_outline(kicad):
+    """The tools delete no items (limit delete_results): the step is the PCB editor."""
+    kicad.shapes = [edge_shape("edge-1"), edge_shape("edge-2")]
+    text = run(ipc.ipc_add_board_outline(str(kicad.board_path), OUTLINE))
+    assert text.startswith("❌ The board has 2 shapes on Edge.Cuts. The tool adds an outline")
+    assert "delete the Edge.Cuts shapes in the PCB editor" in text
+    assert "BeginCommit" not in kicad.requests
+
+
+def test_a_shape_that_the_tool_cannot_read(kicad):
+    """The tool cannot tell the layer of a shape with no data: it changes nothing."""
+    kicad.shapes = [Any()]
+    text = run(ipc.ipc_add_board_outline(str(kicad.board_path), OUTLINE))
+    assert text.startswith("❌ KiCad gave 1 shape of the board that the tool cannot read")
+    assert "BeginCommit" not in kicad.requests
+
+
+def test_a_netclass_with_no_via_stack(kicad, monkeypatch):
+    real = ipc_client.IpcSession.netclass
+
+    def netclass(self, net):
+        sizes = real(self, net)
+        return ipc_client.NetClassSizes(sizes.name, sizes.clearance, sizes.track_width, None, None)
+
+    monkeypatch.setattr(ipc_client.IpcSession, "netclass", netclass)
+    text = add_tracks(
+        kicad,
+        tracks=[ipc.TrackSegment(**TRACK)],
+        vias=[ipc.Point(x_mm=5, y_mm=0)],
+        via_size_mm=0.6,
+        via_drill_mm=0.3,
+    )
+    assert text.startswith("❌ The netclass Default gives no via stack")
+    assert "BeginCommit" not in kicad.requests
+
+
+def test_an_end_of_commit_that_fails(kicad):
+    kicad.fail_once = ("EndCommit", ConnectionError("Error receiving reply: Timed out"))
+    text = add_tracks(kicad, tracks=[ipc.TrackSegment(**TRACK)])
+    assert text.startswith("❌ KiCad did not answer the request EndCommit")
+    assert "the commit can still be open" in text
+
+
+def test_add_tracks_with_a_width_needs_no_netclass(kicad):
+    text = add_tracks(kicad, tracks=[ipc.TrackSegment(**TRACK)], width_mm=0.3)
+    assert "Track width: 0.3 mm (the argument width_mm)." in text
+    assert "GetNetClassForNets" not in kicad.requests
+
+
+def test_an_overall_status_that_is_not_ok(kicad):
+    """Only IRS_OK passes: a status that KiCad did not set is no success."""
+    kicad.request_status = base_types_pb2.IRS_UNKNOWN
+    text = add_tracks(kicad, tracks=[ipc.TrackSegment(**TRACK)])
+    assert text.startswith("❌ KiCad refused the items (IRS_UNKNOWN).")
+    assert kicad.commits == [(editor_commands_pb2.CMA_DROP, "")]
+
+
+def test_an_interrupt_stays_an_interrupt(kicad):
+    """An interrupt during CreateItems, and a drop that fails: the interrupt goes on."""
+    real = kicad.answer
+
+    def answer(command, response_type):
+        name = type(command).__name__
+        if name == "CreateItems":
+            raise KeyboardInterrupt
+        if name == "EndCommit":
+            raise ConnectionError("Error receiving reply: Timed out")
+        return real(command, response_type)
+
+    kicad.answer = answer
+    with pytest.raises(KeyboardInterrupt):
+        with ipc_client.open_session() as session:
+            board = session.board(kicad.board_path)
+            session.commit_items(board, [session.outline_message([(0, 0), (1, 0), (0, 1)], 1)], "x")

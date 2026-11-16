@@ -1,6 +1,6 @@
 # Tools
 
-The server has 57 tools. Each tool returns Markdown text (the image tools also return
+The server has 60 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -173,6 +173,9 @@ KiCad 10.0.6 now. More tools come in the next versions.
 | `ipc_place_footprints(board_path, placements, flip_direction, override_locks?)` | Places footprints: KiCad 10.0.6 can only change the side (a flip around the position of the footprint). `flip_direction` is `left_right` or `top_bottom`: the API cannot read the flip direction of the PCB editor. One call is one undo step. A locked footprint flips only with `override_locks`, as "Override locks" of the PCB editor. A position, a rotation or a lock gives an error with the limit of the KiCad version |
 | `ipc_save_board(board_path)` | Saves the board of the editor into its file, as File > Save. A changed file version gives a warning |
 | `ipc_refill_zones(board_path, timeout_s?)` | Fills all zones, as "Fill All Zones", and waits for the end of the fill (its own undo step). It gives the time and the number of filled copper zones. It cannot see a cancel of the fill by the user |
+| `ipc_add_tracks(board_path, net, tracks?, vias?, width_mm?, via_size_mm?, via_drill_mm?)` | Adds straight tracks and through vias on one net, in one undo step. The sizes come from the netclass of the net, or from the arguments. A net that the board does not have gives an error. KiCad 10.0.6 cannot make a free via: a via must be at an end of a new track of the same call |
+| `ipc_add_zone(board_path, net, layer, outline, min_thickness_mm, connection, island_removal, priority, border_style, border_pitch_mm, thermal_gap_mm, thermal_spoke_width_mm, clearance_mm?, name?)` | Adds a copper zone (fill mode solid) on one net and one layer, in one undo step. The zone is not filled yet: fill it with `ipc_refill_zones`. The API gives no default zone settings: they are required, with the limits of the zone dialog of KiCad. With no `clearance_mm`, the zone has no own clearance (0): KiCad uses the current clearance of the netclass and the rules; a given clearance is a minimum (KiCad uses the larger value) |
+| `ipc_add_board_outline(board_path, outline, line_width_mm?)` | Adds the board outline as one closed polygon on Edge.Cuts, in one undo step, to a board with no Edge.Cuts shapes. The line width comes from the graphics defaults of the board. The tools delete no items (KiCad 10.0.6 gives no result of a delete): the user deletes an old outline in the PCB editor |
 
 ## Exports and images
 

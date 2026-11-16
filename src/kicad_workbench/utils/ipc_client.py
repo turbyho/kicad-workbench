@@ -180,6 +180,57 @@ LIMITS = {
             "request; no request reads the settings of the editor",
         ),
         Limit(
+            "no_drc",
+            "The API cannot run DRC, and KiCad checks no clearance of the items that a tool "
+            "adds. The tools tell the user to run DRC.",
+            "KiCad 11.0 (StartDrcTask of board_tasks.proto, not released)",
+            "board_commands.proto of 10.0.6: only InjectDrcError; master: board_tasks.proto",
+        ),
+        Limit(
+            "delete_results",
+            "DeleteItems gives no result for the deleted items (an empty deleted_items, "
+            "although the documentation gives a result for each item): a tool cannot check "
+            "a delete. The tools delete no items (for example no replace of the board "
+            "outline).",
+            'KiCad 10.0.7 (commit 77e2d53da2 "IPC API: populate DeleteItemsResponse.'
+            'deleted_items")',
+            "API_HANDLER_EDITOR::handleDeleteItems of 10.0.6; measured: IRS_OK with no "
+            "result for an Edge.Cuts shape of the board",
+        ),
+        Limit(
+            "free_via",
+            "The API cannot mark a via as free (Via.is_free): the PCB editor makes a via that "
+            "is not on a track, a pad or a shape a free via, and connectivity does not change "
+            "the net of a free via. The tools add only a via at an end of a new track of the "
+            "same call.",
+            "KiCad 10.0.7 (Via.is_free of board_types.proto)",
+            "board_types.proto of 10.0.6 has no is_free; DRAWING_TOOL via placement "
+            "(SetIsFree), CN_ITEM( via, !via->GetIsFree() ) of 10.0.6",
+        ),
+        Limit(
+            "zone_defaults",
+            "The API gives no default settings of a new zone (minimum width, thermal relief, "
+            "border, priority): the tools need them as arguments.",
+            "No version (master 2026-11-15)",
+            "board_commands.proto of 10.0.6 and master; BoardDesignRules of master has no zone "
+            "settings",
+        ),
+        Limit(
+            "zone_island_area",
+            "The documentation gives no unit of the minimum island area of a zone: the tools "
+            'offer only the island removal "always" and "never".',
+            "No version (master 2026-11-15)",
+            "CopperZoneSettings.min_island_area (uint64) of board_types.proto, 10.0.6 and master",
+        ),
+        Limit(
+            "unknown_net",
+            "CreateItems makes a new net for a net name that the board does not have, and the "
+            "net stays after a dropped commit. The tools refuse an unknown net.",
+            "No version known (measured with KiCad 10.0.6 only)",
+            "BOARD_CONNECTED_ITEM::UnpackNet of 10.0.6; spike/ipc/probe_create.py: 111 nets, "
+            "112 after CMA_DROP",
+        ),
+        Limit(
             "refill_progress",
             "RefillZones gives no result: KiCad answers AS_BUSY until the fill has completed "
             "(board_commands.proto), or the next request waits for the end of the fill "
@@ -231,8 +282,15 @@ IPC_RULES = {
                 "footprint_move_children",
                 "flip_direction_setting",
                 "refill_progress",
+                "no_drc",
+                "delete_results",
+                "free_via",
+                "zone_defaults",
+                "zone_island_area",
+                "unknown_net",
             ),
-            "spike/kicad-versions/ipc_client_check.py with KiCad 10.0.6 (2026-11-15)",
+            "spike/kicad-versions/ipc_client_check.py (2026-11-15), ipc_write_check.py, "
+            "ipc_add_check.py and spike/ipc/probe_create.py (2026-11-16) with KiCad 10.0.6",
         ),
     )
 }
@@ -289,6 +347,10 @@ class _Kipy:
     zone_copper: Any
     locked_state: Any
     unlocked_state: Any
+    board_types: Any
+    board: Any
+    base_types: Any
+    layer_from_name: Any
 
 
 def _import_kipy() -> _Kipy:
@@ -305,10 +367,10 @@ def _import_kipy() -> _Kipy:
         import kipy
         import kipy.client
         import kipy.errors
-        from kipy.proto.board import board_commands_pb2, board_types_pb2
+        from kipy.proto.board import board_commands_pb2, board_pb2, board_types_pb2
         from kipy.proto.common.commands import editor_commands_pb2
         from kipy.proto.common.types import DocumentType, KiCadObjectType, base_types_pb2
-        from kipy.util.board_layer import canonical_name
+        from kipy.util.board_layer import canonical_name, layer_from_canonical_name
         from kipy.util.proto import unpack_any
     except ImportError as error:
         raise IpcError(f"kicad-python cannot be imported: {error}. {INSTALL_STEP}") from None
@@ -327,6 +389,10 @@ def _import_kipy() -> _Kipy:
         zone_copper=board_types_pb2.ZT_COPPER,
         locked_state=base_types_pb2.LS_LOCKED,
         unlocked_state=base_types_pb2.LS_UNLOCKED,
+        board_types=board_types_pb2,
+        board=board_pb2,
+        base_types=base_types_pb2,
+        layer_from_name=layer_from_canonical_name,
     )
 
 
@@ -464,6 +530,36 @@ class KicadState:
                 "schematic editor, then try again."
             )
         return None
+
+
+@dataclass(frozen=True)
+class NetClassSizes:
+    """The board sizes of the effective netclass of a net (GetNetClassForNets), in nm.
+    None: the netclass does not give the value."""
+
+    name: str
+    clearance: int | None
+    track_width: int | None
+    via_size: int | None
+    via_drill: int | None
+    via_stack: Any = None
+
+
+@dataclass(frozen=True)
+class ZoneSettings:
+    """The settings of a new copper zone (CopperZoneSettings, ZoneBorderSettings of
+    board_types.proto), sizes in nm."""
+
+    clearance: int
+    min_thickness: int
+    connection: str  # "thermal", "solid", "none", "thermal_pth"
+    thermal_gap: int
+    thermal_spoke_width: int
+    island_removal: str  # "always", "never"
+    priority: int
+    border_style: str  # "solid", "hatched_edge", "hatched_full"
+    border_pitch: int
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -632,13 +728,19 @@ class IpcSession:
 
     # The items of the board.
 
+    def items(self, board: Board, object_type: str) -> list[BoardItem]:
+        """Return the items of one type of the board (GetItems), for example
+        "KOT_PCB_FOOTPRINT"."""
+        k = self._k
+        command = k.editor_commands.GetItems()
+        command.header.document.CopyFrom(board.document)
+        command.types.append(getattr(k.object_type, object_type))
+        answer = self.send(command, k.editor_commands.GetItemsResponse)
+        return [describe_item(k, item) for item in answer.items]
+
     def footprints(self, board: Board) -> list[BoardItem]:
         """Return the footprints of the board (GetItems)."""
-        command = self._k.editor_commands.GetItems()
-        command.header.document.CopyFrom(board.document)
-        command.types.append(self._k.object_type.KOT_PCB_FOOTPRINT)
-        answer = self.send(command, self._k.editor_commands.GetItemsResponse)
-        return [describe_item(self._k, item) for item in answer.items]
+        return self.items(board, "KOT_PCB_FOOTPRINT")
 
     def net_names(self, board: Board) -> list[str]:
         """Return the names of the nets of the board (GetNets)."""
@@ -662,6 +764,247 @@ class IpcSession:
             command.nets.add().name = name
         answer = self.send(command, self._k.editor_commands.GetItemsResponse)
         return [describe_item(self._k, item) for item in answer.items]
+
+    def copper_layers(self, board: Board) -> list[str]:
+        """Return the names of the copper layers of the board (GetBoardEnabledLayers)."""
+        k = self._k
+        command = k.board_commands.GetBoardEnabledLayers()
+        command.board.CopyFrom(board.document)
+        answer = self.send(command, k.board_commands.BoardEnabledLayersResponse)
+        names = [k.canonical_name(layer) for layer in answer.layers]
+        return [name for name in names if name.endswith(".Cu")]
+
+    def netclass(self, net: str) -> NetClassSizes:
+        """Return the board sizes of the effective netclass of the net
+        (GetNetClassForNets: "the effective netclass ... for a net")."""
+        k = self._k
+        command = k.board_commands.GetNetClassForNets()
+        command.net.add().name = net
+        answer = self.send(command, k.board_commands.NetClassForNetsResponse)
+        if net not in answer.classes:
+            raise IpcError(f"KiCad gave no netclass for the net {net}.")
+        netclass = answer.classes[net]
+        board = netclass.board
+
+        def distance(name: str) -> int | None:
+            return getattr(board, name).value_nm if board.HasField(name) else None
+
+        via_size = via_drill = None
+        stack = None
+        if board.HasField("via_stack"):
+            stack = board.via_stack
+            if stack.copper_layers:
+                via_size = stack.copper_layers[0].size.x_nm or None
+            via_drill = stack.drill.diameter.x_nm or None
+        return NetClassSizes(
+            netclass.name or "(composite)",
+            distance("clearance"),
+            distance("track_width"),
+            via_size,
+            via_drill,
+            stack,
+        )
+
+    def edge_line_width(self, board: Board) -> int | None:
+        """Return the line thickness of the Edge.Cuts layer class (GetGraphicsDefaults),
+        in nm, or None."""
+        k = self._k
+        command = k.board_commands.GetGraphicsDefaults()
+        command.board.CopyFrom(board.document)
+        answer = self.send(command, k.board_commands.GraphicsDefaultsResponse)
+        for layer in answer.defaults.layers:
+            if layer.layer == k.board.BLC_EDGES:
+                return layer.line_thickness.value_nm or None
+        return None
+
+    def edge_cuts_shapes(self, board: Board) -> tuple[list[BoardItem], int]:
+        """Return the shapes of the board (not of footprints) on Edge.Cuts (GetItems), and
+        the number of shapes that the tool cannot read (no layer known)."""
+        items = self.items(board, "KOT_PCB_SHAPE")
+        unreadable = sum(1 for item in items if item.problem)
+        return [item for item in items if item.layer == "Edge.Cuts"], unreadable
+
+    # New items (board_types.proto). Positions are (x, y) in nm.
+
+    def _layer(self, name: str) -> int:
+        layer = self._k.layer_from_name(name)
+        if layer == self._k.board_types.BL_UNKNOWN:
+            raise IpcError(f"{name} is not a layer name of KiCad.")
+        return layer
+
+    @staticmethod
+    def _point(target, point: tuple[int, int]) -> None:
+        target.x_nm, target.y_nm = point
+
+    def track_message(
+        self, start: tuple[int, int], end: tuple[int, int], width: int, layer: str, net: str
+    ) -> Any:
+        """A Track: start, end, width, layer and net (by name)."""
+        track = self._k.board_types.Track()
+        self._point(track.start, start)
+        self._point(track.end, end)
+        track.width.value_nm = width
+        track.layer = self._layer(layer)
+        track.net.name = net
+        return track
+
+    def via_message(
+        self, position: tuple[int, int], size: int, drill: int, stack: Any, net: str
+    ) -> Any:
+        """A through Via (VT_THROUGH) with the via stack of the netclass: "the drill
+        diameter and annular size on all layers" (NetClassBoardSettings.via_stack). size
+        and drill replace the values of the stack (measured with KiCad 10.0.6: a through
+        via with the size on all copper layers)."""
+        types = self._k.board_types
+        via = types.Via()
+        self._point(via.position, position)
+        via.pad_stack.CopyFrom(stack)
+        for copper in via.pad_stack.copper_layers:
+            copper.size.x_nm = copper.size.y_nm = size
+        # The drill of a through via: F.Cu to B.Cu, a circle, as the PCB_VIA constructor
+        # of 10.0.6 makes it. The netclass stack has only the diameter
+        # (NETCLASS::Serialize). Measured with 10.0.6: with no drill layers and no shape
+        # in the message, KiCad gives the via the drill F.Cu to B.Cu, but the drill shape
+        # DS_UNDEFINED.
+        drill_message = via.pad_stack.drill
+        drill_message.diameter.x_nm = drill_message.diameter.y_nm = drill
+        drill_message.start_layer = types.BL_F_Cu
+        drill_message.end_layer = types.BL_B_Cu
+        drill_message.shape = types.DS_CIRCLE
+        via.net.name = net
+        via.type = types.VT_THROUGH
+        return via
+
+    def zone_message(
+        self, layer: str, outline: list[tuple[int, int]], net: str, settings: ZoneSettings
+    ) -> Any:
+        """A copper Zone (ZT_COPPER) on one layer, with a solid fill (ZFM_SOLID)."""
+        types = self._k.board_types
+        zone = types.Zone()
+        zone.type = types.ZT_COPPER
+        zone.layers.append(self._layer(layer))
+        polygon = zone.outline.polygons.add().outline
+        polygon.closed = True
+        for point in outline:
+            self._point(polygon.nodes.add().point, point)
+        zone.name = settings.name
+        zone.priority = settings.priority
+        copper = zone.copper_settings
+        copper.net.name = net
+        copper.clearance.value_nm = settings.clearance
+        copper.min_thickness.value_nm = settings.min_thickness
+        copper.fill_mode = types.ZFM_SOLID
+        copper.connection.zone_connection = {
+            "thermal": types.ZCS_THERMAL,
+            "solid": types.ZCS_FULL,
+            "none": types.ZCS_NONE,
+            "thermal_pth": types.ZCS_PTH_THERMAL,
+        }[settings.connection]
+        copper.connection.thermal_spokes.gap.value_nm = settings.thermal_gap
+        copper.connection.thermal_spokes.width.value_nm = settings.thermal_spoke_width
+        copper.island_mode = {"always": types.IRM_ALWAYS, "never": types.IRM_NEVER}[
+            settings.island_removal
+        ]
+        zone.border.style = {
+            "solid": types.ZBS_SOLID,
+            "hatched_edge": types.ZBS_DIAGONAL_EDGE,
+            "hatched_full": types.ZBS_DIAGONAL_FULL,
+        }[settings.border_style]
+        zone.border.pitch.value_nm = settings.border_pitch
+        return zone
+
+    def outline_message(self, points: list[tuple[int, int]], width: int) -> Any:
+        """A BoardGraphicShape on Edge.Cuts: one closed polygon with no fill."""
+        types = self._k.board_types
+        shape = types.BoardGraphicShape()
+        shape.layer = types.BL_Edge_Cuts
+        polygon = shape.shape.polygon.polygons.add().outline
+        polygon.closed = True
+        for point in points:
+            self._point(polygon.nodes.add().point, point)
+        shape.shape.attributes.stroke.width.value_nm = width
+        shape.shape.attributes.fill.fill_type = self._k.base_types.GFT_UNFILLED
+        return shape
+
+    def commit_items(self, board: Board, items: list[Any], message: str) -> list[BoardItem]:
+        """Create items in one commit: one undo step with the message.
+
+        BeginCommit: "Begins a staged set of changes ... will not appear in KiCad until a
+        matching call to END_COMMIT" (editor_commands.proto). When a request fails, the
+        commit is dropped (CMA_DROP: "Cancel this commit"). CAUTION (measured with KiCad
+        10.0.6): a net that CreateItems makes for an unknown net name stays after
+        CMA_DROP, thus the callers check the nets first.
+
+        Raises:
+            IpcError: A commit is not possible now (check_commit), or KiCad refused an
+                item. The board then did not change.
+        """
+        k = self._k
+        commands = k.editor_commands
+        statuses = k.item_request_status
+        # The overall status: only IRS_OK passes (measured with KiCad 10.0.6: CreateItems
+        # and DeleteItems give IRS_OK; FlipItems leaves it unset, see flip_items).
+        good = (statuses.Value("IRS_OK"),)
+        self.check_commit()
+        commit = self.send(commands.BeginCommit(), commands.BeginCommitResponse)
+        try:
+            command = commands.CreateItems()
+            command.header.document.CopyFrom(board.document)
+            for item in items:
+                command.items.add().Pack(item)
+            answer = self.send(command, commands.CreateItemsResponse)
+            if answer.status not in good:
+                raise IpcError(f"KiCad refused the items ({statuses.Name(answer.status)}).")
+            created, problems = [], []
+            for result in answer.created_items:
+                if result.status.code == k.item_ok and result.item.type_url:
+                    created.append(describe_item(k, result.item))
+                else:
+                    problems.append(
+                        f"{commands.ItemStatusCode.Name(result.status.code)}"
+                        + (
+                            f": {result.status.error_message}"
+                            if result.status.error_message
+                            else ""
+                        )
+                    )
+            if problems or len(created) != len(items):
+                raise IpcError(
+                    f"KiCad created {len(created)} of {len(items)} items"
+                    + (f" ({'; '.join(problems)})" if problems else "")
+                    + "."
+                )
+        except BaseException as error:
+            end = commands.EndCommit()
+            end.id.CopyFrom(commit.id)
+            end.action = commands.CMA_DROP
+            try:
+                self.send(end, commands.EndCommitResponse)
+            except IpcError as drop_error:
+                if not isinstance(error, Exception):
+                    raise error from drop_error  # An interrupt or an exit stays what it is.
+                raise IpcError(
+                    f"{error} The tool could not drop the commit: {drop_error} Tell the user: "
+                    "look at the board in KiCad."
+                ) from None
+            if isinstance(error, IpcError):
+                raise IpcError(
+                    f'{error} The tool dropped the commit (CMA_DROP: "Cancel this commit").'
+                ) from None
+            raise
+        end = commands.EndCommit()
+        end.id.CopyFrom(commit.id)
+        end.action = commands.CMA_COMMIT
+        end.message = message
+        try:
+            self.send(end, commands.EndCommitResponse)
+        except IpcError as error:
+            raise IpcError(
+                f"{error} KiCad got the items, but the end of the commit failed: the commit "
+                "can still be open. Tell the user: look at the board and the undo history in "
+                "KiCad."
+            ) from None
+        return created
 
     def flip_items(
         self, board: Board, ids: list[str], direction: str
@@ -745,6 +1088,10 @@ class IpcSession:
         command = self._k.board_commands.RefillZones()
         command.board.CopyFrom(board.document)
         self.send(command, _empty())
+
+    def zone_names(self, board: Board) -> set[str]:
+        """Return the names of the zones of the board (GetItems)."""
+        return {item.text for item in self.items(board, "KOT_PCB_ZONE")} - {""}
 
     def copper_zones(self, board: Board) -> tuple[int, int]:
         """Return the number of the copper zones, and of the filled copper zones

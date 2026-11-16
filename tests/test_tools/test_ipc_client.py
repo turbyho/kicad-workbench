@@ -8,9 +8,9 @@ kicad-python.
 """
 
 import asyncio
-import json
 import os
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -690,6 +690,7 @@ def test_select_when_kicad_is_busy(kicad):
 
 
 def place(kicad, placements, **kwargs):
+    kwargs.setdefault("flip_direction", "top_bottom")
     return run(
         ipc.ipc_place_footprints(
             str(kicad.board_path), [ipc.FootprintPlacement(**p) for p in placements], **kwargs
@@ -706,55 +707,40 @@ def layer_of(kicad, reference):
     return None
 
 
-@pytest.fixture
-def flip_setting(monkeypatch, tmp_path):
-    """The settings folder of KiCad with pcbnew.json (editing.flip_left_right)."""
-
-    def write(value):
-        folder = tmp_path / "config" / "10.0"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "pcbnew.json").write_text(
-            json.dumps({"editing": {"flip_left_right": value}}), encoding="utf-8"
-        )
-
-    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "config"))
-    return write
-
-
-def test_place_a_footprint_on_the_other_side(kicad, flip_setting):
-    flip_setting(True)
+def test_place_a_footprint_on_the_other_side(kicad):
     text = place(kicad, [{"reference": "R1", "side": "bottom"}, {"reference": "U3", "side": "top"}])
     assert text.startswith('✅ Flipped 1 footprint in one undo step ("Flipped items via API").')
-    assert "Flip: top/bottom around the position of the footprint (editing.flip_left_right" in text
+    assert "Flip: top/bottom around the position of the footprint." in text
     assert "| R1 | F.Cu | B.Cu | 1.5, -2 |  |" in text
     assert "| U3 | F.Cu | F.Cu |" in text
     assert layer_of(kicad, "R1") == "BL_B_Cu"
     assert kicad.flip_directions == [board_commands_pb2.BFD_TOP_BOTTOM]
 
 
-def test_the_flip_direction_of_the_setting(kicad, flip_setting):
-    """KiCad stores LEFT_RIGHT (0) as false: the name of the key says the reverse."""
-    flip_setting(False)
-    place(kicad, [{"reference": "R1", "side": "bottom"}])
+def test_the_flip_direction_left_right(kicad):
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}], flip_direction="left_right")
     assert kicad.flip_directions == [board_commands_pb2.BFD_LEFT_RIGHT]
+    assert "Flip: left/right around the position of the footprint." in text
 
 
-def test_the_flip_direction_with_no_setting(kicad, monkeypatch, tmp_path):
-    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "none"))
-    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
-    assert kicad.flip_directions == [board_commands_pb2.BFD_LEFT_RIGHT]
-    assert "(the default of KiCad (" in text
+def test_the_flip_direction_is_required():
+    """User decision 2026-11-16: the tool has no default direction (the API cannot read
+    the direction of the PCB editor)."""
+    import inspect
+
+    parameter = inspect.signature(ipc.ipc_place_footprints).parameters["flip_direction"]
+    assert parameter.default is inspect.Parameter.empty
+    assert set(get_args(parameter.annotation)) == {"left_right", "top_bottom"}
 
 
-def test_the_flip_direction_of_the_argument(kicad, flip_setting):
-    flip_setting(False)
-    text = place(kicad, [{"reference": "R1", "side": "bottom"}], flip_direction="top_bottom")
-    assert kicad.flip_directions == [board_commands_pb2.BFD_TOP_BOTTOM]
-    assert "(the argument flip_direction)" in text
+def test_a_flip_direction_that_is_not_known(kicad):
+    """The API cannot read the flip direction of the PCB editor: no "setting" value."""
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}], flip_direction="setting")
+    assert text.startswith('❌ flip_direction must be "left_right" or "top_bottom"')
+    assert "FlipItems" not in kicad.requests
 
 
-def test_no_flip_when_the_side_is_the_same(kicad, flip_setting):
-    flip_setting(True)
+def test_no_flip_when_the_side_is_the_same(kicad):
     text = place(kicad, [{"reference": "R1", "side": "top"}])
     assert text.startswith("✅ No change: each footprint is on the side of the request.")
     assert "FlipItems" not in kicad.requests
@@ -798,17 +784,15 @@ def test_place_a_reference_on_two_footprints(kicad):
     assert text.startswith("❌ The tool changed nothing: R1: 2 footprints have this reference")
 
 
-def test_place_with_the_schematic_editor_open(kicad, flip_setting):
+def test_place_with_the_schematic_editor_open(kicad):
     """FlipItems has no handler in API_HANDLER_SCH of KiCad 10.0.6: it needs no guard
     (measured with the schematic editor open, ipc_write_check.py)."""
-    flip_setting(True)
     kicad.schematic_open = True
     text = place(kicad, [{"reference": "R1", "side": "bottom"}])
     assert text.startswith("✅ Flipped 1 footprint")
 
 
-def test_a_flip_that_kicad_refuses(kicad, flip_setting, monkeypatch):
-    flip_setting(True)
+def test_a_flip_that_kicad_refuses(kicad, monkeypatch):
     real = kicad.answer
 
     def answer(command, response_type):
@@ -967,10 +951,9 @@ def locked_footprint(item_id, reference):
     return packed(message)
 
 
-def test_a_locked_footprint(kicad, flip_setting):
+def test_a_locked_footprint(kicad):
     """The Flip of the PCB editor leaves out a locked footprint, except with "Override
     locks" (FilterCollectorForLockedItems of KiCad 10.0.6)."""
-    flip_setting(True)
     kicad.footprints[0] = locked_footprint("fp-r1", "R1")
     text = place(kicad, [{"reference": "R1", "side": "bottom"}])
     assert text.startswith("❌ The tool changed nothing: R1: the footprint is locked")
@@ -987,27 +970,7 @@ def test_a_locked_footprint_on_its_side(kicad):
     assert text.startswith("✅ No change")
 
 
-def test_no_setting_read_with_no_flip(kicad, monkeypatch):
-    def fail(version):
-        raise AssertionError("no read of pcbnew.json")
-
-    monkeypatch.setattr(ipc, "flip_direction_setting", fail)
-    assert place(kicad, [{"reference": "R1", "side": "top"}]).startswith("✅ No change")
-
-
-def test_a_setting_file_that_is_not_json(kicad, monkeypatch, tmp_path):
-    """JSON_SETTINGS::LoadFromFile keeps the defaults for a file that it cannot parse."""
-    folder = tmp_path / "config" / "10.0"
-    folder.mkdir(parents=True)
-    (folder / "pcbnew.json").write_text("{not json", encoding="utf-8")
-    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "config"))
-    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
-    assert kicad.flip_directions == [board_commands_pb2.BFD_LEFT_RIGHT]
-    assert "the default of KiCad, which cannot read" in text
-
-
-def test_a_partial_flip(kicad, flip_setting):
-    flip_setting(True)
+def test_a_partial_flip(kicad):
     real = kicad.answer
 
     def answer(command, response_type):
@@ -1028,10 +991,9 @@ def test_a_partial_flip(kicad, flip_setting):
     assert "| U3 | F.Cu | F.Cu | 2.25, -2 | not flipped |" in text
 
 
-def test_flip_results_in_an_other_order(kicad, flip_setting):
+def test_flip_results_in_an_other_order(kicad):
     """board_commands.proto gives no order of the results: the item of each result
     gives the ID."""
-    flip_setting(True)
     real = kicad.answer
 
     def answer(command, response_type):
@@ -1050,9 +1012,8 @@ def test_flip_results_in_an_other_order(kicad, flip_setting):
     assert "| U3 | F.Cu | B.Cu | 2.25, -2 |  |" in text
 
 
-def test_a_flip_with_an_error_status(kicad, flip_setting):
+def test_a_flip_with_an_error_status(kicad):
     """A documented error of the overall status (ItemRequestStatus) stops the tool."""
-    flip_setting(True)
     real = kicad.answer
 
     def answer(command, response_type):
@@ -1091,9 +1052,8 @@ def test_save_with_an_unreadable_version(kicad, monkeypatch):
     assert "None" not in text
 
 
-def test_a_footprint_with_no_lock_state(kicad, flip_setting):
+def test_a_footprint_with_no_lock_state(kicad):
     """LS_UNKNOWN: the tool cannot know if the PCB editor flips it."""
-    flip_setting(True)
     message = board_types_pb2.FootprintInstance()
     footprint("fp-r1", "R1").Unpack(message)
     message.locked = 0  # LS_UNKNOWN
@@ -1123,10 +1083,9 @@ def test_a_reference_with_an_unreadable_footprint(kicad, monkeypatch):
     )
 
 
-def test_a_flip_result_that_the_tool_cannot_read(kicad, flip_setting, monkeypatch):
+def test_a_flip_result_that_the_tool_cannot_read(kicad, monkeypatch):
     """An ISC_OK result with an item that the tool cannot read: the board changed, but
     the tool cannot tell which footprint."""
-    flip_setting(True)
     real = kicad.answer
 
     def answer(command, response_type):

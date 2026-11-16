@@ -173,11 +173,11 @@ LIMITS = {
         ),
         Limit(
             "flip_direction_setting",
-            "The API cannot read the flip direction of the PCB editor: the tools read "
-            "editing.flip_left_right of pcbnew.json, as the editor reads it at its start.",
+            "The API cannot read the flip direction of the PCB editor: the tools need the "
+            "direction as an argument.",
             "No version (master 2026-11-15)",
-            "FlipItems takes the direction of the request; BFD_UNKNOWN is TOP_BOTTOM "
-            "(FromProtoEnum<FLIP_DIRECTION>, 10.0.6)",
+            "board_commands.proto of 10.0.6 and master: FlipItems takes the direction of the "
+            "request; no request reads the settings of the editor",
         ),
         Limit(
             "refill_progress",
@@ -328,43 +328,6 @@ def _import_kipy() -> _Kipy:
         locked_state=base_types_pb2.LS_LOCKED,
         unlocked_state=base_types_pb2.LS_UNLOCKED,
     )
-
-
-def flip_direction_setting(version: str) -> tuple[str, str]:
-    """Return the flip direction of the PCB editor, and where it comes from.
-
-    The setting is editing.flip_left_right of pcbnew.json in the settings folder of the
-    KiCad version (PCBNEW_SETTINGS of KiCad 10.0.6). KiCad stores the enum
-    FLIP_DIRECTION as a bool: false is LEFT_RIGHT (0), true is TOP_BOTTOM (1), although
-    the name says "left right". The default is false. A value that is not a bool gives
-    the default (PARAM<bool>::Load). The panel "Editing Options" of the PCB editor shows
-    the setting as "Left/right" or "Top/bottom".
-
-    Returns:
-        "left_right" or "top_bottom", and the source as a text.
-
-    Raises:
-        OSError, InputError: pcbnew.json cannot be read, or it is not JSON.
-    """
-    from ..errors import InputError
-    from .kicad_text import read_kicad_json
-    from .library_tables import kicad_settings_dir
-
-    path = kicad_settings_dir(version) / "pcbnew.json"
-    if not path.is_file():
-        return "left_right", f"the default of KiCad ({path} is not there)"
-    try:
-        data = read_kicad_json(path)
-    except (OSError, InputError) as error:
-        # JSON_SETTINGS::LoadFromFile of KiCad 10.0.6 keeps the defaults for a file that it
-        # cannot open or parse (nlohmann::json::parse_error).
-        return "left_right", f"the default of KiCad, which cannot read {path} ({error})"
-    editing = data.get("editing") if isinstance(data, dict) else None
-    value = editing.get("flip_left_right") if isinstance(editing, dict) else None
-    if not isinstance(value, bool):
-        return "left_right", f"the default of KiCad ({path} has no bool editing.flip_left_right)"
-    direction = "top_bottom" if value else "left_right"
-    return direction, f"editing.flip_left_right = {str(value).lower()} of {path}"
 
 
 def socket_path() -> tuple[str, str]:

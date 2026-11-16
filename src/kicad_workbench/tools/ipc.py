@@ -9,7 +9,7 @@ import os
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +24,6 @@ from ..utils.ipc_client import (
     TIMEOUT_MS,
     BoardItem,
     IpcError,
-    flip_direction_setting,
     kicad_python_version,
     known_versions,
     open_session,
@@ -402,18 +401,21 @@ def _update_refusal(rules, version: str, updates: list[str], asked: set[str]) ->
     )
 
 
+# The flip directions of FlipItems (BFD_LEFT_RIGHT, BFD_TOP_BOTTOM).
+FlipDirection = Literal["left_right", "top_bottom"]
+
+
 def _place_footprints(
     board_path: str,
     placements: list[FootprintPlacement],
-    flip_direction: str,
+    flip_direction: FlipDirection,
     override_locks: bool,
 ) -> str:
     if not placements:
         raise InputError("placements is empty.")
-    if flip_direction not in ("setting", "left_right", "top_bottom"):
+    if flip_direction not in get_args(FlipDirection):
         raise InputError(
-            'flip_direction must be "setting", "left_right" or "top_bottom", '
-            f"not {flip_direction!r}."
+            f'flip_direction must be "left_right" or "top_bottom", not {flip_direction!r}.'
         )
     counts = Counter(placement.reference for placement in placements)
     twice = sorted(reference for reference, count in counts.items() if count > 1)
@@ -489,16 +491,11 @@ def _place_footprints(
             rows.append((placement, footprint))
         if problems:
             raise InputError("The tool changed nothing: " + "; ".join(problems) + ".")
-        source = direction = ""
         flipped: dict[str, BoardItem] = {}
         messages: list[str] = []
         unknown = 0
         if flips:
-            if flip_direction == "setting":
-                direction, source = flip_direction_setting(session.state.version)
-            else:
-                direction, source = flip_direction, "the argument flip_direction"
-            flipped, messages, unknown = session.flip_items(board, flips, direction)
+            flipped, messages, unknown = session.flip_items(board, flips, flip_direction)
     failed = [item_id for item_id in flips if item_id not in flipped]
     lines = []
     if unknown:
@@ -532,7 +529,7 @@ def _place_footprints(
     if flips:
         lines += [
             "",
-            f"Flip: {direction.replace('_', '/')} around the position of the footprint ({source}).",
+            f"Flip: {flip_direction.replace('_', '/')} around the position of the footprint.",
         ]
     lines += [
         "",
@@ -559,7 +556,7 @@ def _place_footprints(
 async def ipc_place_footprints(
     board_path: str,
     placements: list[FootprintPlacement],
-    flip_direction: str = "setting",
+    flip_direction: FlipDirection,
     override_locks: bool = False,
 ) -> str:
     """Place footprints on the board in the PCB editor of the running KiCad.
@@ -573,15 +570,17 @@ async def ipc_place_footprints(
         board_path: The path of the .kicad_pcb file that is open in the PCB editor.
         placements: For each footprint: the reference, and the side ("top" or
             "bottom"). x_mm, y_mm, rotation_deg and locked give an error.
-        flip_direction: The flip of a footprint to the other side: "setting" (the flip
-            direction of the PCB editor, from pcbnew.json), "left_right" or
-            "top_bottom". KiCad flips around the position of the footprint.
+        flip_direction: The flip of a footprint to the other side: "left_right" (around
+            the Y axis) or "top_bottom" (around the X axis). KiCad flips around the
+            position of the footprint. The API cannot read the flip direction of the PCB
+            editor (Editing Options): when the user did not give the direction, ask the
+            user.
         override_locks: Flip also a locked footprint, as the PCB editor does with
             "Override locks". With false, a locked footprint that must change its side
             gives an error.
 
     Returns:
-        Markdown: the result, the flip direction and its source, and a table with the
+        Markdown: the result, the flip direction, and a table with the
         side before and after and the position of each footprint.
     """
     try:

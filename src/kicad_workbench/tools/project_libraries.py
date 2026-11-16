@@ -465,8 +465,8 @@ async def add_library_to_table(
     refuses other formats. A nickname that the project table has is an error. A
     nickname of the global table gives a warning: the project row hides the global
     library. A library of an older file version gives a warning with the step for its
-    upgrade; a library of a newer file version is an error. KiCad must not have the project open. The installed KiCad must be KiCad
-    10.0.
+    upgrade; a library of a newer file version is an error. KiCad must not have the
+    project open. The installed KiCad must be KiCad 10.0.
 
     Args:
         project_path: The .kicad_pro file or the project folder.

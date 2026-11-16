@@ -1,6 +1,6 @@
 # Tools
 
-The server has 67 tools. Each tool returns Markdown text (the image tools also return
+The server has 68 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -150,6 +150,7 @@ to `<table>.bak` first, as KiCad does.
 | `set_library_table_row(project_path, kind, nickname, enabled?, visible?)` | Enables or disables a row, and shows or hides a symbol library |
 | `copy_symbol_to_library(project_path, lib_id, target_library, new_name?, flatten?, overwrite?)` | Copies a symbol into a library of the project table, as "Save As" of the symbol editor: a derived symbol goes with its parents (or `flatten=True`), the Value follows a new name when it was equal to the old name. A name that the target has needs `overwrite=True`. KiCad saves the library (kicad-cli), and a second save must give the same bytes |
 | `copy_footprint_to_library(project_path, lib_id, target_library, new_name?, overwrite?)` | Copies a footprint into a library of the project table, as "Save As" of the footprint editor. A footprint that is not on F.Cu is refused |
+| `set_library_symbol_properties(project_path, lib_id, fields?, keywords?, footprint_filters?)` | Changes the fields, the keywords and the footprint filters of a symbol of a project library, as the Symbol Properties dialog: a new field is hidden at (0, 0) with the text size of the symbol editor settings, the mandatory fields cannot be removed, a path to a file that exists gets "file://" (as the dialog). KiCad saves the library (kicad-cli) |
 | `upgrade_project_libraries(project_path, libraries?, include_outside?)` | Converts the libraries of an older file version of the project tables with `kicad-cli sym upgrade` and `kicad-cli fp upgrade`. KiCad saves the result again: the bytes must not change and the names must stay, else the tool writes nothing for that library. No backup: the output names a library that git cannot give back. A library outside the project folder only when `libraries` names it or with `include_outside=True` |
 
 ## Bill of materials

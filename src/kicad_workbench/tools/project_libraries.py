@@ -41,6 +41,7 @@ from ..utils.library_copy import (
     symbols_in_version,
 )
 from ..utils.library_lookup import find_kicad_library, find_library_symbol
+from ..utils.library_symbol_fields import change_fields, symbol_editor_text_size
 from ..utils.library_tables import (
     LibraryRow,
     LibraryTableError,
@@ -841,6 +842,20 @@ def _project_library(context: _Context, kind: str, nickname: str) -> tuple[Path,
     return path, warnings
 
 
+def _read_symbol_library(path: Path) -> tuple[bytes, FileStamp, dict]:
+    """The bytes, the stamp and the symbols of a library file, from one state of the
+    file (the stamp is checked after the parse).
+
+    Raises:
+        InputError: The file changed during the read.
+    """
+    data, stamp = read_stamped(path)
+    symbols = read_library(path)
+    if file_stamp(path) != stamp:
+        raise InputError(f"The file {path} changed while the tool read it. Do it again.")
+    return data, stamp, symbols
+
+
 def _split_id(lib_id: str, kind: str) -> tuple[str, str]:
     library, _sep, name = lib_id.partition(":")
     if not library or not name:
@@ -874,10 +889,7 @@ def _copy_symbol(
     if not leaf_name:
         raise InputError("Symbol must have a name.")
     same = library == target_library
-    target_data, stamp = read_stamped(target)
-    target_symbols = read_library(target)
-    if file_stamp(target) != stamp:
-        raise InputError(f"The file {target} changed while the tool read it. Do it again.")
+    target_data, stamp, target_symbols = _read_symbol_library(target)
     with tempfile.TemporaryDirectory(prefix="kicad-workbench-copy-") as work:
         if any(symbol.version != written for symbol in chain):
             if row.path is None or not row.path.is_file():
@@ -1041,6 +1053,114 @@ async def copy_footprint_to_library(
     try:
         return await _run(
             project_path, None, _copy_footprint, lib_id, target_library, new_name, overwrite
+        )
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+# The properties of a symbol of a project library (phase 4, step 5).
+
+
+def _symbol_properties(
+    context: _Context,
+    _kind,
+    lib_id: str,
+    fields: dict[str, str | None] | None,
+    keywords: str | None,
+    footprint_filters: list[str] | None,
+) -> str:
+    if not fields and keywords is None and footprint_filters is None:
+        raise InputError("Give fields, keywords or footprint_filters.")
+    library, name = _split_id(lib_id, "symbol")
+    path, warnings = _project_library(context, "symbol", library)
+    data, stamp, symbols = _read_symbol_library(path)
+    if name not in symbols:
+        raise InputError(f"The library '{library}' ({path}) has no symbol '{name}'.")
+    chain = symbol_chain(symbols, name)
+    env = kicad_environment(context.kicad)
+    size, size_warning = symbol_editor_text_size(env.config_dir)
+    result = change_fields(
+        chain,
+        fields or {},
+        keywords,
+        footprint_filters,
+        env,
+        project_variables(context.project),
+        context.project.parent,
+        size,
+    )
+    node = chain[0].node
+    if not result.lines:
+        return (
+            f"✅ The symbol '{name}' of the library '{library}' has these properties already: "
+            "the tool wrote no file."
+        )
+    if size_warning and any(line.startswith("- New field") for line in result.lines):
+        warnings.append(size_warning)
+    text = decode_as_kicad(data, path)
+    # The positions of the node are positions in the text that read_library parsed.
+    if node.source != text:
+        raise InputError(f"The text of {path} is not the text that the tool read. Do it again.")
+    text = text[: node.start] + result.text + text[node.end :]
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-fields-") as work:
+        new_data = kicad_save_symbols(text, path, Path(work), set(symbols))
+    warnings += _save_guarded(context, [(path, new_data)], {path: stamp})
+    lines = [
+        f"✅ The symbol '{name}' of the library '{library}' has the changes.",
+        "",
+        *result.lines,
+        f"- Library: {path}",
+        "- KiCad saved the library (kicad-cli), and a second save gave the same bytes.",
+    ]
+    if len(chain) > 1:
+        lines.append(
+            "- A derived symbol: KiCad 10.0 saves the keywords and the footprint filters of "
+            "its parent when it has none of its own (LIB_SYMBOL::GetKeyWords)."
+        )
+    return "\n".join(lines + [f"\n⚠️ {warning}" for warning in warnings])
+
+
+@mcp.tool()
+async def set_library_symbol_properties(
+    project_path: str,
+    lib_id: str,
+    fields: dict[str, str | None] | None = None,
+    keywords: str | None = None,
+    footprint_filters: list[str] | None = None,
+) -> str:
+    """Change the properties of a symbol of a project library, as the Symbol Properties
+    dialog of the symbol editor of KiCad 10 does.
+
+    A field name that the symbol has gets the new text (a mandatory name in any case).
+    A new name gives a new hidden field at (0, 0), with the text size of the symbol
+    editor settings. A text of None removes a user field (the five mandatory fields
+    cannot be removed). As in the dialog, a text that is a path to a file that exists
+    ("/", "${", "./", "../") gets "file://" before it, the escapes ("{slash}") become
+    characters, and the text of a mandatory field has no white space at its ends. The
+    footprint filters replace the list (spaces become "_"). KiCad saves the library
+    (kicad-cli), and a second save must give the same bytes. The library must be in the
+    project table, in the version of the installed KiCad. KiCad must not have the
+    project open. The installed KiCad must be KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        lib_id: The symbol, "<library>:<symbol>", of a library of the project table.
+        fields: The field texts by name. None as a text removes the user field.
+        keywords: The new keywords. None: no change. "" removes them.
+        footprint_filters: The new list of footprint filters. None: no change.
+
+    Returns:
+        The changes, or an error.
+    """
+    try:
+        return await _run(
+            project_path,
+            None,
+            _symbol_properties,
+            lib_id,
+            fields,
+            keywords,
+            footprint_filters,
         )
     except Exception as e:
         return error_answer(e, "Error")

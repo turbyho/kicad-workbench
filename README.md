@@ -69,7 +69,9 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   project libraries, and the add, the remove and the flags of the rows of the project
   tables, as KiCad 10 does them (KiCad 10.0). The upgrade of the older project
   libraries through kicad-cli, with a check of the result. The copy of a symbol (with
-  its parents) or a footprint into a project library, as "Save As" of KiCad.
+  its parents) or a footprint into a project library, as "Save As" of KiCad. The fields,
+  keywords and footprint filters of a symbol of a project library, as the Symbol
+  Properties dialog.
 - **BOM.** The BOM of kicad-cli with the fields, the groups, the DNP filter and the
   variants of KiCad 10.
 - **Edits.** New projects, symbols from the libraries, wires, labels and junctions as

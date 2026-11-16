@@ -509,6 +509,8 @@ def test_ipc_status(kicad, tmp_path):
     assert "## Limits of KiCad 10.0.6" in text
     assert "| KiCad 11.0 (PlaceFootprintFromLibrary, not released) |" in text
     assert "The API gives no data for tables, table cells and reference points." in text
+    # RunAction is not an API for clients (editor_commands.proto): no limit names it.
+    assert "RunAction" not in text
 
 
 def test_ipc_status_writes_possible(kicad):
@@ -522,7 +524,9 @@ def test_ipc_status_with_no_pcb_editor(kicad):
     kicad.board_path = None
     text = run(ipc.ipc_status())
     assert "- PCB editor: not open" in text
-    assert "- Writes: ❌ not possible now. no board is open in the PCB editor" in text
+    assert "- Writes: ❌ not possible now. No board is open in the PCB editor." in text
+    assert "| No version (master 2026-11-15) |" in text
+    assert "KiCad no version" not in text
 
 
 def test_ipc_status_with_an_other_board(kicad, tmp_path):
@@ -946,7 +950,13 @@ def test_a_position_with_no_limit_of_data_loss(kicad, monkeypatch):
     text = place(kicad, [{"reference": "U3", "rotation_deg": 90}])
     assert text.startswith(
         "❌ The tool cannot change the position, the rotation or the lock of a footprint: "
-        "the tool has no rules for them yet: The API has no command"
+        "The API has no command that moves or rotates a footprint."
+    )
+    assert "lock" not in text.split("footprint: ", 1)[1].split(" Asked:")[0]
+    text = place(kicad, [{"reference": "U3", "locked": True}])
+    assert text.startswith(
+        "❌ The tool cannot change the position, the rotation or the lock of a footprint: "
+        "The tool cannot change the lock of a footprint with KiCad 10.0.6. Asked: U3: locked."
     )
 
 

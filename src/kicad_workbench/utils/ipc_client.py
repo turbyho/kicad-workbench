@@ -74,7 +74,10 @@ class IpcError(WorkbenchError):
 
 @dataclass(frozen=True)
 class Limit:
-    """A limit of the IPC API of a KiCad version, and the first version that solves it."""
+    """A limit of the IPC API of a KiCad version, and the first version that solves it.
+
+    solved_in is the text for the user: "KiCad <version> ..." or "No version (...)".
+    """
 
     key: str
     text: str
@@ -93,47 +96,47 @@ LIMITS = {
             "A commit (BeginCommit) while the schematic editor is open stops KiCad (KiCad "
             "bug #24966). The tools refuse a commit while the schematic editor is open. A "
             "request with no commit (FlipItems, SaveDocument, RefillZones) operates.",
-            "10.0.7",
+            "KiCad 10.0.7",
             "API_HANDLER_SCH: the member m_frame of API_HANDLER_EDITOR stays null, and "
             "handleBeginCommit calls checkForBusy first (10.0.6); fix 6545d4a28d",
         ),
         Limit(
             "footprint_from_library",
             "No command loads a footprint from a library.",
-            "11.0 (PlaceFootprintFromLibrary, not released)",
+            "KiCad 11.0 (PlaceFootprintFromLibrary, not released)",
             "ParseAndCreateItemsFromString gives an empty answer (10.0.6, 10.0.8)",
         ),
         Limit(
             "update_from_schematic",
-            "Update PCB from Schematic opens a modal dialog that blocks the API. "
-            "The tools do not start it.",
-            "11.0 (ImportNetlist, not released)",
-            "plans/ipc-spike.md, question 4",
+            "The API has no command that updates the board from the schematic (Update PCB "
+            "from Schematic). The user starts it in the PCB editor (F8).",
+            "KiCad 11.0 (ImportNetlist, not released)",
+            "board_commands.proto of 10.0.6: no such command; master: ImportNetlist",
         ),
         Limit(
             "modified_state",
             "No command tells if the board in the editor has changes that are not saved. "
             "The file tools read the file on disk.",
-            "11.0 (GetDocumentModifiedState, not released)",
+            "KiCad 11.0 (GetDocumentModifiedState, not released)",
             "editor_commands.proto of 10.0.6 and master",
         ),
         Limit(
             "gui_only",
             "The IPC API needs the GUI of KiCad.",
-            "11.0 (kicad-cli api-server, not released)",
+            "KiCad 11.0 (kicad-cli api-server, not released)",
             "plans/ipc-spike.md, group G",
         ),
         Limit(
             "no_data_tables_points",
             "The API gives no data for tables, table cells and reference points.",
-            "10.0.7 (kicad-python 0.8.0 does not know these types)",
+            "KiCad 10.0.7 (kicad-python 0.8.0 does not know these types)",
             "PCB_TABLE, PCB_TABLECELL and PCB_POINT have no Serialize in 10.0.6; "
             "commits 15eda6b8ec and d41d1e81f9 of 10.0.7",
         ),
         Limit(
             "no_data_markers_patterns_targets",
             "The API gives no data for DRC markers, tuning patterns and targets.",
-            "11.0 for DRC markers and tuning patterns (not released); no version for "
+            "KiCad 11.0 for DRC markers and tuning patterns (not released); no version for "
             "targets (master 2026-11-15)",
             "PCB_MARKER, PCB_TUNING_PATTERN and PCB_TARGET have no Serialize in 10.0.6 to "
             "10.0.8; master serializes PCB_MARKER and PCB_TUNING_PATTERN",
@@ -142,7 +145,7 @@ LIMITS = {
             "selection_filter",
             "The API cannot read or use the selection filter of the PCB editor: the tools "
             "select the items with no filter.",
-            "no version (master 2026-11-15)",
+            "No version (master 2026-11-15)",
             "SELECTION_TOOL::AddItemsToSel selects with no itemPassesFilter (10.0.6); no "
             "selection filter in the .proto files of master",
         ),
@@ -152,7 +155,7 @@ LIMITS = {
             "data, and KiCad 10.0.6 loses the units of the footprint, the teardrop settings "
             "of its pads and the default line style of its shapes. The tools do not move, "
             "rotate or lock a footprint.",
-            "10.0.8 (measured in Docker: the round trip keeps all data, also through the "
+            "KiCad 10.0.8 (measured in Docker: the round trip keeps all data, also through the "
             "classes of kicad-python 0.8.0)",
             "handleCreateUpdateItemsInternal removes the footprint and adds a new one "
             "(10.0.6); spike/ipc/probe_update_roundtrip.py: all 56 footprints lose "
@@ -162,9 +165,9 @@ LIMITS = {
             "footprint_move_children",
             "The API has no command that moves or rotates a footprint. The API gives the "
             "items of a footprint with absolute positions: a change of the position of the "
-            "footprint alone moves only its anchor. A client must move and rotate each item "
-            "of the footprint as KiCad does (FOOTPRINT::Move, FOOTPRINT::Rotate).",
-            "no version (master 2026-11-15: only InteractiveMoveItems)",
+            "footprint alone moves only its anchor. The tools do not move or rotate a "
+            "footprint.",
+            "No version (master 2026-11-15: only InteractiveMoveItems)",
             "spike/ipc/probe_update_raw.py with KiCad 10.0.8: a footprint moved 1 mm by its "
             "position; its pads, shapes and fields stayed at their place",
         ),
@@ -172,28 +175,19 @@ LIMITS = {
             "flip_direction_setting",
             "The API cannot read the flip direction of the PCB editor: the tools read "
             "editing.flip_left_right of pcbnew.json, as the editor reads it at its start.",
-            "no version (master 2026-11-15)",
+            "No version (master 2026-11-15)",
             "FlipItems takes the direction of the request; BFD_UNKNOWN is TOP_BOTTOM "
             "(FromProtoEnum<FLIP_DIRECTION>, 10.0.6)",
         ),
         Limit(
             "refill_progress",
-            "RefillZones gives no result: the tools wait for the next answer of KiCad, and "
-            "cannot see if the user cancelled the fill. Only a refill of all zones is "
-            "possible.",
-            "11.0 (StartRefillZonesTask, not released)",
-            "handleRefillZones runs zoneFillAll later (CallAfter) and gives AS_UNIMPLEMENTED "
-            "for a list of zones (10.0.6)",
-        ),
-        Limit(
-            "run_action_parameter",
-            "RunAction gives each action the parameter true (a bool). An action that reads "
-            'a parameter of an other type (for example the net code of "Select All Tracks '
-            'in Net") fails an assert of KiCad. The tools run no such action.',
-            "no version (master 2026-11-15)",
-            "handleRunAction calls TOOL_MANAGER::RunAction( aCtx.Request.action(), true ): "
-            "the template RunAction( const std::string&, T aParam ) stores true as the "
-            "parameter (10.0.6 to master); TOOL_EVENT::Parameter asserts on bad_any_cast",
+            "RefillZones gives no result: KiCad answers AS_BUSY until the fill has completed "
+            "(board_commands.proto), or the next request waits for the end of the fill "
+            "(measured with KiCad 10.0.6 and 10.0.8). The tools cannot see if the user "
+            "cancelled the fill. The tools refill all zones.",
+            "KiCad 11.0 (StartRefillZonesTask of board_tasks.proto, not released)",
+            "board_commands.proto of 10.0.6 and master; measured with 10.0.6: a list of "
+            "zones gives AS_UNIMPLEMENTED (handleRefillZones)",
         ),
     )
 }
@@ -233,7 +227,6 @@ IPC_RULES = {
                 "no_data_tables_points",
                 "no_data_markers_patterns_targets",
                 "selection_filter",
-                "run_action_parameter",
                 "footprint_update_loses_data",
                 "footprint_move_children",
                 "flip_direction_setting",
@@ -504,7 +497,7 @@ class KicadState:
             solved_in = LIMITS["schematic_editor_commit"].solved_in
             return (
                 f"KiCad {self.version} stops on a commit while the schematic editor is open "
-                f"(KiCad bug #24966, fixed in KiCad {solved_in}). Tell the user: close the "
+                f"(KiCad bug #24966, fixed in {solved_in}). Tell the user: close the "
                 "schematic editor, then try again."
             )
         return None

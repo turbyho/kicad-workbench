@@ -38,7 +38,7 @@ def _limits_table(rules) -> list[str]:
     lines = ["| Limit | Solved in |", "|---|---|"]
     for key in rules.limits:
         limit = LIMITS[key]
-        lines.append(f"| {limit.text} | KiCad {limit.solved_in} |")
+        lines.append(f"| {limit.text} | {limit.solved_in} |")
     return lines
 
 
@@ -69,7 +69,7 @@ def _status(board_path: str) -> str:
                 lines.append(f"- {label}: ❌ {error}")
                 blocker = str(error)
         else:
-            blocker = "no board is open in the PCB editor"
+            blocker = "No board is open in the PCB editor."
         if blocker:
             lines.append(f"- Writes: ❌ not possible now. {blocker}")
         else:
@@ -381,20 +381,24 @@ class FootprintPlacement(BaseModel):
     locked: bool | None = Field(default=None, description="Lock or unlock the footprint.")
 
 
-def _update_refusal(rules, version: str, updates: list[str]) -> str:
-    """The error for the fields of _UPDATE_FIELDS: a limit of the KiCad version, or no
-    rules of the tool yet."""
+def _update_refusal(rules, version: str, updates: list[str], asked: set[str]) -> str:
+    """The error for the fields of _UPDATE_FIELDS (asked: the names of the fields in the
+    request): a limit of the KiCad version for each field that the request has."""
     if rules.has_limit("footprint_update_loses_data"):
-        reason = (
+        reasons = [
             f"KiCad {version} cannot change them with no loss of data: "
             f"{LIMITS['footprint_update_loses_data'].text}"
-        )
+        ]
     else:
-        reason = f"the tool has no rules for them yet: {LIMITS['footprint_move_children'].text}"
+        reasons = []
+        if asked & {"x_mm", "y_mm", "rotation_deg"}:
+            reasons.append(LIMITS["footprint_move_children"].text)
+        if "locked" in asked:
+            reasons.append(f"The tool cannot change the lock of a footprint with KiCad {version}.")
     return (
-        f"The tool cannot change the position, the rotation or the lock of a footprint: "
-        f"{reason} Asked: {'; '.join(updates)}. The tool changed nothing. Only side is "
-        "possible."
+        "The tool cannot change the position, the rotation or the lock of a footprint: "
+        f"{' '.join(reasons)} Asked: {'; '.join(updates)}. The tool changed nothing. Only "
+        "side is possible."
     )
 
 
@@ -424,7 +428,15 @@ def _place_footprints(
     with open_session() as session:
         board = session.board(board_path)
         if updates:
-            raise IpcError(_update_refusal(session.state.rules, session.state.version, updates))
+            asked = {
+                name
+                for placement in placements
+                for name in _UPDATE_FIELDS
+                if getattr(placement, name) is not None
+            }
+            raise IpcError(
+                _update_refusal(session.state.rules, session.state.version, updates, asked)
+            )
         by_reference: dict[str, list[BoardItem]] = {}
         unreadable = 0
         for footprint in session.footprints(board):

@@ -71,9 +71,12 @@ The tools must give the result that KiCad gives. A small difference is also a de
    gives a warning with the step for the user, and a tool that writes refuses an older
    schematic or board. A file of an unknown version, or of a newer version than the
    installed KiCad, gives an error.
-   The minimum is KiCad 8.
-4. Compare a new rule with real KiCad 8, 9 and 10. Unit tests alone do not show that a
-   rule is correct.
+   The minimum is KiCad 8. A new tool or a new rule has the rules of KiCad 10 and
+   later only, and gives an error for an installed KiCad 8 or 9. The existing rules
+   of KiCad 8 and 9 stay. For the future, we prefer KiCad 11 and its documented
+   interfaces.
+4. Compare a new rule with real KiCad 10 (the rules of KiCad 8 and 9 with KiCad 8.0.9
+   and 9.0.9). Unit tests alone do not show that a rule is correct.
 
 ### Clean room
 

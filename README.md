@@ -4,7 +4,7 @@
 KiCad Workbench is an MCP server that lets an AI agent work with KiCad projects. The
 agent reads schematics, boards and libraries, runs the checks of KiCad, makes the
 bill of materials (BOM), and writes changes to the schematic. It supports KiCad 8, 9
-and 10.
+and 10. We recommend KiCad 10 or later: new features are for KiCad 10 and later only.
 
 The server gives the results that KiCad gives. Where KiCad has an interface, the
 server uses KiCad itself. kicad-cli makes the netlist, the BOM, the ERC and DRC
@@ -93,7 +93,9 @@ All tools are in [docs/tools.md](https://github.com/turbyho/kicad-workbench/blob
 
 ## Requirements
 
-- KiCad 8, 9 or 10, with kicad-cli.
+- KiCad 8, 9 or 10, with kicad-cli. We recommend KiCad 10 or later. New features are
+  for KiCad 10 and later only: with KiCad 8 or 9, such a tool gives an error. The live
+  board tools (`ipc_*`) need a running KiCad 10.
 - Python 3.10 or later.
 - For exact board data: a Python that can import the module `pcbnew` of KiCad.
   Without it, the board tools (footprints, statistics, tracks, nets, zones) read the

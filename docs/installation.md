@@ -2,13 +2,15 @@
 
 ## Requirements
 
-- KiCad 8, 9 or 10, with kicad-cli. The server finds kicad-cli in this order: the
-  path in the environment variable `KICAD_CLI`, then `PATH`, then the standard install
-  folder of KiCad (see "kicad-cli not found"). A `KICAD_CLI` with a path that is not a
-  file is an error: the server does not use a different kicad-cli then. With no
-  kicad-cli, each tool that works with KiCad files gives an error that tells the user
-  to install KiCad 8 or later, also when the server process can import `pcbnew`. When
-  kicad-cli is there but does not give its version, the error gives the reason. A
+- KiCad 8, 9 or 10, with kicad-cli. We recommend KiCad 10 or later. New features are
+  for KiCad 10 and later only: with KiCad 8 or 9, such a tool gives an error. The
+  server finds kicad-cli in this order: the path in the environment variable
+  `KICAD_CLI`, then `PATH`, then the standard install folder of KiCad (see "kicad-cli
+  not found"). A `KICAD_CLI` with a path that is not a file is an error: the server
+  does not use a different kicad-cli then. With no kicad-cli, each tool that works
+  with KiCad files gives an error that tells the user to install KiCad 8 or later,
+  also when the server process can import `pcbnew`. When kicad-cli is there but does
+  not give its version, the error gives the reason. A
   KiCad before KiCad 8, a KiCad version that the server has no rules for (for example
   a later major version, or a nightly build other than 10.99), and a release
   candidate (for example 10.0.1-rc1) give an error. The server compared its rules

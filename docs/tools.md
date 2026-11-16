@@ -1,6 +1,6 @@
 # Tools
 
-The server has 60 tools. Each tool returns Markdown text (the image tools also return
+The server has 64 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -129,6 +129,25 @@ index in the cache folder of the user is used until a library file changes.
 | `get_library_symbol(lib_id, project_path?)` | The fields, units, body styles, footprint filters and pins (with alternate functions) of a symbol, as KiCad places it. A derived symbol gets the content of its parents |
 | `get_library_footprint(lib_id, project_path?)` | The type, attributes, size, courtyard, fields, pads (with padstacks) and 3D models of a footprint, read by `pcbnew` |
 | `render_library_item(lib_id, item_type, max_width_px, max_height_px, layout?, region?, pages?, project_path?, output_dir?, include_hidden?, max_images?)` | PNG images of a symbol (each unit and body style) or a footprint, drawn by kicad-cli. The agent gives the largest image that its vision input reads. Tiles keep the smallest text legible (at least 15 px, at least 300 DPI) |
+
+### Project library tables
+
+These tools change the project tables (`sym-lib-table`, `fp-lib-table` next to the
+`.kicad_pro` file), as KiCad 10 does: "New Library" of the symbol editor and of the
+footprint editor, and the table dialog. The global tables do not change. The tools
+need an installed KiCad 10.0, and they refuse a project that KiCad has open: KiCad
+reads the project tables only when it opens the project. They take only libraries of
+the KiCad format. KiCad 10.0 cannot read a value with a quote or a backslash back from
+the table, thus the tools refuse these characters in a new name, URI or description,
+and keep the bytes of the other rows. With KiCad 10.0.7 and later, the old table goes
+to `<table>.bak` first, as KiCad does.
+
+| Tool | What it does |
+|---|---|
+| `create_project_library(project_path, kind, name, folder?)` | A new, empty library (a `.kicad_sym` file in the KiCad 10 format, or an empty `.pretty` folder) and its row in the project table. It does not replace a library that exists |
+| `add_library_to_table(project_path, kind, library_path, nickname?, description?)` | Adds a KiCad library that exists to the project table. The URI gets a path variable of KiCad or `${KIPRJMOD}` when one holds the library. A library of an older file version gives a warning with the upgrade step, a newer one an error. A relative path is relative to the project folder |
+| `remove_library_from_table(project_path, kind, nickname)` | Removes the row from the project table. The library files stay |
+| `set_library_table_row(project_path, kind, nickname, enabled?, visible?)` | Enables or disables a row, and shows or hides a symbol library |
 
 ## Bill of materials
 

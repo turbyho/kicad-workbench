@@ -16,7 +16,8 @@ mcp = FastMCP(
     - Boards: footprints, tracks, nets, statistics.
     - Checks: ERC and DRC of kicad-cli, the pin conflicts of the netlist, the pin and
       pad checks, the library links.
-    - Libraries: the library tables, the search, symbols and footprints, PNG images.
+    - Libraries: the library tables, the search, symbols and footprints, PNG images,
+      new project libraries and the rows of the project tables.
     - BOM: the BOM of kicad-cli, and the check of the confirmed MPNs.
     - Edits: symbols, wires, labels, the fields of placed symbols, new projects and
       boards.
@@ -48,6 +49,7 @@ from .tools import (  # noqa: F401, E402
     pcb_layout,
     pin_analysis,
     project,
+    project_libraries,
     schematic,
     schematic_editor,
     schematic_search,

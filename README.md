@@ -65,7 +65,9 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   Schematic", the pin conflicts of the netlist, and the links to the libraries and
   the 3D models.
 - **Libraries.** The library tables of KiCad and of the project, a search as in the
-  choosers of KiCad, the content of symbols and footprints, and PNG images.
+  choosers of KiCad, the content of symbols and footprints, and PNG images. New
+  project libraries, and the add, the remove and the flags of the rows of the project
+  tables, as KiCad 10 does them (KiCad 10.0).
 - **BOM.** The BOM of kicad-cli with the fields, the groups, the DNP filter and the
   variants of KiCad 10.
 - **Edits.** New projects, symbols from the libraries, wires, labels and junctions as

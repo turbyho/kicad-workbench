@@ -433,7 +433,20 @@ _ROW_KEYS = {b"name": "name", b"type": "type", b"uri": "uri", b"options": "optio
 _MASTER_ESCAPES = {ord("n"): b"\n", ord("r"): b"\r", ord("\\"): b"\\", ord('"'): b'"'}
 
 
-def _parse_table(data: bytes, escapes: bool, path: Path) -> tuple[str, list[dict]]:
+def parse_raw_table(data: bytes, path: Path) -> tuple[str, list[dict]]:
+    """Parse a table with the rules of KiCad 10.0 (_parse_table), and keep each value
+    as its bytes: a tool that writes the table again gives each row the same bytes,
+    thus KiCad 10.0 reads the same values.
+
+    Raises:
+        LibraryTableError: KiCad 10.0 cannot read the table.
+    """
+    return _parse_table(data, False, path, decode=False)
+
+
+def _parse_table(
+    data: bytes, escapes: bool, path: Path, decode: bool = True
+) -> tuple[str, list[dict]]:
     """Parse a table as LIBRARY_TABLE_PARSER of KiCad 10 does: the rules of
     LIBRARY_TABLE_GRAMMAR (``include/libraries/library_table_grammar.h``, tag 10.0.6)
     and the actions of ``common/libraries/library_table_parser.cpp``.
@@ -545,13 +558,13 @@ def _parse_table(data: bytes, escapes: bool, path: Path) -> tuple[str, list[dict
         if spaces(at) == at:
             raise syntax_error(at)
         at = spaces(at)
-        row: dict = dict.fromkeys(_ROW_KEYS.values(), "")
+        row: dict = dict.fromkeys(_ROW_KEYS.values(), "" if decode else b"")
         row["disabled"] = row["hidden"] = False
         members = 0
         while True:
             member = keyword_value(at, tuple(_ROW_KEYS))
             if member is not None:
-                row[_ROW_KEYS[member[0]]] = _from_utf8(member[1])
+                row[_ROW_KEYS[member[0]]] = _from_utf8(member[1]) if decode else member[1]
                 at = member[2]
             elif data.startswith(b"(hidden)", at):
                 row["hidden"] = True

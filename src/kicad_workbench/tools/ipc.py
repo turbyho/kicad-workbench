@@ -5,15 +5,26 @@ with the board open in the PCB editor, and the extra "ipc" of the server (kicad-
 """
 
 import asyncio
+import os
+import time
 from collections import Counter
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from ..errors import InputError
+from ..parsers.kicad_versions import RELEASES
 from ..server import mcp
+from ..utils.file_stamp import FileStamp, file_stamp
+from ..utils.file_versions import board_file_version
 from ..utils.ipc_client import (
     KICAD_PYTHON_VERSION,
     LIMITS,
+    TIMEOUT_MS,
     BoardItem,
     IpcError,
+    flip_direction_setting,
     kicad_python_version,
     known_versions,
     open_session,
@@ -51,25 +62,31 @@ def _status(board_path: str) -> str:
         if state.boards:
             label = f"Board `{board_path}`" if board_path else "Board"
             try:
-                board = session.board(board_path or state.boards[0])
+                session.board(board_path or state.boards[0])
                 if board_path:
                     lines.append(f"- {label}: ✅ open in the PCB editor")
-                # A dialog or an interactive operation gives AS_BUSY.
-                session.check_busy(board)
-                lines.append("- KiCad busy: no")
             except IpcError as error:
                 lines.append(f"- {label}: ❌ {error}")
                 blocker = str(error)
         else:
             blocker = "no board is open in the PCB editor"
-        blocker = blocker or state.write_problem()
         if blocker:
             lines.append(f"- Writes: ❌ not possible now. {blocker}")
         else:
+            # The API has no request that tells if KiCad is busy: each request can get
+            # AS_BUSY ("KiCad is busy performing an operation", envelope.proto).
             lines.append(
-                "- Writes: ✅ possible now (the state can change: the user can open a dialog "
-                "or the schematic editor)"
+                "- Writes: ✅ the board is open in the PCB editor. KiCad refuses each "
+                "request while it is busy (a dialog, an interactive operation): the tool "
+                "then gives the error."
             )
+        problem = state.commit_problem()
+        if problem:
+            lines.append(
+                f"- Commits: ❌ not possible now. {problem} The IPC tools of this version use no commit."
+            )
+        else:
+            lines.append("- Commits: ✅ possible now")
         lines += ["", f"## Limits of KiCad {state.version}", ""]
         lines += _limits_table(state.rules)
     lines += ["", f"Known KiCad versions of the IPC tools: {known_versions()}."]
@@ -90,9 +107,12 @@ async def ipc_status(board_path: str = "") -> str:
 
     Returns:
         Markdown: the version of kicad-python and of the running KiCad, the socket, the
-        open editors and boards, if KiCad is busy, if the tools can write now (the board of board_path is open, KiCad is not busy with a
-        dialog, and the limits of the version let a write operate), and the limits of
-        the running KiCad version with the version that solves each limit.
+        open editors and boards, the line "Writes" (the board of board_path is open in
+        the PCB editor; KiCad refuses each request while it is busy, and the API has no
+        request that tells this before),
+        the line "Commits" (a commit with BeginCommit is possible: KiCad 10.0.6 stops on
+        a commit while the schematic editor is open), and the limits of the running KiCad
+        version with the version that solves each limit.
     """
     try:
         return await asyncio.to_thread(_status, board_path)
@@ -234,9 +254,6 @@ def _select_items(board_path: str, references: list[str], nets: list[str], mode:
             targets += [item.id for item in net_items if item.id]
             notes.append(NET_NOTE)
         targets = list(dict.fromkeys(targets))
-        # The changes of the selection need an editor that is not busy: GetSelection does
-        # not check it.
-        session.check_busy(board)
         before = session.selection(board)
         try:
             if mode in ("replace", "clear"):
@@ -338,3 +355,384 @@ async def ipc_select_items(
         )
     except Exception as error:
         return error_answer(error, "Error changing the selection")
+
+
+# Step 3C of phase 3: the first changes of the board.
+
+# The fields of a placement that need an update of the footprint (UpdateItems): the tool
+# has no rules for them yet (the open decision of step 3C, limits
+# footprint_update_loses_data and footprint_move_children).
+_UPDATE_FIELDS = ("x_mm", "y_mm", "rotation_deg", "locked")
+
+# The copper layer of each side of the board.
+_SIDE_LAYER = {"top": "F.Cu", "bottom": "B.Cu"}
+
+
+class FootprintPlacement(BaseModel):
+    """The placement of one footprint."""
+
+    reference: str = Field(description="The reference of the footprint, for example U3.")
+    side: Literal["top", "bottom"] | None = Field(
+        default=None, description='The side of the board: "top" or "bottom".'
+    )
+    x_mm: float | None = Field(default=None, description="The X position in mm.")
+    y_mm: float | None = Field(default=None, description="The Y position in mm.")
+    rotation_deg: float | None = Field(default=None, description="The rotation in degrees.")
+    locked: bool | None = Field(default=None, description="Lock or unlock the footprint.")
+
+
+def _update_refusal(rules, version: str, updates: list[str]) -> str:
+    """The error for the fields of _UPDATE_FIELDS: a limit of the KiCad version, or no
+    rules of the tool yet."""
+    if rules.has_limit("footprint_update_loses_data"):
+        reason = (
+            f"KiCad {version} cannot change them with no loss of data: "
+            f"{LIMITS['footprint_update_loses_data'].text}"
+        )
+    else:
+        reason = f"the tool has no rules for them yet: {LIMITS['footprint_move_children'].text}"
+    return (
+        f"The tool cannot change the position, the rotation or the lock of a footprint: "
+        f"{reason} Asked: {'; '.join(updates)}. The tool changed nothing. Only side is "
+        "possible."
+    )
+
+
+def _place_footprints(
+    board_path: str,
+    placements: list[FootprintPlacement],
+    flip_direction: str,
+    override_locks: bool,
+) -> str:
+    if not placements:
+        raise InputError("placements is empty.")
+    if flip_direction not in ("setting", "left_right", "top_bottom"):
+        raise InputError(
+            'flip_direction must be "setting", "left_right" or "top_bottom", '
+            f"not {flip_direction!r}."
+        )
+    counts = Counter(placement.reference for placement in placements)
+    twice = sorted(reference for reference, count in counts.items() if count > 1)
+    if twice:
+        raise InputError(f"placements has more than one entry for {', '.join(twice)}.")
+    updates = [
+        f"{placement.reference}: "
+        + ", ".join(name for name in _UPDATE_FIELDS if getattr(placement, name) is not None)
+        for placement in placements
+        if any(getattr(placement, name) is not None for name in _UPDATE_FIELDS)
+    ]
+    with open_session() as session:
+        board = session.board(board_path)
+        if updates:
+            raise IpcError(_update_refusal(session.state.rules, session.state.version, updates))
+        by_reference: dict[str, list[BoardItem]] = {}
+        unreadable = 0
+        for footprint in session.footprints(board):
+            if footprint.problem:
+                unreadable += 1
+                continue
+            by_reference.setdefault(footprint.text, []).append(footprint)
+        problems, rows, flips = [], [], []
+        for placement in placements:
+            found = by_reference.get(placement.reference, [])
+            if len(found) != 1:
+                if found:
+                    problems.append(
+                        f"{placement.reference}: {len(found)} footprints have this reference"
+                    )
+                elif unreadable:
+                    problems.append(
+                        f"{placement.reference}: no footprint that the tool can read has this "
+                        f"reference (references are case-sensitive; KiCad gave "
+                        f"{_count(unreadable, 'footprint')} that the tool cannot read)"
+                    )
+                else:
+                    problems.append(
+                        f"{placement.reference}: the board has no footprint with this "
+                        "reference (references are case-sensitive)"
+                    )
+                continue
+            footprint = found[0]
+            if footprint.layer not in _SIDE_LAYER.values():
+                problems.append(f"{placement.reference}: the footprint is on {footprint.layer}")
+                continue
+            flip = bool(placement.side) and _SIDE_LAYER[placement.side] != footprint.layer
+            if flip and footprint.locked is None and not override_locks:
+                problems.append(
+                    f"{placement.reference}: KiCad gave no lock state of the footprint (the "
+                    "PCB editor does not flip a locked footprint: give override_locks=true "
+                    "to flip it in all cases)"
+                )
+                continue
+            if flip and footprint.locked and not override_locks:
+                # The Flip of the PCB editor leaves out a locked footprint
+                # (FilterCollectorForLockedItems), except with "Override locks".
+                problems.append(
+                    f"{placement.reference}: the footprint is locked (the PCB editor flips it "
+                    "only with Override locks: give override_locks=true)"
+                )
+                continue
+            if flip:
+                flips.append(footprint.id)
+            rows.append((placement, footprint))
+        if problems:
+            raise InputError("The tool changed nothing: " + "; ".join(problems) + ".")
+        source = direction = ""
+        flipped: dict[str, BoardItem] = {}
+        messages: list[str] = []
+        unknown = 0
+        if flips:
+            if flip_direction == "setting":
+                direction, source = flip_direction_setting(session.state.version)
+            else:
+                direction, source = flip_direction, "the argument flip_direction"
+            flipped, messages, unknown = session.flip_items(board, flips, direction)
+    failed = [item_id for item_id in flips if item_id not in flipped]
+    lines = []
+    if unknown:
+        lines.append(
+            f"⚠️ KiCad flipped {_count(unknown, 'item')} that the tool cannot read: the tool "
+            f"cannot tell which footprints they are. {_count(len(flips) - len(failed), 'footprint')} "
+            'flipped for sure, in one undo step ("Flipped items via API"). Tell the user: '
+            "look at the board in KiCad."
+        )
+        if messages:
+            lines.append(f"Messages of KiCad: {'; '.join(messages)}.")
+    elif failed:
+        done = len(flips) - len(failed)
+        lines.append(
+            f"⚠️ KiCad did not flip {_count(len(failed), 'footprint')}"
+            + (
+                f". It flipped {_count(done, 'footprint')} in one undo step "
+                '("Flipped items via API").'
+                if done
+                else ". The board did not change."
+            )
+        )
+        if messages:
+            lines.append(f"Messages of KiCad: {'; '.join(messages)}.")
+    elif flips:
+        lines.append(
+            f'✅ Flipped {_count(len(flips), "footprint")} in one undo step ("Flipped items via API").'
+        )
+    else:
+        lines.append("✅ No change: each footprint is on the side of the request.")
+    if flips:
+        lines += [
+            "",
+            f"Flip: {direction.replace('_', '/')} around the position of the footprint ({source}).",
+        ]
+    lines += [
+        "",
+        "| Reference | Side before | Side after | Position (mm) | Note |",
+        "|---|---|---|---|---|",
+    ]
+    for placement, footprint in rows:
+        item = flipped.get(footprint.id)
+        new = item or footprint
+        position = f"{_mm(new.position[0])}, {_mm(new.position[1])}" if new.position else ""
+        note = ""
+        if footprint.id in failed:
+            note = "not known" if unknown else "not flipped"
+        if item is not None and footprint.locked:
+            note = "locked (override_locks)"
+        lines.append(
+            f"| {cell(placement.reference)} | {footprint.layer} | {new.layer} | {position} | "
+            f"{cell(note)} |"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def ipc_place_footprints(
+    board_path: str,
+    placements: list[FootprintPlacement],
+    flip_direction: str = "setting",
+    override_locks: bool = False,
+) -> str:
+    """Place footprints on the board in the PCB editor of the running KiCad.
+
+    KiCad does the change. One call is one undo step. The tool checks all placements
+    first, and changes nothing when a check fails. The tool can only change the side:
+    a change of the position, the rotation or the lock gives an error (the limits
+    footprint_update_loses_data and footprint_move_children of ipc_status).
+
+    Args:
+        board_path: The path of the .kicad_pcb file that is open in the PCB editor.
+        placements: For each footprint: the reference, and the side ("top" or
+            "bottom"). x_mm, y_mm, rotation_deg and locked give an error.
+        flip_direction: The flip of a footprint to the other side: "setting" (the flip
+            direction of the PCB editor, from pcbnew.json), "left_right" or
+            "top_bottom". KiCad flips around the position of the footprint.
+        override_locks: Flip also a locked footprint, as the PCB editor does with
+            "Override locks". With false, a locked footprint that must change its side
+            gives an error.
+
+    Returns:
+        Markdown: the result, the flip direction and its source, and a table with the
+        side before and after and the position of each footprint.
+    """
+    try:
+        return await asyncio.to_thread(
+            _place_footprints, board_path, placements, flip_direction, override_locks
+        )
+    except Exception as error:
+        return error_answer(error, "Error placing the footprints")
+
+
+def _release_of_board(version: int | None) -> str | None:
+    """The KiCad release that writes a board version, or None."""
+    return next((release.name for release in RELEASES if release.board == version), None)
+
+
+def _disk_state(path: Path) -> tuple[int, int, FileStamp] | None:
+    """The inode, the modification time and the stamp of the bytes of a file, or None.
+
+    A save changes the bytes, or it writes a new file (a new inode) or a new time. The
+    stamp of the bytes also finds a save on a file system with coarse times."""
+    if not path.exists():
+        return None
+    status = path.stat()
+    return status.st_ino, status.st_mtime_ns, file_stamp(path)
+
+
+def _save_board(board_path: str) -> str:
+    path = Path(board_path)
+    with open_session() as session:
+        board = session.board(board_path)
+        # SavePcbFile of KiCad 10.0.6 opens an error dialog (DisplayError) when it cannot
+        # write a file, and a modal dialog blocks the API: the tool checks the files
+        # first. The project file comes from the project of the open document.
+        folder = path.resolve().parent
+        if not os.access(folder, os.W_OK):
+            raise InputError(f"The folder {folder} is not writable. The tool did not save.")
+        for file in (path, session.project_file(board)):
+            if file is not None and file.exists() and not os.access(file, os.W_OK):
+                raise InputError(f"{file} is not writable. The tool did not save.")
+        before = board_file_version(path)
+        state = _disk_state(path)
+        start = time.monotonic()
+        # The answer comes after SaveBoard. An error dialog of a save that failed is
+        # modal in the request: the answer then does not come in time (NO_ANSWER).
+        session.save_board(board)
+        seconds = time.monotonic() - start
+    after = board_file_version(path)
+    if _disk_state(path) == state:
+        return (
+            f"⚠️ KiCad answered the save, but the file `{board_path}` did not change (the "
+            "same bytes, inode and time). Tell the user: look for a message of KiCad in "
+            "the PCB editor."
+        )
+    lines = [f"✅ KiCad saved the board `{board_path}` ({seconds:.2f} s)."]
+    if after is None:
+        lines.append(
+            "⚠️ The tool cannot read the file version of the saved board. Tell the user: "
+            "open the board in KiCad to check it."
+        )
+    elif before is not None and before != after:
+        old = _release_of_board(before)
+        new = _release_of_board(after)
+        lines.append(
+            f"⚠️ KiCad changed the file version from {before} to {after} (KiCad "
+            f"{new or 'of the running version'}). "
+            + (f"KiCad {old} cannot open the board now. " if old else "")
+            + "Tell the user."
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def ipc_save_board(board_path: str) -> str:
+    """Save the board of the PCB editor of the running KiCad into its file.
+
+    KiCad saves the board as File > Save does, also the project file. KiCad writes the
+    file version of the running KiCad.
+
+    Args:
+        board_path: The path of the .kicad_pcb file that is open in the PCB editor.
+
+    Returns:
+        Markdown: the result, and a warning when KiCad changed the file version.
+    """
+    try:
+        return await asyncio.to_thread(_save_board, board_path)
+    except Exception as error:
+        return error_answer(error, "Error saving the board")
+
+
+# The interval of the requests while KiCad gives AS_BUSY after RefillZones.
+REFILL_POLL_S = 0.2
+
+
+def _refill_zones(board_path: str, timeout_s: float) -> str:
+    if not 1 <= timeout_s <= 3600:
+        raise InputError(f"timeout_s must be 1 to 3600, not {timeout_s}.")
+    # Each request of the session can wait for the fill (KiCad 10.0.6 and 10.0.8), thus
+    # the timeout of each answer is the longer of TIMEOUT_MS and timeout_s.
+    with open_session(timeout_ms=max(TIMEOUT_MS, int(timeout_s * 1000))) as session:
+        board = session.board(board_path)
+        _, filled_before = session.copper_zones(board)
+        start = time.monotonic()
+        session.refill_zones(board)
+        # board_commands.proto: KiCad gives AS_BUSY to each request until the fill has
+        # completed. Thus repeat the request while it gets AS_BUSY. (KiCad 10.0.6 and
+        # 10.0.8 do not give AS_BUSY: the request waits for the end of the fill.)
+        while True:
+            try:
+                copper, filled = session.copper_zones(board)
+                break
+            except IpcError as error:
+                if error.no_answer:
+                    raise IpcError(
+                        f"KiCad started the fill, but it gave no answer in {timeout_s:g} s. "
+                        "The fill can still run: look at KiCad, then call the tool again "
+                        "with a larger timeout_s.",
+                        no_answer=True,
+                    ) from None
+                if not error.busy:
+                    raise
+                if time.monotonic() - start >= timeout_s:
+                    raise IpcError(
+                        f"KiCad started the fill, but it was still busy after {timeout_s:g} "
+                        "s (AS_BUSY). The fill can still run: look at KiCad, then call the "
+                        "tool again with a larger timeout_s.",
+                        busy=True,
+                    ) from None
+                time.sleep(REFILL_POLL_S)
+        seconds = time.monotonic() - start
+    lines = [
+        f'ℹ️ KiCad ended "Fill All Zones" in {seconds:.2f} s: {filled} of {copper} copper '
+        f"zones have a fill (before: {filled_before}).",
+        "",
+        'The fill is its own undo step in KiCad ("Fill Zone(s)").',
+        f"⚠️ {LIMITS['refill_progress'].text} A cancel keeps the fill of the start: tell "
+        "the user to look at the zones when the fill was long.",
+    ]
+    if filled < copper:
+        lines.append(
+            f"⚠️ {copper - filled} copper zones have no fill: no area to fill, or the user "
+            "cancelled the fill."
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def ipc_refill_zones(board_path: str, timeout_s: float = 120) -> str:
+    """Fill all zones of the board in the PCB editor of the running KiCad.
+
+    KiCad fills the zones as "Fill All Zones" does, with its progress dialog. The tool
+    waits for the end of the fill.
+
+    Args:
+        board_path: The path of the .kicad_pcb file that is open in the PCB editor.
+        timeout_s: The longest time to wait for the end of the fill, 1 to 3600 s.
+
+    Returns:
+        Markdown: the time of the fill and the number of the copper zones with a fill,
+        before and after. KiCad gives no result of the fill: the tool cannot see if the
+        user cancelled it.
+    """
+    try:
+        return await asyncio.to_thread(_refill_zones, board_path, timeout_s)
+    except Exception as error:
+        return error_answer(error, "Error filling the zones")

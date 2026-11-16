@@ -45,17 +45,31 @@ INSTALL_STEP = (
     f"(kicad-python {KICAD_PYTHON_VERSION}), then restart the MCP client."
 )
 
-# The time that the client waits for each answer of KiCad (the default of kicad-python).
-TIMEOUT_MS = 2000
+# The time that the client waits for each answer of KiCad. KiCad does the requests one
+# after the other, and a large board needs time: GetItems of the 1125 footprints of the
+# demo jetson-agx-thor-baseboard took 983 ms (KiCad 10.0.8, 2026-11-16). The 2 s of
+# kicad-python are too short for a larger board.
+TIMEOUT_MS = 30_000
 
 # The status codes of ApiResponseStatus (common/envelope.proto of KiCad 10).
+AS_NOT_READY = 4
 AS_UNHANDLED = 5
 AS_BUSY = 7
 
 
 class IpcError(WorkbenchError):
     """KiCad or kicad-python cannot do the IPC request. The message tells the user why,
-    and the step that solves it."""
+    and the step that solves it.
+
+    busy is True when KiCad answered AS_BUSY: "KiCad is busy performing an operation and
+    can't accept API commands" (ApiStatusCode of envelope.proto). no_answer is True when
+    the answer did not come (a timeout, or a broken connection after the dial).
+    """
+
+    def __init__(self, message: str, *, busy: bool = False, no_answer: bool = False):
+        super().__init__(message)
+        self.busy = busy
+        self.no_answer = no_answer
 
 
 @dataclass(frozen=True)
@@ -76,8 +90,9 @@ LIMITS = {
     for limit in (
         Limit(
             "schematic_editor_commit",
-            "A commit while the schematic editor is open stops KiCad (KiCad bug #24966). "
-            "The tools refuse each write while the schematic editor is open.",
+            "A commit (BeginCommit) while the schematic editor is open stops KiCad (KiCad "
+            "bug #24966). The tools refuse a commit while the schematic editor is open. A "
+            "request with no commit (FlipItems, SaveDocument, RefillZones) operates.",
             "10.0.7",
             "API_HANDLER_SCH: the member m_frame of API_HANDLER_EDITOR stays null, and "
             "handleBeginCommit calls checkForBusy first (10.0.6); fix 6545d4a28d",
@@ -132,6 +147,45 @@ LIMITS = {
             "selection filter in the .proto files of master",
         ),
         Limit(
+            "footprint_update_loses_data",
+            "An update of a footprint (UpdateItems) makes a new footprint from the API "
+            "data, and KiCad 10.0.6 loses the units of the footprint, the teardrop settings "
+            "of its pads and the default line style of its shapes. The tools do not move, "
+            "rotate or lock a footprint.",
+            "10.0.8 (measured in Docker: the round trip keeps all data, also through the "
+            "classes of kicad-python 0.8.0)",
+            "handleCreateUpdateItemsInternal removes the footprint and adds a new one "
+            "(10.0.6); spike/ipc/probe_update_roundtrip.py: all 56 footprints lose "
+            "(units ...), 12 pads lose (teardrops ...), 6 shapes change from default to solid",
+        ),
+        Limit(
+            "footprint_move_children",
+            "The API has no command that moves or rotates a footprint. The API gives the "
+            "items of a footprint with absolute positions: a change of the position of the "
+            "footprint alone moves only its anchor. A client must move and rotate each item "
+            "of the footprint as KiCad does (FOOTPRINT::Move, FOOTPRINT::Rotate).",
+            "no version (master 2026-11-15: only InteractiveMoveItems)",
+            "spike/ipc/probe_update_raw.py with KiCad 10.0.8: a footprint moved 1 mm by its "
+            "position; its pads, shapes and fields stayed at their place",
+        ),
+        Limit(
+            "flip_direction_setting",
+            "The API cannot read the flip direction of the PCB editor: the tools read "
+            "editing.flip_left_right of pcbnew.json, as the editor reads it at its start.",
+            "no version (master 2026-11-15)",
+            "FlipItems takes the direction of the request; BFD_UNKNOWN is TOP_BOTTOM "
+            "(FromProtoEnum<FLIP_DIRECTION>, 10.0.6)",
+        ),
+        Limit(
+            "refill_progress",
+            "RefillZones gives no result: the tools wait for the next answer of KiCad, and "
+            "cannot see if the user cancelled the fill. Only a refill of all zones is "
+            "possible.",
+            "11.0 (StartRefillZonesTask, not released)",
+            "handleRefillZones runs zoneFillAll later (CallAfter) and gives AS_UNIMPLEMENTED "
+            "for a list of zones (10.0.6)",
+        ),
+        Limit(
             "run_action_parameter",
             "RunAction gives each action the parameter true (a bool). An action that reads "
             'a parameter of an other type (for example the net code of "Select All Tracks '
@@ -180,6 +234,10 @@ IPC_RULES = {
                 "no_data_markers_patterns_targets",
                 "selection_filter",
                 "run_action_parameter",
+                "footprint_update_loses_data",
+                "footprint_move_children",
+                "flip_direction_setting",
+                "refill_progress",
             ),
             "spike/kicad-versions/ipc_client_check.py with KiCad 10.0.6 (2026-11-15)",
         ),
@@ -233,6 +291,11 @@ class _Kipy:
     board_commands: Any
     unpack_any: Any
     canonical_name: Any
+    item_ok: Any
+    item_request_status: Any
+    zone_copper: Any
+    locked_state: Any
+    unlocked_state: Any
 
 
 def _import_kipy() -> _Kipy:
@@ -249,9 +312,9 @@ def _import_kipy() -> _Kipy:
         import kipy
         import kipy.client
         import kipy.errors
-        from kipy.proto.board import board_commands_pb2
+        from kipy.proto.board import board_commands_pb2, board_types_pb2
         from kipy.proto.common.commands import editor_commands_pb2
-        from kipy.proto.common.types import DocumentType, KiCadObjectType
+        from kipy.proto.common.types import DocumentType, KiCadObjectType, base_types_pb2
         from kipy.util.board_layer import canonical_name
         from kipy.util.proto import unpack_any
     except ImportError as error:
@@ -266,17 +329,65 @@ def _import_kipy() -> _Kipy:
         board_commands=board_commands_pb2,
         unpack_any=unpack_any,
         canonical_name=canonical_name,
+        item_ok=editor_commands_pb2.ISC_OK,
+        item_request_status=base_types_pb2.ItemRequestStatus,
+        zone_copper=board_types_pb2.ZT_COPPER,
+        locked_state=base_types_pb2.LS_LOCKED,
+        unlocked_state=base_types_pb2.LS_UNLOCKED,
     )
+
+
+def flip_direction_setting(version: str) -> tuple[str, str]:
+    """Return the flip direction of the PCB editor, and where it comes from.
+
+    The setting is editing.flip_left_right of pcbnew.json in the settings folder of the
+    KiCad version (PCBNEW_SETTINGS of KiCad 10.0.6). KiCad stores the enum
+    FLIP_DIRECTION as a bool: false is LEFT_RIGHT (0), true is TOP_BOTTOM (1), although
+    the name says "left right". The default is false. A value that is not a bool gives
+    the default (PARAM<bool>::Load). The panel "Editing Options" of the PCB editor shows
+    the setting as "Left/right" or "Top/bottom".
+
+    Returns:
+        "left_right" or "top_bottom", and the source as a text.
+
+    Raises:
+        OSError, InputError: pcbnew.json cannot be read, or it is not JSON.
+    """
+    from ..errors import InputError
+    from .kicad_text import read_kicad_json
+    from .library_tables import kicad_settings_dir
+
+    path = kicad_settings_dir(version) / "pcbnew.json"
+    if not path.is_file():
+        return "left_right", f"the default of KiCad ({path} is not there)"
+    try:
+        data = read_kicad_json(path)
+    except (OSError, InputError) as error:
+        # JSON_SETTINGS::LoadFromFile of KiCad 10.0.6 keeps the defaults for a file that it
+        # cannot open or parse (nlohmann::json::parse_error).
+        return "left_right", f"the default of KiCad, which cannot read {path} ({error})"
+    editing = data.get("editing") if isinstance(data, dict) else None
+    value = editing.get("flip_left_right") if isinstance(editing, dict) else None
+    if not isinstance(value, bool):
+        return "left_right", f"the default of KiCad ({path} has no bool editing.flip_left_right)"
+    direction = "top_bottom" if value else "left_right"
+    return direction, f"editing.flip_left_right = {str(value).lower()} of {path}"
 
 
 def socket_path() -> tuple[str, str]:
     """Return the socket of the client, and where it comes from.
 
-    The rules of the default socket of kicad-python 0.8.0 (kipy/kicad.py,
-    _default_socket_path): KICAD_API_SOCKET when it is set (also an empty value), on
-    Windows "kicad/api.sock" in the temporary folder, else the socket of the Flatpak
-    package of KiCad when it exists, else /tmp/kicad/api.sock. The client gives this
-    path to kicad-python, thus the messages name the socket that the client dials.
+    A limit of kicad-python 0.8.0, not of the IPC API: the documented way to make a
+    client for raw requests is KiCadClient(socket_path, ...) and KiCad.from_client, and
+    KiCadClient needs the socket path. Only the constructor KiCad() finds the default
+    socket, with the private function _default_socket_path, and it gives its client
+    only through the private attribute _client. Thus this function is a copy of the
+    rules of _default_socket_path of kicad-python 0.8.0 (kipy/kicad.py):
+    KICAD_API_SOCKET when it is set (also an empty value; documented in kicad-dev-docs),
+    on Windows "kicad/api.sock" in the temporary folder, else the socket of the Flatpak
+    package of KiCad when it exists, else /tmp/kicad/api.sock. Compare it with each new
+    release of kicad-python. The client gives this path to kicad-python, thus the
+    messages name the socket that the client dials.
     """
     path = os.environ.get("KICAD_API_SOCKET")
     if path is not None:
@@ -302,6 +413,9 @@ def socket_text() -> str:
 # other texts ("Failed to send command", "Error receiving reply"): a timeout, or a
 # connection that stopped.
 _DIAL_FAILED = "Failed to connect to KiCad"
+# The text of nng for an address that it cannot use, for example a path of a Unix socket
+# that is longer than sockaddr_un.sun_path (measured with a path of more than 108 bytes).
+_ADDRESS_INVALID = "Address invalid"
 
 NOT_RUNNING = (
     "KiCad does not answer on {socket}: KiCad is not running, or its API server is off. "
@@ -314,6 +428,15 @@ NO_ANSWER = (
     "opened for an action blocks the API. Tell the user: make sure that KiCad runs, close "
     "an open dialog in KiCad, then try again."
 )
+BAD_ADDRESS = (
+    "The socket {socket} is not a valid address for nng ({error}). The path of a socket "
+    "must be short (Linux: less than 108 bytes). Tell the user: set KICAD_API_SOCKET to a "
+    "shorter path."
+)
+NOT_READY = (
+    'KiCad is not ready to answer: it starts, or a dialog of its first start ("Welcome '
+    'to KiCad") is open. Tell the user: finish the dialog in KiCad, then try again.'
+)
 BUSY = (
     "KiCad is busy: a dialog is open, or the user does an interactive operation in the "
     "editor (CanAcceptApiCommands). Tell the user: close the dialog or finish the "
@@ -324,17 +447,30 @@ NO_PCB_EDITOR = (
 )
 
 
-def _translate(error: Exception, errors, request: str) -> IpcError:
+def _translate(error: Exception, errors, request: str, timeout_ms: int = TIMEOUT_MS) -> IpcError:
     """Return the IpcError for a ConnectionError or an ApiError of kicad-python."""
     if isinstance(error, errors.ConnectionError):
+        if str(error).startswith(_DIAL_FAILED) and _ADDRESS_INVALID in str(error):
+            return IpcError(BAD_ADDRESS.format(socket=socket_text(), error=error))
         if str(error).startswith(_DIAL_FAILED):
             return IpcError(NOT_RUNNING.format(socket=socket_text()))
-        return IpcError(NO_ANSWER.format(request=request, error=error, seconds=TIMEOUT_MS / 1000))
+        return IpcError(
+            NO_ANSWER.format(request=request, error=error, seconds=timeout_ms / 1000),
+            no_answer=True,
+        )
     if error.code == AS_BUSY:
-        return IpcError(BUSY)
+        return IpcError(BUSY, busy=True)
+    if error.code == AS_NOT_READY:
+        # KICAD_API_SERVER answers AS_NOT_READY until SetReadyToReply at the end of the
+        # start (single_top.cpp, kicad.cpp of KiCad 10.0.8); the first-run wizard holds it.
+        return IpcError(NOT_READY)
     if error.code == AS_UNHANDLED:
-        # No open editor has a handler for the request (measured with KiCad 10.0.6).
-        return IpcError(f"No open editor of KiCad answers the request {request}. {NO_PCB_EDITOR}")
+        # envelope.proto: "The request was not handled by KiCad". Measured with KiCad
+        # 10.0.6: no open editor has a handler for the request.
+        return IpcError(
+            f"KiCad did not handle the request {request} (AS_UNHANDLED): no open editor of "
+            f"KiCad has a handler for it. {NO_PCB_EDITOR}"
+        )
     return IpcError(f"KiCad refused the request {request}: {error}")
 
 
@@ -357,8 +493,13 @@ class KicadState:
     def pcb_editor_open(self) -> bool:
         return bool(self.boards)
 
-    def write_problem(self) -> str | None:
-        """Return why the tools must not write now, or None."""
+    def commit_problem(self) -> str | None:
+        """Return why the tools must not start a commit (BeginCommit) now, or None.
+
+        Only BeginCommit and EndCommit go to the schematic handler with no document check
+        first (bug #24966). FlipItems, SaveDocument and RefillZones have no handler in
+        API_HANDLER_SCH of KiCad 10.0.6: measured with the schematic editor open
+        (spike/kicad-versions/ipc_write_check.py)."""
         if self.rules.has_limit("schematic_editor_commit") and self.schematic_open:
             solved_in = LIMITS["schematic_editor_commit"].solved_in
             return (
@@ -385,6 +526,8 @@ class BoardItem:
     layer: str = ""
     position: tuple[int, int] | None = None
     problem: str = ""
+    # The locked state of the item itself (LS_LOCKED), None for an item with no state.
+    locked: bool | None = None
 
 
 # KiCad gives an empty message for an item type with no Serialize function
@@ -453,17 +596,22 @@ def describe_item(k: _Kipy, message) -> BoardItem:
         position = (item.start.x_nm, item.start.y_nm)
     else:
         position = None
-    return BoardItem(kind, item_id, text, net, layer, position)
+    locked = None
+    if "locked" in fields and fields["locked"].enum_type is not None:
+        # LockedState: LS_LOCKED or LS_UNLOCKED, else not known (LS_UNKNOWN).
+        locked = {k.locked_state: True, k.unlocked_state: False}.get(item.locked)
+    return BoardItem(kind, item_id, text, net, layer, position, locked=locked)
 
 
 class IpcSession:
     """A connection to the running KiCad for one tool call (open_session)."""
 
-    def __init__(self, k: _Kipy, client, kicad: KiCad, state: KicadState):
+    def __init__(self, k: _Kipy, client, kicad: KiCad, state: KicadState, timeout_ms: int):
         self._k = k
         self.client = client
         self.kicad = kicad
         self.state = state
+        self.timeout_ms = timeout_ms
 
     def call(self, request: str, function, *args, **kwargs):
         """Call a function of kicad-python, and give an IpcError for its errors.
@@ -474,7 +622,7 @@ class IpcSession:
         try:
             return function(*args, **kwargs)
         except (self._k.errors.ConnectionError, self._k.errors.ApiError) as error:
-            raise _translate(error, self._k.errors, request) from None
+            raise _translate(error, self._k.errors, request, self.timeout_ms) from None
 
     def send(self, command, response_type):
         """Send a protobuf command to KiCad, and return its answer.
@@ -511,18 +659,18 @@ class IpcSession:
             )
         return board
 
-    def check_write(self) -> None:
-        """Refuse a write that the running KiCad cannot do safely.
+    def check_commit(self) -> None:
+        """Refuse a commit (BeginCommit) that the running KiCad cannot do safely.
 
         The state comes again from KiCad: the user can open the schematic editor after
         the start of the session.
 
         Raises:
-            IpcError: The reason (KicadState.write_problem).
+            IpcError: The reason (KicadState.commit_problem).
         """
-        state = _read_state(self.kicad, self._k, self.state.version)
+        state = _read_state(self.kicad, self._k, self.state.version, self.timeout_ms)
         self.state = state
-        problem = state.write_problem()
+        problem = state.commit_problem()
         if problem:
             raise IpcError(problem)
 
@@ -559,18 +707,104 @@ class IpcSession:
         answer = self.send(command, self._k.editor_commands.GetItemsResponse)
         return [describe_item(self._k, item) for item in answer.items]
 
-    def check_busy(self, board: Board) -> None:
-        """Give the busy error when KiCad cannot do a request that changes the editor.
+    def flip_items(
+        self, board: Board, ids: list[str], direction: str
+    ) -> tuple[dict[str, BoardItem], list[str], int]:
+        """Flip items to the other side of the board, each around its position
+        (FlipItems: "Flips one or more board items to the opposite side of the board").
+        With no open commit, KiCad makes one commit for the request: one undo step
+        "Flipped items via API" (handleFlipItems of KiCad 10.0.6). KiCad flips also a
+        locked item.
 
-        The request is GetBoundingBox with no item: handleGetBoundingBox of KiCad 10.0.6
-        calls checkForBusy first, and gives an empty answer for no item.
+        board_commands.proto gives no order of the results and no ID in a result: the
+        item of a result (only with ISC_OK) gives the ID of the flipped item.
+
+        Args:
+            direction: "left_right" (around the Y axis) or "top_bottom" (around the X axis).
+
+        Returns:
+            The flipped items by ID, the messages of KiCad for the results that are not
+            ISC_OK, and the number of ISC_OK results with an item that the tool cannot
+            read (no ID: the tool cannot tell which item it is).
 
         Raises:
-            IpcError: KiCad is busy (BUSY), or an other error of the request.
+            IpcError: KiCad refused the request (an error of the overall status).
         """
-        command = self._k.editor_commands.GetBoundingBox()
+        k = self._k
+        commands = k.board_commands
+        command = commands.FlipItems()
         command.header.document.CopyFrom(board.document)
-        self.send(command, self._k.editor_commands.GetBoundingBoxResponse)
+        command.direction = (
+            commands.BFD_LEFT_RIGHT if direction == "left_right" else commands.BFD_TOP_BOTTOM
+        )
+        for item_id in ids:
+            command.items.add().value = item_id
+        answer = self.send(command, commands.FlipItemsResponse)
+        # The overall status: "may return IRS_OK even if no items were flipped". KiCad
+        # 10.0.6 does not set it (IRS_UNKNOWN, measured in handleFlipItems): only the
+        # documented error values stop the tool.
+        statuses = k.item_request_status
+        if answer.status not in (statuses.Value("IRS_OK"), statuses.Value("IRS_UNKNOWN")):
+            raise IpcError(
+                f"KiCad refused the flip ({statuses.Name(answer.status)}). The board did "
+                "not change."
+            )
+        flipped: dict[str, BoardItem] = {}
+        messages: list[str] = []
+        unreadable = 0
+        for result in answer.flipped_items:
+            if result.status.code == k.item_ok:
+                item = describe_item(k, result.item)
+                if item.id:
+                    flipped[item.id] = item
+                else:
+                    unreadable += 1
+            else:
+                messages.append(result.status.error_message or f"status {result.status.code}")
+        return flipped, messages, unreadable
+
+    def project_file(self, board: Board) -> Path | None:
+        """Return the project file of the board, from the project of its document
+        (ProjectSpecifier: name, "the path to the project directory"), or None when
+        KiCad gives no project."""
+        project = board.document.project
+        if not project.path or not project.name:
+            return None
+        return Path(project.path) / f"{project.name}.kicad_pro"
+
+    def save_board(self, board: Board) -> None:
+        """Save the board in its file (SaveDocument, PCB_EDIT_FRAME::SaveBoard)."""
+        command = self._k.editor_commands.SaveDocument()
+        command.document.CopyFrom(board.document)
+        self.send(command, _empty())
+
+    def refill_zones(self, board: Board) -> None:
+        """Start the refill of all zones (RefillZones).
+
+        board_commands.proto: "This is a blocking operation; it will return Empty
+        immediately, but KiCad will return ApiStatusCode.AS_BUSY to all future API
+        requests until the zone fill has completed." The caller must repeat a request
+        while it gets AS_BUSY. (Measured with KiCad 10.0.6 and 10.0.8: the next request
+        waits for the end of the fill and gets no AS_BUSY.)"""
+        command = self._k.board_commands.RefillZones()
+        command.board.CopyFrom(board.document)
+        self.send(command, _empty())
+
+    def copper_zones(self, board: Board) -> tuple[int, int]:
+        """Return the number of the copper zones, and of the filled copper zones
+        (GetItems: the field filled of each zone of the type ZT_COPPER)."""
+        k = self._k
+        command = k.editor_commands.GetItems()
+        command.header.document.CopyFrom(board.document)
+        command.types.append(k.object_type.KOT_PCB_ZONE)
+        answer = self.send(command, k.editor_commands.GetItemsResponse)
+        copper = filled = 0
+        for item in answer.items:
+            zone = k.unpack_any(item)
+            if zone.type == k.zone_copper:
+                copper += 1
+                filled += bool(zone.filled)
+        return copper, filled
 
     # The selection of the PCB editor. The selection is no change of the board: no
     # commit, no undo step.
@@ -625,7 +859,9 @@ def _open_documents(kicad: KiCad, errors, document_type) -> list:
         raise
 
 
-def _read_state(kicad: KiCad, k: _Kipy, version: str | None = None) -> KicadState:
+def _read_state(
+    kicad: KiCad, k: _Kipy, version: str | None = None, timeout_ms: int = TIMEOUT_MS
+) -> KicadState:
     """Read the version and the open editors of the running KiCad."""
     errors = k.errors
     try:
@@ -638,7 +874,7 @@ def _read_state(kicad: KiCad, k: _Kipy, version: str | None = None) -> KicadStat
         )
         schematic_open = bool(_open_documents(kicad, errors, k.document_type.DOCTYPE_SCHEMATIC))
     except (errors.ConnectionError, errors.ApiError) as error:
-        raise _translate(error, errors, "GetVersion and GetOpenDocuments") from None
+        raise _translate(error, errors, "GetVersion and GetOpenDocuments", timeout_ms) from None
     return KicadState(version, rules, boards, schematic_open)
 
 
@@ -648,7 +884,7 @@ def _read_state(kicad: KiCad, k: _Kipy, version: str | None = None) -> KicadStat
 _SESSION_LOCK = threading.RLock()
 
 
-def _new_client(k: _Kipy):
+def _new_client(k: _Kipy, timeout_ms: int):
     """Make the client of kicad-python for one session: its own client name, the socket
     of socket_path, and the token of kicad-python 0.8.0 (kipy/kicad.py,
     _default_kicad_token)."""
@@ -656,15 +892,16 @@ def _new_client(k: _Kipy):
         socket_path()[0],
         f"kicad-workbench-{os.getpid()}-{uuid.uuid4().hex[:8]}",
         os.environ.get("KICAD_API_TOKEN", ""),
-        TIMEOUT_MS,
+        timeout_ms,
     )
 
 
 @contextmanager
-def open_session() -> Iterator[IpcSession]:
+def open_session(timeout_ms: int = TIMEOUT_MS) -> Iterator[IpcSession]:
     """Connect to the running KiCad, and read its version and its open editors.
 
-    Call it in a thread (asyncio.to_thread): each request waits for KiCad.
+    Call it in a thread (asyncio.to_thread): each request waits for KiCad, up to
+    timeout_ms for each answer.
 
     Each session has its own connection and its own client name: KiCad keeps a commit
     for each client name (API_HANDLER_EDITOR::m_commits), thus a commit that a session
@@ -678,11 +915,11 @@ def open_session() -> Iterator[IpcSession]:
     """
     k = _import_kipy()
     with _SESSION_LOCK:
-        client = _new_client(k)
+        client = _new_client(k, timeout_ms)
         try:
             kicad = k.module.KiCad.from_client(client)
-            state = _read_state(kicad, k)
-            yield IpcSession(k, client, kicad, state)
+            state = _read_state(kicad, k, timeout_ms=timeout_ms)
+            yield IpcSession(k, client, kicad, state, timeout_ms)
         finally:
             _close(client)
 
@@ -690,8 +927,12 @@ def open_session() -> Iterator[IpcSession]:
 def _close(client) -> None:
     """Close the socket of a client of kicad-python 0.8.0.
 
-    KiCadClient has no close method: its socket is the attribute _conn while the
-    property connected is true (kipy/client.py). The extra "ipc" pins this version.
+    A limit of kicad-python 0.8.0, not of the IPC API: KiCadClient has no documented
+    close method, thus the client uses the private attribute _conn (the socket, while
+    the property connected is true, kipy/client.py). Without the close, the socket stays
+    open (measured in the review of step 3A). kicad-python master has KiCadClient.close
+    and KiCad.close: use them, and remove this function, with the first release that
+    has them. The extra "ipc" pins 0.8.0.
     """
     if client.connected:
         client._conn.close()

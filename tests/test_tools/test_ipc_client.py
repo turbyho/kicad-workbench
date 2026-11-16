@@ -8,6 +8,8 @@ kicad-python.
 """
 
 import asyncio
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,9 +18,17 @@ pytest.importorskip("kipy")
 
 from google.protobuf.any_pb2 import Any  # noqa: E402
 from kipy.errors import ApiError, ConnectionError  # noqa: E402
-from kipy.proto.board import board_types_pb2  # noqa: E402
+from kipy.proto.board import (
+    board_commands_pb2,  # noqa: E402
+    board_types_pb2,  # noqa: E402
+)
 from kipy.proto.board.board_types_pb2 import BoardLayer  # noqa: E402
-from kipy.proto.common.types import DocumentType, KiCadObjectType  # noqa: E402
+from kipy.proto.common.commands import editor_commands_pb2  # noqa: E402
+from kipy.proto.common.types import (  # noqa: E402
+    DocumentType,
+    KiCadObjectType,
+    base_types_pb2,
+)
 
 from kicad_workbench.tools import ipc  # noqa: E402
 from kicad_workbench.utils import ipc_client  # noqa: E402
@@ -49,6 +59,8 @@ def footprint(item_id: str, reference: str, x_mm: float = 1.5) -> Any:
     item.layer = BoardLayer.BL_F_Cu
     item.position.x_nm = int(x_mm * 1_000_000)
     item.position.y_nm = -2_000_000
+    # KiCad 10.0.6 gives the lock state of each footprint (measured: LS_UNLOCKED).
+    item.locked = 1  # LS_UNLOCKED
     return packed(item)
 
 
@@ -82,6 +94,7 @@ def zone(item_id: str, net: str) -> Any:
     item = board_types_pb2.Zone()
     item.id.value = item_id
     item.name = "fill | top"
+    item.type = board_types_pb2.ZT_COPPER
     item.copper_settings.net.name = net
     item.layers.append(BoardLayer.BL_F_Cu)
     return packed(item)
@@ -116,6 +129,14 @@ class FakeKiCad:
             "+3V3": [],
         }
         self.other_items = {"table-1": Any()}  # an item with no Serialize (no data)
+        self.zones = [zone("zone-1", "/SDA"), zone("zone-2", "GND")]
+        self.flip_directions: list[int] = []
+        self.saves = 0
+        self.save_version = 20260206
+        self.refills = 0
+        # The number of AS_BUSY answers after RefillZones (board_commands.proto: KiCad
+        # gives AS_BUSY to each request until the fill has completed).
+        self.busy_after_refill = 0
         self.selected: list[str] = []
         self.clients: list = []
         self.requests: list[str] = []
@@ -131,6 +152,14 @@ class FakeKiCad:
             if info(item)[0] == wanted:
                 return item
         return self.other_items.get(wanted)
+
+    def _footprint(self, wanted: str):
+        for index, item in enumerate(self.footprints):
+            message = board_types_pb2.FootprintInstance()
+            item.Unpack(message)
+            if message.id.value == wanted:
+                return index, message
+        return None
 
     def answer(self, command, response_type):
         name = type(command).__name__
@@ -152,10 +181,45 @@ class FakeKiCad:
         if self.busy and name != "GetSelection":
             # GetSelection does not call checkForBusy (KiCad 10.0.6).
             raise ApiError("KiCad returned error: busy", code=ipc_client.AS_BUSY)
+        if self.refills and self.busy_after_refill and name != "RefillZones":
+            self.busy_after_refill -= 1
+            raise ApiError("KiCad returned error: busy", code=ipc_client.AS_BUSY)
         response = response_type()
-        if name == "GetItems":
+        if name == "GetItems" and list(command.types) == [KiCadObjectType.KOT_PCB_ZONE]:
+            response.items.extend(self.zones)
+        elif name == "GetItems":
             assert list(command.types) == [KiCadObjectType.KOT_PCB_FOOTPRINT]
             response.items.extend(self.footprints)
+        elif name == "FlipItems":
+            self.flip_directions.append(command.direction)
+            for item in command.items:
+                result = response.flipped_items.add()
+                found = self._footprint(item.value)
+                if found is None:
+                    result.status.code = editor_commands_pb2.ISC_NONEXISTENT
+                    result.status.error_message = f"an item with UUID {item.value} does not exist"
+                    continue
+                index, message = found
+                message.layer = (
+                    BoardLayer.BL_B_Cu
+                    if message.layer == BoardLayer.BL_F_Cu
+                    else BoardLayer.BL_F_Cu
+                )
+                self.footprints[index] = packed(message)
+                result.item.CopyFrom(packed(message))
+                result.status.code = editor_commands_pb2.ISC_OK
+        elif name == "SaveDocument":
+            self.saves += 1
+            self.board_path.write_text(
+                f"(kicad_pcb (version {self.save_version}))", encoding="utf-8"
+            )
+        elif name == "RefillZones":
+            self.refills += 1
+            for index, item in enumerate(self.zones):
+                message = board_types_pb2.Zone()
+                item.Unpack(message)
+                message.filled = True
+                self.zones[index] = packed(message)
         elif name == "GetNets":
             for net in self.net_items:
                 response.nets.add().name = net
@@ -172,8 +236,6 @@ class FakeKiCad:
                     for item in self.net_items.get(net.name, [])
                     if info(item)[1] in NET_SELECTION_KINDS
                 )
-        elif name == "GetBoundingBox":
-            assert list(command.items) == []
         elif name == "ClearSelection":
             self.selected = []
         elif name in ("AddToSelection", "RemoveFromSelection", "GetSelection"):
@@ -230,9 +292,10 @@ def kicad(monkeypatch, tmp_path):
     fake = FakeKiCad(board)
     real_new_client = ipc_client._new_client
 
-    def new_client(k):
-        real = real_new_client(k)
+    def new_client(k, timeout_ms):
+        real = real_new_client(k, timeout_ms)
         client = FakeClient(fake, real._socket_path, real._client_name)
+        client.timeout_ms = timeout_ms
         fake.clients.append(client)
         return client
 
@@ -260,7 +323,7 @@ def test_kicad_does_not_answer(kicad):
     with pytest.raises(
         IpcError,
         match=r"did not answer the request GetVersion and GetOpenDocuments \(Error receiving "
-        r"reply from KiCad: Timed out\)\. KiCad waits 2\.0 s .* KiCad stopped or closed",
+        r"reply from KiCad: Timed out\)\. KiCad waits 30\.0 s .* KiCad stopped or closed",
     ):
         with ipc_client.open_session():
             pass
@@ -269,6 +332,22 @@ def test_kicad_does_not_answer(kicad):
 def test_kicad_busy(kicad):
     kicad.failure = ApiError("KiCad returned error: busy", code=ipc_client.AS_BUSY)
     with pytest.raises(IpcError, match="KiCad is busy: a dialog is open"):
+        with ipc_client.open_session():
+            pass
+
+
+def test_kicad_not_ready(kicad):
+    """KiCad 10.0.8 answers AS_NOT_READY while the first-run wizard is open (measured)."""
+    kicad.failure = ApiError("KiCad returned error: KiCad is not ready to reply", code=4)
+    with pytest.raises(IpcError, match="KiCad is not ready to answer: it starts, or a dialog"):
+        with ipc_client.open_session():
+            pass
+
+
+def test_a_socket_address_that_nng_refuses(kicad):
+    """A path of a Unix socket of more than 108 bytes (measured with nng of pynng 0.9.0)."""
+    kicad.failure = ConnectionError("Failed to connect to KiCad: Address invalid")
+    with pytest.raises(IpcError, match=r"is not a valid address for nng .* must be short"):
         with ipc_client.open_session():
             pass
 
@@ -292,7 +371,7 @@ def test_the_state_of_kicad(kicad):
         assert session.state.version == "10.0.6"
         assert session.state.boards == (kicad.board_path,)
         assert not session.state.schematic_open
-        assert session.state.write_problem() is None
+        assert session.state.commit_problem() is None
         assert session.client.client_name.startswith("kicad-workbench-")
 
 
@@ -342,7 +421,7 @@ def test_a_request_with_no_editor(kicad):
         board = session.board(kicad.board_path)
         kicad.board_path = None
         with pytest.raises(
-            IpcError, match="No open editor of KiCad answers the request GetItems. The PCB"
+            IpcError, match=r"KiCad did not handle the request GetItems \(AS_UNHANDLED\)"
         ):
             session.footprints(board)
 
@@ -362,9 +441,9 @@ def test_an_other_board(kicad, tmp_path):
 def test_the_guard_of_bug_24966(kicad):
     kicad.schematic_open = True
     with ipc_client.open_session() as session:
-        assert "KiCad bug #24966" in session.state.write_problem()
+        assert "KiCad bug #24966" in session.state.commit_problem()
         with pytest.raises(IpcError, match="close the schematic editor"):
-            session.check_write()
+            session.check_commit()
 
 
 def test_the_guard_reads_the_state_again(kicad):
@@ -372,7 +451,7 @@ def test_the_guard_reads_the_state_again(kicad):
     with ipc_client.open_session() as session:
         kicad.schematic_open = True
         with pytest.raises(IpcError, match="KiCad bug #24966"):
-            session.check_write()
+            session.check_commit()
 
 
 # The items of the board.
@@ -382,7 +461,7 @@ def test_describe_items(kicad):
     k = ipc_client._import_kipy()
     item = ipc_client.describe_item(k, footprint("fp-1", "R1"))
     assert item == ipc_client.BoardItem(
-        "FootprintInstance", "fp-1", "R1", "", "F.Cu", (1_500_000, -2_000_000)
+        "FootprintInstance", "fp-1", "R1", "", "F.Cu", (1_500_000, -2_000_000), locked=False
     )
     item = ipc_client.describe_item(k, track("trk-1", "/SDA"))
     assert (item.kind, item.net, item.layer, item.position) == (
@@ -424,8 +503,8 @@ def test_ipc_status(kicad, tmp_path):
     assert f"- PCB editor: open, board `{kicad.board_path}`" in text
     assert "- Schematic editor: open" in text
     assert "✅ open in the PCB editor" in text
-    assert "- KiCad busy: no" in text
-    assert "- Writes: ❌ not possible now. KiCad 10.0.6 stops on a commit" in text
+    assert "- Writes: ✅ the board is open in the PCB editor. KiCad refuses each" in text
+    assert "- Commits: ❌ not possible now. KiCad 10.0.6 stops on a commit" in text
     assert "fixed in KiCad 10.0.7" in text
     assert "## Limits of KiCad 10.0.6" in text
     assert "| KiCad 11.0 (PlaceFootprintFromLibrary, not released) |" in text
@@ -434,7 +513,8 @@ def test_ipc_status(kicad, tmp_path):
 
 def test_ipc_status_writes_possible(kicad):
     text = run(ipc.ipc_status())
-    assert "- Writes: ✅ possible now" in text
+    assert "- Writes: ✅ the board is open" in text
+    assert "- Commits: ✅ possible now" in text
     assert "Known KiCad versions of the IPC tools: 10.0.6." in text
 
 
@@ -449,16 +529,17 @@ def test_ipc_status_with_an_other_board(kicad, tmp_path):
     text = run(ipc.ipc_status(str(tmp_path / "other.kicad_pcb")))
     assert "other.kicad_pcb`: ❌ The PCB editor has the board" in text
     assert "- Writes: ❌ not possible now. The PCB editor has the board" in text
-    assert "✅" not in text
+    assert "Writes: ✅" not in text
 
 
 def test_ipc_status_with_a_dialog(kicad):
-    """A modal dialog: GetVersion and GetOpenDocuments answer, GetBoundingBox gives
-    AS_BUSY (handleGetBoundingBox calls checkForBusy first)."""
+    """A modal dialog: the API has no request that tells if KiCad is busy (each request
+    can get AS_BUSY). The status uses no request of the editor for it, and tells that
+    KiCad refuses a request while it is busy."""
     kicad.busy = True
     text = run(ipc.ipc_status())
-    assert "- Board: ❌ KiCad is busy" in text
-    assert "- Writes: ❌ not possible now. KiCad is busy" in text
+    assert "KiCad refuses each request while it is busy" in text
+    assert "GetBoundingBox" not in kicad.requests
 
 
 def test_ipc_status_with_no_kicad(kicad):
@@ -599,3 +680,481 @@ def test_select_when_kicad_is_busy(kicad):
     text = run(ipc.ipc_select_items(str(kicad.board_path), ["R1"]))
     assert text.startswith("❌ KiCad is busy")
     assert kicad.selected == ["fp-u3"]
+
+
+# ipc_place_footprints.
+
+
+def place(kicad, placements, **kwargs):
+    return run(
+        ipc.ipc_place_footprints(
+            str(kicad.board_path), [ipc.FootprintPlacement(**p) for p in placements], **kwargs
+        )
+    )
+
+
+def layer_of(kicad, reference):
+    for item in kicad.footprints:
+        message = board_types_pb2.FootprintInstance()
+        item.Unpack(message)
+        if message.reference_field.text.text.text == reference:
+            return BoardLayer.Name(message.layer)
+    return None
+
+
+@pytest.fixture
+def flip_setting(monkeypatch, tmp_path):
+    """The settings folder of KiCad with pcbnew.json (editing.flip_left_right)."""
+
+    def write(value):
+        folder = tmp_path / "config" / "10.0"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "pcbnew.json").write_text(
+            json.dumps({"editing": {"flip_left_right": value}}), encoding="utf-8"
+        )
+
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "config"))
+    return write
+
+
+def test_place_a_footprint_on_the_other_side(kicad, flip_setting):
+    flip_setting(True)
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}, {"reference": "U3", "side": "top"}])
+    assert text.startswith('✅ Flipped 1 footprint in one undo step ("Flipped items via API").')
+    assert "Flip: top/bottom around the position of the footprint (editing.flip_left_right" in text
+    assert "| R1 | F.Cu | B.Cu | 1.5, -2 |  |" in text
+    assert "| U3 | F.Cu | F.Cu |" in text
+    assert layer_of(kicad, "R1") == "BL_B_Cu"
+    assert kicad.flip_directions == [board_commands_pb2.BFD_TOP_BOTTOM]
+
+
+def test_the_flip_direction_of_the_setting(kicad, flip_setting):
+    """KiCad stores LEFT_RIGHT (0) as false: the name of the key says the reverse."""
+    flip_setting(False)
+    place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert kicad.flip_directions == [board_commands_pb2.BFD_LEFT_RIGHT]
+
+
+def test_the_flip_direction_with_no_setting(kicad, monkeypatch, tmp_path):
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "none"))
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert kicad.flip_directions == [board_commands_pb2.BFD_LEFT_RIGHT]
+    assert "(the default of KiCad (" in text
+
+
+def test_the_flip_direction_of_the_argument(kicad, flip_setting):
+    flip_setting(False)
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}], flip_direction="top_bottom")
+    assert kicad.flip_directions == [board_commands_pb2.BFD_TOP_BOTTOM]
+    assert "(the argument flip_direction)" in text
+
+
+def test_no_flip_when_the_side_is_the_same(kicad, flip_setting):
+    flip_setting(True)
+    text = place(kicad, [{"reference": "R1", "side": "top"}])
+    assert text.startswith("✅ No change: each footprint is on the side of the request.")
+    assert "FlipItems" not in kicad.requests
+
+
+def test_a_position_needs_a_later_kicad(kicad):
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}, {"reference": "U3", "x_mm": 5}])
+    assert text.startswith(
+        "❌ The tool cannot change the position, the rotation or the lock of a footprint: "
+        "KiCad 10.0.6 cannot change them with no loss of data"
+    )
+    assert "Asked: U3: x_mm." in text
+    assert layer_of(kicad, "R1") == "BL_F_Cu"
+    assert "FlipItems" not in kicad.requests
+
+
+@pytest.mark.parametrize(
+    "placements, message",
+    [
+        ([], "placements is empty."),
+        (
+            [{"reference": "R9", "side": "top"}],
+            "The tool changed nothing: R9: the board has no footprint with this reference "
+            "(references are case-sensitive).",
+        ),
+        (
+            [{"reference": "R1", "side": "top"}, {"reference": "R1", "side": "bottom"}],
+            "placements has more than one entry for R1.",
+        ),
+    ],
+)
+def test_place_arguments(kicad, placements, message):
+    text = place(kicad, placements)
+    assert text.startswith(f"❌ {message}")
+    assert "FlipItems" not in kicad.requests
+
+
+def test_place_a_reference_on_two_footprints(kicad):
+    kicad.footprints.append(footprint("fp-r1b", "R1"))
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith("❌ The tool changed nothing: R1: 2 footprints have this reference")
+
+
+def test_place_with_the_schematic_editor_open(kicad, flip_setting):
+    """FlipItems has no handler in API_HANDLER_SCH of KiCad 10.0.6: it needs no guard
+    (measured with the schematic editor open, ipc_write_check.py)."""
+    flip_setting(True)
+    kicad.schematic_open = True
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith("✅ Flipped 1 footprint")
+
+
+def test_a_flip_that_kicad_refuses(kicad, flip_setting, monkeypatch):
+    flip_setting(True)
+    real = kicad.answer
+
+    def answer(command, response_type):
+        if type(command).__name__ == "FlipItems":
+            response = response_type()
+            result = response.flipped_items.add()
+            result.status.code = editor_commands_pb2.ISC_INVALID_TYPE
+            result.status.error_message = "items of type X cannot be flipped"
+            return response
+        return real(command, response_type)
+
+    kicad.answer = answer
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith("⚠️ KiCad did not flip 1 footprint.")
+    assert "Messages of KiCad: items of type X cannot be flipped." in text
+    assert "| R1 | F.Cu | F.Cu | 1.5, -2 | not flipped |" in text
+
+
+# ipc_save_board.
+
+
+def test_save_the_board(kicad):
+    kicad.board_path.write_text("(kicad_pcb (version 20260206))", encoding="utf-8")
+    text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    assert text.startswith(f"✅ KiCad saved the board `{kicad.board_path}`")
+    assert "⚠️" not in text
+    assert kicad.saves == 1
+
+
+def test_save_a_board_of_an_older_version(kicad):
+    """KiCad writes its own version: an older file gets the warning (CLAUDE.md rule 6)."""
+    kicad.board_path.write_text("(kicad_pcb (version 20241229))", encoding="utf-8")
+    text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    assert "⚠️ KiCad changed the file version from 20241229 to 20260206 (KiCad 10.0)." in text
+    assert "KiCad 9.0 cannot open the board now." in text
+
+
+def test_a_save_that_changes_no_file(kicad, monkeypatch):
+    real = kicad.answer
+
+    def answer(command, response_type):
+        if type(command).__name__ == "SaveDocument":
+            return response_type()
+        return real(command, response_type)
+
+    kicad.answer = answer
+    text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    assert text.startswith("⚠️ KiCad answered the save, but the file")
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root can write each file"
+)
+def test_save_into_a_read_only_file(kicad):
+    """SavePcbFile opens an error dialog for a file that it cannot write: the tool checks
+    the file first."""
+    kicad.board_path.chmod(0o444)
+    try:
+        text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    finally:
+        kicad.board_path.chmod(0o644)
+    assert text.startswith(f"❌ {kicad.board_path} is not writable. The tool did not save.")
+    assert kicad.saves == 0
+
+
+# ipc_refill_zones.
+
+
+def test_refill_the_zones(kicad):
+    text = run(ipc.ipc_refill_zones(str(kicad.board_path)))
+    assert text.startswith('ℹ️ KiCad ended "Fill All Zones" in ')
+    assert "2 of 2 copper zones have a fill (before: 0)." in text
+    assert "cannot see if the user cancelled the fill" in text
+    assert kicad.refills == 1
+    assert kicad.clients[0].timeout_ms == 120_000
+
+
+def test_refill_with_a_timeout(kicad):
+    """Each answer of the session waits the longer of TIMEOUT_MS and timeout_s."""
+    run(ipc.ipc_refill_zones(str(kicad.board_path), timeout_s=5))
+    assert kicad.clients[0].timeout_ms == ipc_client.TIMEOUT_MS
+    run(ipc.ipc_refill_zones(str(kicad.board_path), timeout_s=600))
+    assert kicad.clients[1].timeout_ms == 600_000
+    text = run(ipc.ipc_refill_zones(str(kicad.board_path), timeout_s=0))
+    assert text.startswith("❌ timeout_s must be 1 to 3600, not 0.")
+
+
+def test_a_refill_with_as_busy(kicad, monkeypatch):
+    """board_commands.proto: AS_BUSY to each request until the fill has completed. The
+    tool repeats the request."""
+    monkeypatch.setattr(ipc, "REFILL_POLL_S", 0)
+    kicad.busy_after_refill = 3
+    text = run(ipc.ipc_refill_zones(str(kicad.board_path)))
+    assert text.startswith('ℹ️ KiCad ended "Fill All Zones" in ')
+    assert "2 of 2 copper zones have a fill (before: 0)." in text
+    assert kicad.requests.count("GetItems") == 2 + 3
+
+
+def test_a_refill_that_stays_busy(kicad, monkeypatch):
+    monkeypatch.setattr(ipc, "REFILL_POLL_S", 0.01)
+    kicad.busy_after_refill = 10**9
+    text = run(ipc.ipc_refill_zones(str(kicad.board_path), timeout_s=1))
+    assert text.startswith("❌ KiCad started the fill, but it was still busy after 1 s")
+
+
+def test_a_refill_when_kicad_is_busy(kicad):
+    """A dialog: RefillZones gets AS_BUSY, and the tool starts nothing."""
+    kicad.busy = True
+    text = run(ipc.ipc_refill_zones(str(kicad.board_path)))
+    assert text.startswith("❌ KiCad is busy")
+    assert kicad.refills == 0
+
+
+def test_a_refill_that_does_not_end_in_time(kicad):
+    """KiCad 10.0.6 and 10.0.8: the request after RefillZones waits for the end of the
+    fill; a fill longer than the timeout gives no answer."""
+    real = kicad.answer
+    calls = []
+
+    def answer(command, response_type):
+        calls.append(type(command).__name__)
+        if type(command).__name__ == "GetItems" and "RefillZones" in calls:
+            raise ConnectionError("Error receiving reply from KiCad: Timed out")
+        return real(command, response_type)
+
+    kicad.answer = answer
+    text = run(ipc.ipc_refill_zones(str(kicad.board_path), timeout_s=3))
+    assert text.startswith("❌ KiCad started the fill, but it gave no answer in 3 s.")
+    assert "look at KiCad" in text
+
+
+def test_a_position_with_no_limit_of_data_loss(kicad, monkeypatch):
+    """A KiCad that keeps the data (10.0.8): the move still needs rules of the tool."""
+    rules = ipc_client.IPC_RULES[(10, 0, 6)]
+    without = ipc_client.IpcRules(
+        rules.version, tuple(k for k in rules.limits if k != "footprint_update_loses_data"), ""
+    )
+    monkeypatch.setitem(ipc_client.IPC_RULES, (10, 0, 6), without)
+    text = place(kicad, [{"reference": "U3", "rotation_deg": 90}])
+    assert text.startswith(
+        "❌ The tool cannot change the position, the rotation or the lock of a footprint: "
+        "the tool has no rules for them yet: The API has no command"
+    )
+
+
+def locked_footprint(item_id, reference):
+    message = board_types_pb2.FootprintInstance()
+    footprint(item_id, reference).Unpack(message)
+    message.locked = 2  # LS_LOCKED
+    return packed(message)
+
+
+def test_a_locked_footprint(kicad, flip_setting):
+    """The Flip of the PCB editor leaves out a locked footprint, except with "Override
+    locks" (FilterCollectorForLockedItems of KiCad 10.0.6)."""
+    flip_setting(True)
+    kicad.footprints[0] = locked_footprint("fp-r1", "R1")
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith("❌ The tool changed nothing: R1: the footprint is locked")
+    assert "case-sensitive" not in text
+    assert "FlipItems" not in kicad.requests
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}], override_locks=True)
+    assert text.startswith("✅ Flipped 1 footprint")
+    assert "| R1 | F.Cu | B.Cu | 1.5, -2 | locked (override_locks) |" in text
+
+
+def test_a_locked_footprint_on_its_side(kicad):
+    kicad.footprints[0] = locked_footprint("fp-r1", "R1")
+    text = place(kicad, [{"reference": "R1", "side": "top"}])
+    assert text.startswith("✅ No change")
+
+
+def test_no_setting_read_with_no_flip(kicad, monkeypatch):
+    def fail(version):
+        raise AssertionError("no read of pcbnew.json")
+
+    monkeypatch.setattr(ipc, "flip_direction_setting", fail)
+    assert place(kicad, [{"reference": "R1", "side": "top"}]).startswith("✅ No change")
+
+
+def test_a_setting_file_that_is_not_json(kicad, monkeypatch, tmp_path):
+    """JSON_SETTINGS::LoadFromFile keeps the defaults for a file that it cannot parse."""
+    folder = tmp_path / "config" / "10.0"
+    folder.mkdir(parents=True)
+    (folder / "pcbnew.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path / "config"))
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert kicad.flip_directions == [board_commands_pb2.BFD_LEFT_RIGHT]
+    assert "the default of KiCad, which cannot read" in text
+
+
+def test_a_partial_flip(kicad, flip_setting):
+    flip_setting(True)
+    real = kicad.answer
+
+    def answer(command, response_type):
+        response = real(command, response_type)
+        if type(command).__name__ == "FlipItems":
+            response.flipped_items[1].status.code = editor_commands_pb2.ISC_INVALID_TYPE
+            response.flipped_items[1].status.error_message = "refused"
+        return response
+
+    kicad.answer = answer
+    placements = [{"reference": "R1", "side": "bottom"}, {"reference": "U3", "side": "bottom"}]
+    text = place(kicad, placements)
+    assert text.startswith(
+        "⚠️ KiCad did not flip 1 footprint. It flipped 1 footprint in one undo step "
+        '("Flipped items via API").'
+    )
+    assert "Messages of KiCad: refused." in text
+    assert "| U3 | F.Cu | F.Cu | 2.25, -2 | not flipped |" in text
+
+
+def test_flip_results_in_an_other_order(kicad, flip_setting):
+    """board_commands.proto gives no order of the results: the item of each result
+    gives the ID."""
+    flip_setting(True)
+    real = kicad.answer
+
+    def answer(command, response_type):
+        response = real(command, response_type)
+        if type(command).__name__ == "FlipItems":
+            results = list(response.flipped_items)[::-1]
+            del response.flipped_items[:]
+            response.flipped_items.extend(results)
+        return response
+
+    kicad.answer = answer
+    placements = [{"reference": "R1", "side": "bottom"}, {"reference": "U3", "side": "bottom"}]
+    text = place(kicad, placements)
+    assert text.startswith("✅ Flipped 2 footprints")
+    assert "| R1 | F.Cu | B.Cu | 1.5, -2 |  |" in text
+    assert "| U3 | F.Cu | B.Cu | 2.25, -2 |  |" in text
+
+
+def test_a_flip_with_an_error_status(kicad, flip_setting):
+    """A documented error of the overall status (ItemRequestStatus) stops the tool."""
+    flip_setting(True)
+    real = kicad.answer
+
+    def answer(command, response_type):
+        response = real(command, response_type)
+        if type(command).__name__ == "FlipItems":
+            response.status = base_types_pb2.IRS_DOCUMENT_NOT_FOUND
+        return response
+
+    kicad.answer = answer
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith("❌ KiCad refused the flip (IRS_DOCUMENT_NOT_FOUND).")
+    assert "Traceback" not in text
+
+
+def test_save_checks_the_project_file_of_the_document(kicad, tmp_path):
+    """The project file comes from the project of the open document (ProjectSpecifier),
+    not from the name of the board."""
+    project = kicad.board_path.parent / f"{kicad.board_path.stem}.kicad_pro"
+    project.write_text("{}", encoding="utf-8")
+    project.chmod(0o444)
+    try:
+        text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    finally:
+        project.chmod(0o644)
+    if os.geteuid() != 0:
+        assert text.startswith(f"❌ {project} is not writable. The tool did not save.")
+        assert kicad.saves == 0
+
+
+def test_save_with_an_unreadable_version(kicad, monkeypatch):
+    versions = iter([20240108, None])
+    monkeypatch.setattr(ipc, "board_file_version", lambda path: next(versions))
+    text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    assert text.startswith("✅ KiCad saved the board")
+    assert "cannot read the file version of the saved board" in text
+    assert "None" not in text
+
+
+def test_a_footprint_with_no_lock_state(kicad, flip_setting):
+    """LS_UNKNOWN: the tool cannot know if the PCB editor flips it."""
+    flip_setting(True)
+    message = board_types_pb2.FootprintInstance()
+    footprint("fp-r1", "R1").Unpack(message)
+    message.locked = 0  # LS_UNKNOWN
+    kicad.footprints[0] = packed(message)
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith("❌ The tool changed nothing: R1: KiCad gave no lock state")
+    assert "FlipItems" not in kicad.requests
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}], override_locks=True)
+    assert text.startswith("✅ Flipped 1 footprint")
+
+
+def test_a_reference_with_an_unreadable_footprint(kicad, monkeypatch):
+    real = ipc_client.describe_item
+
+    def describe(k, item):
+        result = real(k, item)
+        if result.text == "R1":
+            return ipc_client.BoardItem(kind="Footprint", problem="cannot read")
+        return result
+
+    monkeypatch.setattr(ipc_client, "describe_item", describe)
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith(
+        "❌ The tool changed nothing: R1: no footprint that the tool can read has this "
+        "reference (references are case-sensitive; KiCad gave 1 footprint that the tool "
+        "cannot read)."
+    )
+
+
+def test_a_flip_result_that_the_tool_cannot_read(kicad, flip_setting, monkeypatch):
+    """An ISC_OK result with an item that the tool cannot read: the board changed, but
+    the tool cannot tell which footprint."""
+    flip_setting(True)
+    real = kicad.answer
+
+    def answer(command, response_type):
+        response = real(command, response_type)
+        if type(command).__name__ == "FlipItems":
+            response.flipped_items[0].item.Clear()
+        return response
+
+    kicad.answer = answer
+    text = place(kicad, [{"reference": "R1", "side": "bottom"}])
+    assert text.startswith("⚠️ KiCad flipped 1 item that the tool cannot read")
+    assert "The board did not change" not in text
+    assert "| R1 | F.Cu | F.Cu | 1.5, -2 | not known |" in text
+
+
+def test_save_a_new_board_file(kicad):
+    """A board with no file yet: no version to compare."""
+    kicad.board_path.unlink()
+    text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    assert text.startswith("✅ KiCad saved the board")
+    assert "changed the file version" not in text
+
+
+def test_a_save_with_the_same_bytes_and_time(kicad):
+    """A file system with coarse times: the same bytes and time, but a new inode."""
+    real = kicad.answer
+
+    def answer(command, response_type):
+        if type(command).__name__ == "SaveDocument":
+            status = kicad.board_path.stat()
+            data = kicad.board_path.read_bytes()
+            spare = kicad.board_path.with_suffix(".spare")
+            spare.write_bytes(data)
+            os.replace(spare, kicad.board_path)
+            os.utime(kicad.board_path, ns=(status.st_atime_ns, status.st_mtime_ns))
+            return response_type()
+        return real(command, response_type)
+
+    kicad.answer = answer
+    text = run(ipc.ipc_save_board(str(kicad.board_path)))
+    assert text.startswith("✅ KiCad saved the board")

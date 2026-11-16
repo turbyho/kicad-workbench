@@ -114,6 +114,11 @@ def _file_version(path: Path, head: str = "kicad_sch") -> int | None:
     return header_version(start.decode("utf-8", errors="replace"), head)
 
 
+def board_file_version(path: Path) -> int | None:
+    """Return the (version N) of the header of a board file, or None (_file_version)."""
+    return _file_version(path, "kicad_pcb")
+
+
 def _installed_kicad() -> str:
     """Return the version of the installed KiCad (kicad-cli version)."""
     version = kicad_cli_version_sync()

@@ -29,12 +29,12 @@ The tool changes the text of the symbol, then KiCad saves the library (kicad-cli
 """
 
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..errors import InputError
 from ..parsers.bus_names import unescape_string
+from ..parsers.kicad_fields import GENERATED_FIELD, WX_SPACE
 from ..parsers.lib_symbols import LibrarySymbol
 from ..parsers.sexpr import Node, edited, property_atoms, quote
 from .kicad_text import read_kicad_json
@@ -46,9 +46,6 @@ MANDATORY = ("Reference", "Value", "Footprint", "Datasheet", "Description")
 RESERVED = ("ki_keywords", "ki_description", "ki_fp_filters", "ki_locked")
 # FIELD_VALIDATOR: the characters of each field (the Reference also a space).
 _BAD_CHARS = {"\r": "carriage return", "\n": "line feed", "\t": "tab"}
-_GENERATED = re.compile(r"\$\{\w*\}")
-# wxString::Trim and Strip: ASCII white space (wxSafeIsspace).
-_SPACE = " \t\n\r\v\f"
 # DEFAULT_TEXT_SIZE (mils) and the size of the ki_ properties (SCH_FIELD default).
 DEFAULT_TEXT_SIZE_MILS = 50
 
@@ -110,7 +107,7 @@ def name_problem(name: str) -> str | None:
             f"The field name '{name}' is a property of the symbol in the file format: the "
             "tool refuses it. Use the arguments keywords and footprint_filters."
         )
-    if _GENERATED.fullmatch(name):
+    if GENERATED_FIELD.fullmatch(name):
         return f"The field '{name}' is a generated field: KiCad does not let you set its text."
     return None
 
@@ -163,7 +160,7 @@ def field_text(
 ) -> str:
     """The text that the grid gives a field (SetValue, SCH_FIELD::SetText)."""
     value = unescape_string(convert_path_to_file_uri(text, env, project, project_dir))
-    return value.strip(_SPACE) if name in MANDATORY else value
+    return value.strip(WX_SPACE) if name in MANDATORY else value
 
 
 def same_name(a: str, b: str) -> bool:
@@ -229,7 +226,7 @@ def change_fields(
         # FIELD_VALIDATOR checks the text of the cell; the grid trims it after.
         if bad := _bad_chars(raw_name, False):
             raise InputError(f"The field cannot contain {', '.join(bad)} character(s).")
-        name = _canonical(raw_name.strip(_SPACE))
+        name = _canonical(raw_name.strip(WX_SPACE))
         if problem := name_problem(name):
             raise InputError(problem)
         if any(same_name(name, other) for other in seen):

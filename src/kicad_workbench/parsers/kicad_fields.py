@@ -27,16 +27,29 @@ The parsers of KiCad 8 and 9, and of KiCad 10, find the mandatory fields
 
 import contextvars
 import functools
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..errors import KicadParseError
-from .kicad_versions import KICAD9, KicadFileError, schematic_version
+from .kicad_versions import KICAD9, KicadFileError, file_text, schematic_version
 from .sexpr import Node, property_field
 
 # The canonical names of the mandatory symbol fields of KiCad 8, 9 and 10, by ID.
 SYMBOL_FIELD_NAMES = ("Reference", "Value", "Footprint", "Datasheet", "Description")
 _SHEET_NAMES = ("Sheetname", "Sheetfile")
+
+
+# The white space that wxString::Strip and Trim remove (wxSafeIsspace: a character below
+# 127 that isspace takes).
+WX_SPACE = " \t\n\v\f\r"
+# IsGeneratedField of KiCad: a field name that is one text variable ("${NAME}"). The
+# text of a generated field is its name (SCH_FIELD::SetName).
+GENERATED_FIELD = re.compile(r"\$\{\w*\}")
+# The fields that KiCad removes at the load of a placed symbol: their text sets
+# exclude_from_sim (SIM_LEGACY_ENABLE_FIELD_V7 and SIM_LEGACY_ENABLE_FIELD,
+# SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol of KiCad 8, 9 and 10).
+SIM_LEGACY_FIELDS = ("Sim.Enable", "Spice_Netlist_Enabled")
 
 
 @dataclass(frozen=True)
@@ -152,26 +165,96 @@ def _next_free(field_id: int, used: set[int]) -> int:
     return field_id
 
 
+def mandatory_text(value: str, rules: FieldRules) -> str:
+    """Return the text of a mandatory field of a symbol or a sheet as KiCad 10 loads it.
+
+    KiCad 10 reads "~" of a file before EMPTY_TEXT_MARKER as an empty text
+    (parseSchField), and SCH_FIELD::SetText removes the white space at the two ends of
+    the text of a mandatory field (Strip, WX_SPACE). KiCad 8 and 9: the text of the
+    file, as before (new work has the rules of KiCad 10 only).
+
+    Args:
+        value: The text of the file (of a property, or of the (value ...) of an
+            instance: SCH_SYMBOL::SetValueFieldText calls SetText).
+    """
+    if rules.kicad != 10:
+        return value
+    return file_text(value, rules.file_version).strip(WX_SPACE)
+
+
+def _symbol_field_id(name: str, id_in_file: int | None, rules: FieldRules) -> int | None:
+    """Return the index in SYMBOL_FIELD_NAMES of the mandatory field that a property of
+    a placed symbol sets, or None for a user field (parseSchField).
+
+    KiCad 10 compares the name with no difference of case and ignores the IDs. KiCad 8
+    and 9: the (id N) of a user field makes the field a user field.
+    """
+    field_id = _name_id(name, SYMBOL_FIELD_NAMES, no_case=rules.kicad == 10)
+    if rules.kicad == 9 and id_in_file is not None and id_in_file >= len(SYMBOL_FIELD_NAMES):
+        return None
+    return field_id
+
+
+def is_mandatory_property(prop: Node, rules: FieldRules) -> bool:
+    """Return True when a (property ...) of a placed symbol sets a mandatory field."""
+    field = property_field(prop)
+    return field is not None and _symbol_field_id(field[0], _id_in_file(prop), rules) is not None
+
+
 def symbol_fields(symbol: Node, rules: FieldRules) -> dict[str, str]:
     """Return the mandatory fields of a placed symbol, by canonical name."""
     return {name: value for name, (value, _prop) in symbol_field_nodes(symbol, rules).items()}
 
 
 def symbol_field_nodes(symbol: Node, rules: FieldRules) -> dict[str, tuple[str, Node]]:
-    """Return the mandatory fields of a placed symbol, by canonical name: (the value,
-    the (property ...) that sets it). The last property of a field sets it."""
-    mandatory = len(SYMBOL_FIELD_NAMES)
+    """Return the mandatory fields of a placed symbol, by canonical name: (the text as
+    KiCad loads it (mandatory_text), the (property ...) that sets it). The last
+    property of a field sets it."""
     by_id: dict[int, tuple[str, Node]] = {}
     for name, value, id_in_file, prop in _properties(symbol):
-        field_id = _name_id(name, SYMBOL_FIELD_NAMES, no_case=rules.kicad == 10)
-        if field_id is None:
+        field_id = _symbol_field_id(name, id_in_file, rules)
+        if field_id is not None:
+            by_id[field_id] = (mandatory_text(value, rules), prop)
+    return {SYMBOL_FIELD_NAMES[i]: by_id[i] for i in range(len(SYMBOL_FIELD_NAMES)) if i in by_id}
+
+
+def symbol_user_fields(symbol: Node, rules: FieldRules) -> list[tuple[str, str]] | None:
+    """Return the user fields of a placed symbol as KiCad 10 loads them
+    (SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol): (name, text), in the order of
+    the file. None for KiCad 8 and 9: the server has no rules of their user fields
+    (new work has the rules of KiCad 10 only).
+
+    - A mandatory field (_symbol_field_id) is not a user field. The fields of the old
+      simulation flag are no fields.
+    - A user field with the name of an earlier field gets the name "<name>_1" to
+      "<name>_9" (the first free one, SCH_SYMBOL::GetField compares the exact names).
+      When these are taken too, it replaces the field "<name>_9" (*existing = *field)
+      and keeps its own name: then two fields have the same name.
+    - "~" of a file before EMPTY_TEXT_MARKER is an empty text (parseSchField). The text
+      of a user field keeps its white space (SCH_FIELD::SetText). A generated field
+      ("${NAME}") has its name as its text (SCH_FIELD::SetName).
+    """
+    if rules.kicad != 10:
+        return None
+    fields: list[tuple[str, str]] = []
+    count: dict[str, int] = {}
+    for name, value, id_in_file, _prop in _properties(symbol):
+        if name in SIM_LEGACY_FIELDS or _symbol_field_id(name, id_in_file, rules) is not None:
             continue
-        # KiCad 8 and 9: the (id N) of a user field makes the field a user
-        # field. KiCad 10 ignores the IDs.
-        if rules.kicad == 9 and id_in_file is not None and id_in_file >= mandatory:
-            continue
-        by_id[field_id] = (value, prop)
-    return {SYMBOL_FIELD_NAMES[i]: by_id[i] for i in range(mandatory) if i in by_id}
+        text = name if GENERATED_FIELD.fullmatch(name) else file_text(value, rules.file_version)
+        if count.get(name):
+            free = next((f"{name}_{i}" for i in range(1, 10) if not count.get(f"{name}_{i}")), None)
+            if free is None:
+                # The first field "<name>_9" (FindField gives the first match).
+                index = next(i for i, field in enumerate(fields) if field[0] == f"{name}_9")
+                count[f"{name}_9"] -= 1
+                count[name] += 1
+                fields[index] = (name, text)
+                continue
+            name = free
+        count[name] = count.get(name, 0) + 1
+        fields.append((name, text))
+    return fields
 
 
 def _sheet_field_id_v9(name: str, id_in_file: int | None) -> int:
@@ -214,7 +297,7 @@ def sheet_fields(sheet: Node, rules: FieldRules) -> dict[str, str]:
             if field_id is None:
                 field_id = _name_id(name, ("Sheet name", "Sheet file"), no_case=True)
             if field_id is not None:
-                result.setdefault(_SHEET_NAMES[field_id], value)
+                result.setdefault(_SHEET_NAMES[field_id], mandatory_text(value, rules))
         if _SHEET_NAMES[0] not in result:
             raise KicadParseError("Missing sheet name property: a sheet has no name field.")
         result.setdefault(_SHEET_NAMES[1], "")

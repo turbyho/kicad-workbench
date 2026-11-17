@@ -17,6 +17,7 @@ from .kicad_fields import (
     rules_for_file,
     sheet_fields,
     symbol_fields,
+    symbol_user_fields,
 )
 from .kicad_versions import (
     KICAD10,
@@ -48,7 +49,12 @@ class SchematicComponent:
     value: str
     library_id: str
     footprint: str | None = None
-    properties: dict[str, str] = field(default_factory=dict)
+    # Each field of the placed symbol (name, text): the mandatory fields, then the user
+    # fields in the order of the file (KiCad 10). A list: in KiCad 10 two user fields can
+    # have one name (kicad_fields.symbol_user_fields).
+    properties: list[tuple[str, str]] = field(default_factory=list)
+    # False: the server did not read the user fields (KiCad 8 and 9).
+    user_fields_read: bool = True
     position: tuple[float, float] = (0.0, 0.0)
     unit: int | None = None
     pins: list[dict[str, Any]] = field(default_factory=list)
@@ -57,13 +63,17 @@ class SchematicComponent:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SchematicComponent":
         """Create from a dict of the parser (_parse_file)."""
-        # Extract properties
-        properties = {}
-        for prop in data.get("properties", []):
-            key = prop.get("key", "")
-            value = prop.get("value", "")
-            if key and value:
-                properties[key] = value
+        # Each field of the symbol; an empty field too.
+        properties = [
+            (prop.get("key", ""), prop.get("value", ""))
+            for prop in data.get("properties", [])
+            if prop.get("key", "")
+        ]
+        # A user field never has the name of a mandatory field (symbol_user_fields),
+        # but two user fields can have one name: take the first field of a name.
+        first: dict[str, str] = {}
+        for key, text in properties:
+            first.setdefault(key, text)
 
         # Get position
         at = data.get("at", {})
@@ -74,10 +84,11 @@ class SchematicComponent:
 
         return cls(
             reference=data.get("reference", ""),
-            value=properties.get("Value", data.get("value", "")),
+            value=first.get("Value", data.get("value", "")),
             library_id=data.get("lib_id", ""),
-            footprint=properties.get("Footprint"),
+            footprint=first.get("Footprint") or None,
             properties=properties,
+            user_fields_read=data.get("user_fields_read", True),
             position=position,
             unit=unit,
             pins=data.get("pins", []),
@@ -773,10 +784,10 @@ class SchematicParser:
         if lib_id_node is None or _lib_key(symbol) in self._power_keys:
             return None
         lib_id = lib_id_node.value(0, "")
-        fields = self._symbol_fields(symbol)
+        rules = self._rules_for_fields()
+        fields = symbol_fields(symbol, rules)
         reference = fields.get("Reference", "")
         value = fields.get("Value", "")
-        footprint = fields.get("Footprint") or None
         x, y = _position(symbol)
 
         # The pins of the netlist: the library pins of the unit (UpdatePins), or the
@@ -794,12 +805,12 @@ class SchematicParser:
             if item is not None and item.value(0) in ("yes", "no"):
                 flags[flag] = item.value(0) == "yes"
 
+        # Each field of the placed symbol, as KiCad reads it: the mandatory fields
+        # (symbol_fields), then the user fields (symbol_user_fields, KiCad 10 only).
+        user_fields = symbol_user_fields(symbol, rules)
         properties = [
-            {"key": "Reference", "value": reference},
-            {"key": "Value", "value": value},
+            {"key": key, "value": text} for key, text in [*fields.items(), *(user_fields or [])]
         ]
-        if footprint:
-            properties.append({"key": "Footprint", "value": footprint})
 
         return {
             "start": symbol.start,
@@ -807,6 +818,7 @@ class SchematicParser:
             "reference": reference,
             "value": value,
             "properties": properties,
+            "user_fields_read": user_fields is not None,
             "at": {"x": x, "y": y},
             "pins": pins,
             "flags": flags,
@@ -921,7 +933,7 @@ class SchematicParser:
             {"key": "Reference", "value": reference},
             {"key": "Value", "value": value},
             *(p for p in data["properties"] if p["key"] not in ("Reference", "Value")),
-        ]
+        ]  # The reference and the value of the sheet path.
         return SchematicComponent.from_dict(data)
 
     def get_nets(self) -> list[SchematicNet]:

@@ -38,7 +38,12 @@ from pydantic import BaseModel, Field
 
 from ..errors import InputError
 from ..parsers.annotation import kicad_major, split_reference
-from ..parsers.kicad_fields import SYMBOL_FIELD_NAMES
+from ..parsers.kicad_fields import (
+    SIM_LEGACY_FIELDS,
+    SYMBOL_FIELD_NAMES,
+    WX_SPACE,
+    is_mandatory_property,
+)
 from ..parsers.kicad_versions import (
     EMPTY_TEXT_MARKER,
     KICAD8,
@@ -119,11 +124,16 @@ def _field_nodes(symbol: Node, name: str, kicad: int) -> list[Node]:
     return nodes
 
 
-def _field_text(prop: Node, version: int) -> str:
+def _field_text(prop: Node, record: SchematicFile) -> str:
     """Return the text of a field: "~" is empty only in a file older than
-    EMPTY_TEXT_MARKER (parseSchField)."""
+    EMPTY_TEXT_MARKER (parseSchField). KiCad 10: SCH_FIELD::SetText removes the white
+    space at the two ends of the text of a mandatory field (kicad_fields.mandatory_text).
+    """
     field = property_field(prop)
-    return file_text(field[1] if field else "", version)
+    text = file_text(field[1] if field else "", record.version)
+    if record.rules.kicad == 10 and is_mandatory_property(prop, record.rules):
+        return text.strip(WX_SPACE)
+    return text
 
 
 def default_text_size(project: Path, kicad: str | None) -> float:
@@ -248,10 +258,6 @@ class _Row:
     shared: str = ""
 
 
-# The fields that KiCad removes at the load of a symbol: their text sets
-# exclude_from_sim (SIM_LEGACY_ENABLE_FIELD_V7 and SIM_LEGACY_ENABLE_FIELD,
-# SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol of KiCad 8, 9 and 10).
-_LEGACY_SIM_FIELDS = ("Sim.Enable", "Spice_Netlist_Enabled")
 
 
 def _check_change(change: FieldChange, known_variants: set[str]) -> None:
@@ -282,7 +288,7 @@ def _check_change(change: FieldChange, known_variants: set[str]) -> None:
             # KiCad 10 reads a mandatory field with no difference of case, also in an
             # older file (parseSchField): "value" would replace the Value.
             raise InputError(f"Give the field name {canonical!r}, not {name!r}.")
-        if name in _LEGACY_SIM_FIELDS:
+        if name in SIM_LEGACY_FIELDS:
             raise InputError(
                 f"KiCad removes the field {name!r} when it loads the symbol and sets "
                 '"exclude from simulation" from its text. Set that flag in KiCad.'
@@ -570,7 +576,7 @@ def _plan_symbol(
             )
         _check_text(instance, record, value)
         if nodes:
-            before = _field_text(nodes[0], record.version)
+            before = _field_text(nodes[0], record)
             atoms = property_atoms(nodes[0])
             if before != value:
                 if len(atoms) > 1:
@@ -625,7 +631,7 @@ def _plan_variant(
         if nodes:
             # KiCad finds the field of a variant by the name of the field (GetName).
             name = property_field(nodes[0])[0]  # type: ignore[index]
-            symbol_text = texts.get(name, _field_text(nodes[0], record.version))
+            symbol_text = texts.get(name, _field_text(nodes[0], record))
         elif requested in texts:  # a new field of the symbol in this call
             name, symbol_text = requested, texts[requested]
         else:

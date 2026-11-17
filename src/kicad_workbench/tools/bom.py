@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
+from ..parsers.kicad_fields import GENERATED_FIELD
 from ..parsers.sexpr import SExprError
 from ..parsers.unit_fields import unit_conflicts
 from ..server import mcp
@@ -57,8 +58,6 @@ from ..utils.variants import variant_names
 from .library import cell
 
 DEFAULT_FIELDS = ("Reference", "Value", "Footprint", "Datasheet", "${QUANTITY}", "${DNP}", "*")
-# IsGeneratedField of KiCad: a field name that is one text variable.
-_GENERATED = re.compile(r"\$\{\w*\}")
 # The generated columns of JobExportBom of KiCad 10. kicad-cli of KiCad 10
 # also accepts their names with no "${}" (normalizeFieldName).
 _KICAD10_GENERATED = (
@@ -174,7 +173,7 @@ def field_columns(header: list[str], fields: BomFields) -> dict[str, int] | None
     start = len(header) - len(after)
     columns.update({f.name: start + i for i, f in enumerate(after)})
     for name, column in columns.items():
-        label = name[2:-1] if _GENERATED.fullmatch(name) else name
+        label = name[2:-1] if GENERATED_FIELD.fullmatch(name) else name
         if header[column] != label:
             return None
     return columns
@@ -189,7 +188,7 @@ def empty_columns(rows: list[list[str]], columns: dict[str, int]) -> list[str]:
     return [
         name
         for name, column in columns.items()
-        if not _GENERATED.fullmatch(name)
+        if not GENERATED_FIELD.fullmatch(name)
         and all(column >= len(row) or not row[column] for row in rows[1:])
     ]
 

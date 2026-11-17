@@ -16,6 +16,7 @@ from kicad_workbench.parsers.kicad_fields import (
     rules_for_file,
     sheet_fields,
     symbol_fields,
+    symbol_user_fields,
     with_field_rules_note,
 )
 from kicad_workbench.parsers.kicad_versions import KicadFileError
@@ -318,3 +319,84 @@ def test_sub_sheet_of_an_old_version_is_an_error(tmp_path):
         KicadFileError, match=r"sub\.kicad_sch: .*older than the version of KiCad 8\.0"
     ):
         SchematicParser(str(tmp_path / "sub.kicad_sch")).get_components()
+
+
+class TestUserFields:
+    """symbol_user_fields: parseSchematicSymbol, parseSchField and SCH_FIELD of KiCad
+    10.0.6."""
+
+    def test_a_repeated_name_gets_a_free_name(self):
+        symbol = item(
+            "symbol",
+            '"Reference" "U1"',
+            '"value" "10k"',
+            '"MPN" "A"',
+            '"MPN" "B"',
+            '"MPN" "C"',
+            '"Sim.Enable" "0"',
+            '"Spice_Netlist_Enabled" "N"',
+            '"${PART}" "ignored"',
+            '"Note" " keep "',
+        )
+        assert symbol_user_fields(symbol, KICAD_10) == [
+            ("MPN", "A"),
+            ("MPN_1", "B"),
+            ("MPN_2", "C"),
+            ("${PART}", "${PART}"),
+            ("Note", " keep "),
+        ]
+
+    def test_the_names_are_exact(self):
+        # SCH_SYMBOL::GetField compares the names with case.
+        symbol = item("symbol", '"MPN" "A"', '"mpn" "B"')
+        assert symbol_user_fields(symbol, KICAD_10) == [("MPN", "A"), ("mpn", "B")]
+
+    def test_after_nine_free_names_the_field_replaces_the_ninth(self):
+        names = ['"MPN" "0"'] + [f'"MPN_{i}" "{i}"' for i in range(1, 10)]
+        symbol = item("symbol", *names, '"MPN" "last"', '"MPN" "next"')
+        fields = symbol_user_fields(symbol, KICAD_10)
+        # *existing = *field: the field MPN_9 gets the name "MPN" and the text. The next
+        # "MPN" then finds MPN_9 free.
+        assert fields[0] == ("MPN", "0")
+        assert fields[9] == ("MPN", "last")
+        assert fields[10] == ("MPN_9", "next")
+        assert len(fields) == 11
+
+    def test_kicad_8_and_9_have_no_rules(self):
+        assert symbol_user_fields(item("symbol", '"MPN" "A"'), KICAD_9) is None
+
+    def test_empty_marker_of_an_old_file(self):
+        symbol = item("symbol", '"MPN" "~"')
+        assert symbol_user_fields(symbol, FieldRules(10, 20231120)) == [("MPN", "")]
+        assert symbol_user_fields(symbol, KICAD_10) == [("MPN", "~")]
+
+
+class TestMandatoryText:
+    """The text of a mandatory field: parseSchField ("~") and SCH_FIELD::SetText (the
+    white space) of KiCad 10.0.6. KiCad 8 and 9 keep the text of the file (no rules of
+    KiCad 8 and 9 for new work)."""
+
+    def test_kicad_10_old_file(self):
+        symbol = item("symbol", '"Datasheet" "~"', '"Value" " 10k\t"')
+        assert symbol_fields(symbol, FieldRules(10, 20231120)) == {
+            "Value": "10k",
+            "Datasheet": "",
+        }
+
+    def test_kicad_10_new_file_keeps_the_marker(self):
+        symbol = item("symbol", '"Datasheet" "~"')
+        assert symbol_fields(symbol, KICAD_10) == {"Datasheet": "~"}
+
+    def test_kicad_9_keeps_the_text(self):
+        symbol = item("symbol", '"Datasheet" "~"', '"Value" " 10k "')
+        assert symbol_fields(symbol, FieldRules(9, 20231120)) == {
+            "Value": " 10k ",
+            "Datasheet": "~",
+        }
+
+    def test_sheet_fields_of_kicad_10(self):
+        sheet = item("sheet", '"Sheetname" " Sub "', '"Sheetfile" "~"')
+        assert sheet_fields(sheet, FieldRules(10, 20231120)) == {
+            "Sheetname": "Sub",
+            "Sheetfile": "",
+        }

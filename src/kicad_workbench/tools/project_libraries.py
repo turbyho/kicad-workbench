@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
+from ..parsers.kicad_fields import WX_SPACE
 from ..parsers.kicad_versions import KICAD10, kicad_release, verified_triple
 from ..parsers.lib_symbols import read_library, symbol_chain
 from ..server import mcp
@@ -30,7 +31,6 @@ from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
 from ..utils.kicad_lock import check_project_not_open
 from ..utils.kicad_text import decode_as_kicad
 from ..utils.library_copy import (
-    ASCII_SPACE,
     dialog_symbol_name,
     footprint_copy,
     footprint_name_problem,
@@ -955,7 +955,7 @@ def _copy_footprint(
         )
     target_dir, warnings = _project_library(context, "footprint", target_library)
     # SAVE_AS_DIALOG: wxString::Trim (ASCII white space).
-    new = new_name.strip(ASCII_SPACE) if new_name is not None else name
+    new = new_name.strip(WX_SPACE) if new_name is not None else name
     if problem := footprint_name_problem(new):
         raise InputError(problem)
     target = target_dir / f"{new}.kicad_mod"

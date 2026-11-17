@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -190,6 +191,21 @@ async def list_schematic_components(
         return error_answer(e, "Error parsing schematic")
 
 
+def _field_shown(text: str) -> str:
+    """Return the text of a field for one line of the output: a JSON string, thus each
+    text has one form ("" is empty, a line feed is \\n, a backslash is \\\\)."""
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _fields_by_name(fields: list[tuple[str, str]]) -> dict[str, tuple[str, ...]]:
+    """Return the texts of each field name, in the order of the fields (two user fields
+    can have one name)."""
+    result: dict[str, tuple[str, ...]] = {}
+    for name, text in fields:
+        result[name] = (*result.get(name, ()), text)
+    return result
+
+
 def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]] | None, str]:
     """Return the pins of a reference as the netlist of kicad-cli gives them, and the
     note, or None and the reason when the netlist has no such reference.
@@ -222,13 +238,29 @@ def _netlist_pins(file_path: Path, reference: str) -> tuple[list[dict[str, str]]
 async def get_symbol_details(file_path: str, reference: str) -> str:
     """Give the fields and the pins of one component of a schematic.
 
+    The fields are each field of the placed symbol as KiCad 10 loads it: the mandatory
+    fields (Reference, Value, Footprint, Datasheet, Description), then the user fields
+    (for example MPN) in the order of the file. Each text is a JSON string: "" is an
+    empty field, and "\\n" in it is a line feed. Some properties of the result come
+    from the load of KiCad and are correct:
+
+    - "~" of a file older than KiCad 10 is an empty text. KiCad removes the white space
+      at the two ends of the text of a mandatory field, not of a user field.
+    - A user field with the name of an earlier field gets the name "<name>_1" (to
+      "<name>_9").
+
+    Limits: the tool reads the saved files, thus a change that KiCad has not saved is
+    not in the result. The position, the unit, the sheet and the fields come from the
+    first placed unit. A unit of the package with other field texts gets a warning
+    line. With KiCad 8 or 9 installed, the tool gives only the mandatory fields.
+
     Args:
         file_path: A .kicad_sch file of the project.
         reference: The reference of the component, for example "R1" or "U1".
 
     Returns:
-        The value, the footprint, the library ID, the position, the unit, the
-        sheet, the fields and the pins of the component. The pins are the
+        The library ID, the position, the unit, the sheet, the fields (also Value
+        and Footprint) and the pins of the component. The pins are the
         pins of the netlist of kicad-cli (the placed units of the reference, with
         the alternate functions). A symbol that the netlist does not have gets the
         pins of the schematic file, as the installed KiCad loads them. A power
@@ -262,9 +294,7 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
         lines = [
             f"# Symbol Details: {component.reference}",
             "",
-            f"**Value:** {component.value}",
             f"**Library:** {component.library_id}",
-            f"**Footprint:** {component.footprint or 'Not assigned'}",
             f"**Position:** ({component.position[0]:.2f}, {component.position[1]:.2f})",
             f"**Sheet:** {found.sheet} (`{found.file.name}`)",
         ]
@@ -275,13 +305,32 @@ async def get_symbol_details(file_path: str, reference: str) -> str:
             places = ", ".join(f"unit {u.component.unit} in {u.sheet}" for u in units)
             lines.append(f"**Placed units:** {places}")
 
-        # Properties
-        if component.properties:
-            lines.append("")
-            lines.append("## Properties")
-            for key, value in sorted(component.properties.items()):
-                if key not in ("Value", "Footprint"):
-                    lines.append(f"- {key}: {value}")
+        # The fields: the mandatory fields, then the user fields in the order of the file.
+        lines.append("")
+        lines.append("## Fields")
+        for key, text in component.properties:
+            lines.append(f"- {key}: {_field_shown(text)}")
+        if not component.user_fields_read:
+            lines.append(
+                "- ⚠️ The user fields (for example MPN) are not in the result: the server "
+                "reads them only with the rules of KiCad 10."
+            )
+        # The units of one package can have different fields (KiCad keeps the fields
+        # of each placed unit).
+        mine = _fields_by_name(component.properties)
+        for unit in units[1:]:
+            other = _fields_by_name(unit.component.properties)
+            different = [
+                key
+                for key in dict.fromkeys([*mine, *other])
+                if key != "Reference" and other.get(key) != mine.get(key)
+            ]
+            if different:
+                texts = ", ".join(
+                    f"{key}: {', '.join(_field_shown(t) for t in other.get(key, ())) or '(no field)'}"
+                    for key in different
+                )
+                lines.append(f"- ⚠️ Unit {unit.component.unit} has other fields: {texts}")
 
         # Pins: the netlist of kicad-cli, else the schematic model.
         pins, note = await asyncio.to_thread(_netlist_pins, Path(file_path), component.reference)

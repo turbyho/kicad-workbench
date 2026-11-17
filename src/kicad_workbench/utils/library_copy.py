@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import WorkbenchError
+from ..parsers.kicad_fields import WX_SPACE
 from ..parsers.kicad_versions import KicadFileError
 from ..parsers.lib_symbols import LibrarySymbol, flatten, read_library, symbol_chain
 from ..parsers.sexpr import Node, edited, parse, property_atoms, quote
@@ -36,9 +37,6 @@ from .library_upgrade import FOOTPRINT_FILE, footprint_files, run_upgrade, symbo
 # ReplaceIllegalFileNameChars changes in the file name (GetIllegalFileNameWxChars).
 FOOTPRINT_NAME_CHARS = '%$<>\t\n\r"\\/:'
 FILE_NAME_CHARS = "|*?"
-# wxString::Trim: the white space of wxSafeIsspace (ASCII only: a character below 127
-# that isspace takes).
-ASCII_SPACE = " \t\n\r\v\f"
 # EscapeString with CTX_LIBID.
 _LIBID_ESCAPES = {"\\": "{backslash}", "<": "{lt}", ">": "{gt}", ":": "{colon}", '"': "{dblquote}"}
 
@@ -50,7 +48,7 @@ class CopyError(WorkbenchError):
 def dialog_symbol_name(text: str) -> str:
     """The name that the "Save Symbol As" dialog gives (SAVE_SYMBOL_AS_DIALOG): the text
     with no white space at its ends, each space as "_", then EscapeString(CTX_LIBID)."""
-    name = text.strip(ASCII_SPACE).replace(" ", "_")
+    name = text.strip(WX_SPACE).replace(" ", "_")
     return "".join(_LIBID_ESCAPES.get(char, char) for char in name if char not in "\n\r")
 
 

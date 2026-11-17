@@ -83,7 +83,7 @@ from ..utils.schematic_settings import (
     unknown_severity_reason,
 )
 from .c_numbers import atoi, to_int, to_long
-from .kicad_fields import symbol_field_nodes
+from .kicad_fields import mandatory_text, symbol_field_nodes
 from .kicad_versions import file_text, kicad_release, version_triple
 from .lib_symbols import unit_count
 from .sch_geometry import IU_PER_MM, Point, definition_key, node_point, placed_symbols
@@ -317,7 +317,9 @@ def _load_symbol(screen: Screen, node: Node, kicad: int) -> _Symbol:
             symbol.reference_field = file_text(str(data), screen.version)
             symbol.prefix = _update_prefix(symbol.reference_field) or symbol.prefix
         elif kind == "value":
-            symbol.value = file_text(str(data), screen.version)
+            # The text of symbol_field_nodes is the text that KiCad loads (mandatory_text).
+            # KiCad 8 and 9: the server also reads "~" as empty here, as before.
+            symbol.value = str(data) if kicad >= 10 else file_text(str(data), screen.version)
         elif kind == "unit":
             symbol.unit = int(data)  # type: ignore[call-overload]
         else:
@@ -329,10 +331,13 @@ def _load_symbol(screen: Screen, node: Node, kicad: int) -> _Symbol:
                 elif item.head == "unit":
                     instance.unit = int(item.number(0, 1))
                 elif item.head == "value":
-                    # KiCad 10 reads "~" of a file before EMPTY_TEXT_MARKER as empty;
-                    # KiCad 8 and 9 keep it (SetValueFieldText).
+                    # KiCad 10 reads "~" of a file before EMPTY_TEXT_MARKER as empty, and
+                    # SetValueFieldText calls SCH_FIELD::SetText, which removes the white
+                    # space at the two ends (mandatory_text). KiCad 8 and 9: the text of
+                    # the file, as before (8.0.9 and 9.0.9 remove the white space too:
+                    # backlog, no rules of KiCad 8 and 9 for new work).
                     value = item.value(0, "")
-                    symbol.value = file_text(value, screen.version) if kicad >= 10 else value
+                    symbol.value = mandatory_text(value, screen.rules) if kicad >= 10 else value
                 if kicad <= 9:
                     symbol.add_instance(replace(instance))
             if kicad >= 10:

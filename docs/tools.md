@@ -31,7 +31,7 @@ below. Use their result as a start for a review, not as a fact.
 | `list_schematic_components(file_path, filter_type?, filter_value?, filter_dnp?)` | The components, with a filter by the start of the reference (for example "R" or "U"), by value or by DNP |
 | `list_schematic_nets(file_path, filter_power?)` | The nets of the labels and the power symbols of one file. A net with no label of a sub-sheet needs the full hierarchy (the netlist tools). `filter_power` gives only the nets whose name has "gnd", "vcc", "vdd", "vss", "+" or "-" (heuristic) |
 | `search_symbols(file_path, pattern, search_fields?)` | The symbols whose reference, value or library ID matches a regular expression (the table has at most 50 rows) |
-| `get_symbol_details(file_path, reference)` | The fields and the pins of one component of the project. The pins (number, name, electrical type) come from the netlist of kicad-cli. `trace_netlist_connection` gives the net of each pin |
+| `get_symbol_details(file_path, reference)` | The fields and the pins of one component of the project. The fields are each field of the placed symbol as KiCad 10 loads it (also the user fields, for example MPN). The pins (number, name, electrical type) come from the netlist of kicad-cli. `trace_netlist_connection` gives the net of each pin |
 | `search_components_by_type(file_path, component_type, search_in_subsheets?)` | Components of a type, for example "sensor" or "display" (heuristic: value, footprint and nets), in the file and in all sheets below it |
 
 The component tools give each placed symbol of a file one time for each sheet path

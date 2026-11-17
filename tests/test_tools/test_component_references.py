@@ -17,7 +17,7 @@ import pytest
 from kicad_workbench.parsers import sheet_list
 from kicad_workbench.tools import schematic
 
-from .test_symbol_fields import symbol, write_project
+from .test_symbol_fields import KICAD9, symbol, write_project
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -87,6 +87,65 @@ def test_the_details_of_a_reference_of_an_other_file(project):
     assert "**Sheet:** /B/ (`sub.kicad_sch`)" in result
 
 
+def _with_fields(placed: str, *fields: str) -> str:
+    """A placed symbol of symbol() with more (property ...) after its fields."""
+    more = "".join(f"\t\t(property {field}\n\t\t\t(at 100 50 0)\n\t\t)\n" for field in fields)
+    return placed.replace("\t\t(instances", more + "\t\t(instances", 1)
+
+
+def test_the_details_give_each_field_as_kicad_10_loads_it(tmp_path, monkeypatch):
+    async def version():
+        return "10.0.6"
+
+    monkeypatch.setattr(schematic, "get_kicad_version", version)
+    monkeypatch.setattr(schematic, "netlist_of", _no_netlist)
+    placed = _with_fields(
+        symbol("U1", 1, paths=(("/a0", "U1"),)),
+        '"Datasheet" ""',
+        '"MPN" "B"',
+        '"Note" "line 1\\nline 2"',
+        '"Sim.Enable" "0"',
+    )
+    path = write_project(tmp_path, placed)
+    result = run(schematic.get_symbol_details(str(path), "U1"))
+    fields = result[result.index("## Fields") :].split("\n\n")[0]
+    assert fields.splitlines()[1:] == [
+        '- Reference: "U1"',
+        '- Value: "LM358"',
+        '- Datasheet: ""',
+        '- MPN: "A"',
+        '- MPN_1: "B"',
+        '- Note: "line 1\\nline 2"',
+    ], result
+    assert "Sim.Enable" not in result and "⚠️" not in fields
+
+
+def test_the_details_show_a_unit_with_other_fields(tmp_path, monkeypatch):
+    async def version():
+        return "10.0.6"
+
+    monkeypatch.setattr(schematic, "get_kicad_version", version)
+    monkeypatch.setattr(schematic, "netlist_of", _no_netlist)
+    units = symbol("U1", 1, paths=(("/a0", "U1"),)) + _with_fields(
+        symbol("U1", 2, paths=(("/a0", "U1"),), mpn="B"), '"Note" ""'
+    )
+    path = write_project(tmp_path, units)
+    result = run(schematic.get_symbol_details(str(path), "U1"))
+    assert '- ⚠️ Unit 2 has other fields: MPN: "B", Note: ""' in result, result
+
+
+def test_the_details_with_kicad_9_give_no_user_fields(tmp_path, monkeypatch):
+    async def version():
+        return "9.0.9"
+
+    monkeypatch.setattr(schematic, "get_kicad_version", version)
+    monkeypatch.setattr(schematic, "netlist_of", _no_netlist)
+    path = write_project(tmp_path, symbol("U1", 1, paths=(("/a0", "U1"),)), version=KICAD9)
+    result = run(schematic.get_symbol_details(str(path), "U1"))
+    assert "- MPN:" not in result and '- Value: "LM358"' in result, result
+    assert "- ⚠️ The user fields (for example MPN) are not in the result" in result
+
+
 def test_no_kicad_version(project, monkeypatch):
     async def version():
         return None
@@ -148,7 +207,9 @@ def test_the_details_of_two_units(unannotated):
 def test_the_info_lists_the_sheet_symbols_as_kicad_loads_them(tmp_path, monkeypatch):
     # A sheet with no file field (KiCad 10: an empty file name) and a sheet of a file
     # that is not there: KiCad shows an empty sheet for each (measured with kicad-cli
-    # 8.0.9 to 10.0.7: the page is in the SVG export). A name of white space only.
+    # 8.0.9 to 10.0.7: the page is in the SVG export). A name of white space only: KiCad
+    # 10 removes the white space of a mandatory field (SCH_FIELD::SetText), thus the
+    # name is empty.
     async def version():
         return "10.0.7"
 
@@ -166,8 +227,7 @@ def test_the_info_lists_the_sheet_symbols_as_kicad_loads_them(tmp_path, monkeypa
     assert "**Sheet symbols:** 2" in result, result
     assert "- Leaf: (no file name) (the sheet has no file name: an empty sheet in KiCad)" in result
     assert (
-        "- (no name: ' '): gone.kicad_sch (the file is not there: an empty sheet in KiCad)"
-        in result
+        "- (no name: ''): gone.kicad_sch (the file is not there: an empty sheet in KiCad)" in result
     )
 
 

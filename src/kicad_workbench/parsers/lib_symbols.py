@@ -37,7 +37,7 @@ from pathlib import Path
 
 from ..utils.kicad_text import decode_as_kicad
 from .bus_names import unescape_string
-from .kicad_fields import SYMBOL_FIELD_NAMES
+from .kicad_fields import SYMBOL_FIELD_NAMES, WX_SPACE
 from .kicad_versions import KicadFileError, file_text, header_version
 from .sexpr import Node, edited, parse, property_atoms, quote
 from .sub_symbols import sub_symbols, symbol_name
@@ -46,8 +46,6 @@ _FLAGS = ("exclude_from_sim", "in_bom", "on_board", "in_pos_files")
 # KiCad tries these suffixes for a user field with the name of an earlier
 # field (parseProperty), and skips the field when all names are used.
 _RENAMES = range(1, 10)
-# The characters that wxString::Strip removes (wxSafeIsspace: ASCII isspace).
-_BLANKS = " \t\n\v\f\r"
 
 
 @dataclass(frozen=True, eq=False)
@@ -382,7 +380,7 @@ def _fields(symbol: LibrarySymbol, kicad: int) -> list[_Field]:
         if mandatory is not None or name == "ki_description":
             # SCH_FIELD::SetText removes the blanks at the start and the end of
             # the text of a mandatory field (wxString::Strip).
-            value = value.strip(_BLANKS)
+            value = value.strip(WX_SPACE)
         if mandatory is not None:
             # A later mandatory field replaces the earlier one.
             _set(fields, _Field(mandatory, value, [_text(prop)], [prop]))

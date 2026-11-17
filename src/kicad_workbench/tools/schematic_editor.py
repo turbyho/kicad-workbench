@@ -14,6 +14,7 @@ from ..parsers.kicad_fields import rules_for_version
 from ..parsers.kicad_versions import (
     KICAD8,
     RELEASES,
+    SCHEMATIC_FIELD_FLAGS,
     KicadFileError,
     is_release_schematic,
     kicad_release,
@@ -231,6 +232,30 @@ def label_justify(kind: str, angle: int) -> str:
         raise InputError(f"KiCad writes no {kind} at the angle {angle}.")
     horizontal = "left" if angle in (0, 90) else "right"
     return f"{horizontal} bottom" if kind == "label" else horizontal
+
+
+def _intersheet_refs_field(point: Point, version: int) -> str:
+    """The field of the references to the other sheets of a new global label, as the
+    constructor of SCH_GLOBALLABEL makes it: at the point of the label, hidden, the
+    vertical justify the center (the horizontal one too, thus no justify is written).
+
+    When the user shows the references (schematic setting), KiCad sets the visibility
+    of the field and shows it next to the label (the GUI of KiCad 10.0.6, 2026-11-17).
+    The schematic editor places the field of a label that the user draws at once
+    (fields_autoplaced); this tool cannot measure the text, thus it writes the state of
+    the constructor.
+
+    The format follows the file version: from SCHEMATIC_FIELD_FLAGS (KiCad 10) hide,
+    show_name and do_not_autoplace are in the property, before it "(hide yes)" is in the
+    effects (SCH_IO_KICAD_SEXPR::saveField; the demos of KiCad 8 and 9 files).
+    """
+    at = f"(at {_xy(point)} 0)"
+    font = "(effects (font (size 1.27 1.27))"
+    if version >= SCHEMATIC_FIELD_FLAGS:
+        body = f"{at} (hide yes) (show_name no) (do_not_autoplace no) {font})"
+    else:
+        body = f"{at} {font} (hide yes))"
+    return f'\t\t(property "Intersheetrefs" "${{INTERSHEET_REFS}}" {body})\n'
 
 
 def _multiline_label_error(name: str) -> str | None:
@@ -972,13 +997,12 @@ def _add_pin_label_sync(
 
     justify = label_justify(kind, angle)
     # A global label has the field of the references to the other sheets.
-    references = (
-        '\t\t(property "Intersheetrefs" "${INTERSHEET_REFS}" (at 0 0 0)\n'
-        "\t\t\t(effects (font (size 1.27 1.27)) hide)\n"
-        "\t\t)\n"
-        if kind == "global_label"
-        else ""
-    )
+    references = ""
+    if kind == "global_label":
+        version = writable_schematic_version(path, content)
+        if isinstance(version, str):
+            return version
+        references = _intersheet_refs_field(point, version)
     entry = (
         f"\t({kind} {quote(name)} (shape {shape}) (at {_xy(point)} {angle})\n"
         f"\t\t(effects (font (size 1.27 1.27)) (justify {justify}))\n"

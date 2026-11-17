@@ -117,6 +117,11 @@ class TestGlobalLabel:
         assert '(property "Intersheetrefs" "${INTERSHEET_REFS}"' in m.group(0)
         # Pin 2 of R1 is below the body: the angle 270, right justified.
         assert "(at 101.6 105.41 270)" in m.group(0) and "(justify right))" in m.group(0)
+        # The field as the constructor of SCH_GLOBALLABEL makes it: at the point of the
+        # label (KiCad places it when the references are shown), hidden with (hide yes).
+        field = m.group(0)[m.group(0).index('(property "Intersheetrefs"') :]
+        assert "(at 101.6 105.41 0)" in field and "(hide yes)" in field
+        assert " hide)" not in field
 
     def test_requires_name(self, built):
         # a global label without a name would be meaningless

@@ -24,7 +24,9 @@ from ..parsers.check_report_parser import (
     read_erc_report,
     read_report_file,
 )
+from ..parsers.kicad_versions import KICAD10, kicad_release
 from ..parsers.sch_geometry import IU_PER_MM
+from ..parsers.sexpr import parse
 from ..server import mcp
 from ..utils.file_save import save_files
 from ..utils.file_versions import with_board_versions, with_schematic_versions
@@ -40,6 +42,7 @@ from ..utils.kicad_cli import (
 from ..utils.kicad_project import (
     PRO_SUFFIX,
 )
+from ..utils.kicad_text import read_as_kicad
 from ..utils.sch_hierarchy import (
     AmbiguousRootError,
     project_files,
@@ -64,6 +67,62 @@ def _report_path(source: Path, kind: str) -> Path:
     report_dir = _temp_dir() / "kicad-workbench"
     report_dir.mkdir(parents=True, exist_ok=True)
     return report_dir / f"{source.stem}_{digest}_{kind}.json"
+
+
+# The time limits of kicad-cli pcb drc (seconds): the zone fill of --refill-zones takes
+# more time on a large board (measured on the demo complex_hierarchy of KiCad 10.0.6:
+# 1.5 s, and 1.8 s with the refill).
+_DRC_TIMEOUT = 60
+_DRC_REFILL_TIMEOUT = 180
+
+
+@dataclass(frozen=True)
+class _DrcMode:
+    """The zone mode of a DRC (refill_zones of run_drc)."""
+
+    refill: bool
+    report: Path  # one report file for each zone mode
+    zones: str  # the line "Zones" of the answers
+
+
+def _has_zones(pcb: Path) -> bool | None:
+    """True when the board has a zone (a (zone ...) of the board), None when the server
+    cannot read the board (the DRC gives the error of KiCad)."""
+    try:
+        root = parse(read_as_kicad(pcb))
+    except (OSError, WorkbenchError):
+        return None
+    return bool(root.children("zone"))
+
+
+async def _drc_mode(pcb: Path, refill_zones: bool) -> _DrcMode:
+    """The zone mode of a DRC of the board.
+
+    Raises:
+        InputError: refill_zones and the installed KiCad is not KiCad 10.0
+            (installed_kicad_problem, kicad_release: new functions have the rules of
+            KiCad 10.0 only; a nightly build or a later version gets no rule).
+    """
+    version = await get_kicad_version()
+    kicad_10 = installed_kicad_problem(version) is None and kicad_release(version) is KICAD10
+    if refill_zones:
+        if problem := installed_kicad_problem(version):
+            raise InputError(problem)
+        if not kicad_10:
+            raise InputError(
+                f"refill_zones has the rules of KiCad 10.0 only. The installed KiCad is "
+                f"{version}."
+            )
+        zones = "filled again before the DRC (in memory: the board file did not change)"
+    elif await asyncio.to_thread(_has_zones, pcb) is False:
+        zones = "the board has no zones"
+    else:
+        zones = "the fills saved in the board file (not filled again" + (
+            "; refill_zones=True fills them as the DRC dialog of KiCad does by default)"
+            if kicad_10
+            else ")"
+        )
+    return _DrcMode(refill_zones, _report_path(pcb, "drc_refill" if refill_zones else "drc"), zones)
 
 
 def _erc_sources(root: Path) -> list[Path]:
@@ -556,27 +615,44 @@ Please check the file path and try again."""
 @with_schematic_versions("pcb_path")
 async def run_drc(
     pcb_path: str,
+    refill_zones: bool = False,
 ) -> str:
     """Run the DRC of kicad-cli on a board.
 
     The tool uses the severities of the project. When the schematic of the board
     name is next to the board, the DRC also checks the parity of the schematic and
-    the board.
+    the board. The answer tells if the DRC used new zone fills or the fills of the
+    file.
 
     Args:
         pcb_path: The .kicad_pcb file.
+        refill_zones: True: kicad-cli fills all zones again before the DRC
+            (--refill-zones), as the DRC dialog of KiCad does by default (its check
+            box "Refill all zones before performing DRC" is on). The fill is only in
+            memory: the board file does not change. False (default): the DRC checks
+            the zone fills that are saved in the file. An old fill can give
+            violations that the dialog does not give, or miss some. Needs KiCad 10.
+            The time limit of kicad-cli is 180 s with the refill, 60 s without it.
 
     Returns:
         The violations with their locations, and the numbers of errors and
         warnings.
     """
+    pcb = Path(pcb_path)
+    if not pcb.exists():
+        return f"❌ **PCB file not found:** {pcb_path}"
+    try:
+        mode = await _drc_mode(pcb, refill_zones)
+    except Exception as e:
+        return error_answer(e, f"DRC of {pcb_path} failed")
+    return await _run_drc(pcb_path, mode)
+
+
+async def _run_drc(pcb_path: str, mode: _DrcMode) -> str:
+    """run_drc in the zone mode. The caller checks that the board exists."""
     try:
         pcb = Path(pcb_path)
-        if not pcb.exists():
-            return f"❌ **PCB file not found:** {pcb_path}"
-
-        # DRC report output path
-        drc_report_path = _report_path(pcb, "drc")
+        drc_report_path, zones = mode.report, mode.zones
         # Remove the old report: after the run, a report file must be the
         # result of this run.
         drc_report_path.unlink(missing_ok=True)
@@ -587,10 +663,12 @@ async def run_drc(
         args = ["pcb", "drc", "--format", "json", "--severity-all"]
         if pcb.with_suffix(".kicad_sch").exists():
             args.append("--schematic-parity")
+        if mode.refill:
+            args.append("--refill-zones")
         try:
             result = await run_kicad_cli(
                 args + ["--output", str(drc_report_path), str(pcb)],
-                timeout=60,
+                timeout=_DRC_REFILL_TIMEOUT if mode.refill else _DRC_TIMEOUT,
                 english=True,
             )
         except KicadCliError as e:  # the settings for an English kicad-cli
@@ -600,9 +678,16 @@ async def run_drc(
         output_text = (decode_output(result.stdout) + "\n" + stderr_text).strip()
 
         if result.returncode != 0:
+            refill_cause = (
+                "- The zone fill of --refill-zones: run the DRC again with "
+                "refill_zones=False\n"
+                if mode.refill
+                else ""
+            )
             return f"""❌ **DRC Check Failed**
 
 **PCB:** {pcb_path}
+**Zones:** {zones}
 
 **Error:**
 ```
@@ -610,7 +695,7 @@ async def run_drc(
 ```
 
 **Possible causes:**
-- Invalid PCB file
+{refill_cause}- Invalid PCB file
 - Missing design rules
 
 **Manual steps:**
@@ -625,6 +710,7 @@ async def run_drc(
             return f"""❌ **DRC Report Not Generated**
 
 **PCB:** {pcb_path}
+**Zones:** {zones}
 
 kicad-cli stopped with the exit code 0, but it wrote no report file
 ({drc_report_path}). Thus the tool has no result of the check.
@@ -645,6 +731,7 @@ kicad-cli stopped with the exit code 0, but it wrote no report file
                 return f"""✅ **DRC Check Passed**
 
 **PCB:** {pcb_path}
+**Zones:** {zones}
 
 No design rule violations detected!{excluded_note}"""
 
@@ -676,6 +763,7 @@ No design rule violations detected!{excluded_note}"""
             return f"""❌ **DRC Violations Detected**
 
 **PCB:** {pcb_path}
+**Zones:** {zones}
 **Total Violations:** {len(errors)}
 {_count_text(errors)}
 
@@ -865,13 +953,24 @@ No active violation matches the filter.{notes_text}"""
 async def get_drc_violations(
     pcb_path: str,
     violation_type: str = "",
+    refill_zones: bool = False,
 ) -> str:
     """Give the DRC violations of a board, with a filter by type.
+
+    The tool uses the last DRC report of the same zone mode until the board or the
+    project changes: then it runs the DRC again (run_drc).
 
     Args:
         pcb_path: The .kicad_pcb file.
         violation_type: Optional type of the violations, as the DRC report of
             KiCad gives it, for example "clearance". Empty: all violations.
+        refill_zones: True: kicad-cli fills all zones again before the DRC
+            (--refill-zones), as the DRC dialog of KiCad does by default (its check
+            box "Refill all zones before performing DRC" is on). The fill is only in
+            memory: the board file does not change. False (default): the DRC checks
+            the zone fills that are saved in the file. An old fill can give
+            violations that the dialog does not give, or miss some. Needs KiCad 10.
+            The time limit of kicad-cli is 180 s with the refill, 60 s without it.
 
     Returns:
         The DRC violations of the type.
@@ -881,13 +980,13 @@ async def get_drc_violations(
         if not pcb.exists():
             return f"❌ **PCB file not found:** {pcb_path}"
 
-        # DRC report output path
-        drc_report_path = _report_path(pcb, "drc")
+        mode = await _drc_mode(pcb, refill_zones)
+        drc_report_path, zones = mode.report, mode.zones
 
         if _report_is_stale(drc_report_path, _drc_sources(pcb)):
             # Run DRC first. run_drc gives "❌" also when it found violations,
             # thus only a missing report is a failure.
-            initial_result = await run_drc(pcb_path)
+            initial_result = await _run_drc(pcb_path, mode)
             if not drc_report_path.exists():
                 return initial_result
 
@@ -898,6 +997,7 @@ async def get_drc_violations(
             return f"""✅ **No DRC Violations**
 
 **PCB:** {pcb_path}
+**Zones:** {zones}
 
 No design rule violations detected."""
 
@@ -908,6 +1008,7 @@ No design rule violations detected."""
             return f"""✅ **No Matching Violations**
 
 **PCB:** {pcb_path}
+**Zones:** {zones}
 **Filter:** type = '{violation_type or 'all'}'
 
 No violations match the specified filter."""
@@ -916,6 +1017,7 @@ No violations match the specified filter."""
         result = f"""# DRC Violations
 
 **PCB:** {pcb_path}
+**Zones:** {zones}
 **Filter:** type = '{violation_type or 'all'}'
 **Count:** {len(filtered_errors)}
 
@@ -1024,13 +1126,22 @@ The ERC report has been successfully exported to the specified location.{_notes_
 async def export_drc_report(
     pcb_path: str,
     output_path: str = "",
+    refill_zones: bool = False,
 ) -> str:
     """Run the DRC of kicad-cli on a board and copy its JSON report into a file.
 
     Args:
         pcb_path: The .kicad_pcb file.
         output_path: Optional file of the report. Default: <board>_drc_report.json
-            next to the board.
+            next to the board, or <board>_drc_refill_report.json with refill_zones
+            (the JSON report of kicad-cli does not tell the zone mode).
+        refill_zones: True: kicad-cli fills all zones again before the DRC
+            (--refill-zones), as the DRC dialog of KiCad does by default (its check
+            box "Refill all zones before performing DRC" is on). The fill is only in
+            memory: the board file does not change. False (default): the DRC checks
+            the zone fills that are saved in the file. An old fill can give
+            violations that the dialog does not give, or miss some. Needs KiCad 10.
+            The time limit of kicad-cli is 180 s with the refill, 60 s without it.
 
     Returns:
         The path of the report.
@@ -1040,18 +1151,20 @@ async def export_drc_report(
         if not pcb.exists():
             return f"❌ **PCB file not found:** {pcb_path}"
 
-        drc_report_path = _report_path(pcb, "drc")
+        mode = await _drc_mode(pcb, refill_zones)
+        drc_report_path = mode.report
 
         # Run DRC first to generate a current report. run_drc gives "❌" also
         # when it found violations, thus only a missing report is a failure.
-        initial_result = await run_drc(pcb_path)
+        initial_result = await _run_drc(pcb_path, mode)
 
         if not drc_report_path.exists():
             return f"❌ **DRC Check Failed**\n\n{initial_result}"
 
         # Determine output path
         if not output_path:
-            output_path = str(pcb.parent / (pcb.stem + "_drc_report.json"))
+            suffix = "_drc_refill_report.json" if refill_zones else "_drc_report.json"
+            output_path = str(pcb.parent / (pcb.stem + suffix))
 
         output = Path(output_path)
         if output.is_dir():
@@ -1062,6 +1175,7 @@ async def export_drc_report(
         return f"""✅ **DRC Report Exported**
 
 **PCB:** {pcb_path}
+**Zones:** {mode.zones}
 **Output:** {output}
 
 The DRC report has been successfully exported to the specified location.{_notes_text(notes)}"""

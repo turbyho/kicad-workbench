@@ -110,9 +110,9 @@ a save in KiCad 8 or later.
 | `run_erc(schematic_path)` | ERC of kicad-cli, with the severities of the project. It adds the annotation check of the ERC dialog (no annotation, a duplicate reference, units with different values), which kicad-cli does not run |
 | `get_erc_violations(schematic_path, severity?)` | The ERC violations, with a filter by severity |
 | `export_erc_report(schematic_path, output_path?)` | The ERC report of kicad-cli as a JSON file |
-| `run_drc(pcb_path)` | DRC of kicad-cli. When the schematic with the same name is next to the board, also the schematic parity check |
-| `get_drc_violations(pcb_path, violation_type?)` | The DRC violations, with a filter by type |
-| `export_drc_report(pcb_path, output_path?)` | The DRC report of kicad-cli as a JSON file |
+| `run_drc(pcb_path, refill_zones?)` | DRC of kicad-cli. When the schematic with the same name is next to the board, also the schematic parity check. By default the DRC checks the zone fills of the file; `refill_zones=True` fills the zones again in memory first, as the DRC dialog of KiCad does by default (KiCad 10) |
+| `get_drc_violations(pcb_path, violation_type?, refill_zones?)` | The DRC violations, with a filter by type |
+| `export_drc_report(pcb_path, output_path?, refill_zones?)` | The DRC report of kicad-cli as a JSON file |
 | `check_schematic_pin_pad_mapping(schematic_path, references?)` | For each symbol: the pins with no pad, the pins with no number, the pads with no pin, and the symbols whose footprint KiCad does not find. It uses the netlist and the rules of "Update PCB from Schematic" |
 | `check_pin_pad_mapping(symbol_lib_id, footprint_lib_id?, project_path?)` | The same check for one library symbol and one footprint |
 | `check_library_links(project_path)` | The links of a project to its libraries: the library checks of ERC and DRC, the footprints of the schematic, and the 3D models (as the STEP export finds them) |

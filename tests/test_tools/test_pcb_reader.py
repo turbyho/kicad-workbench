@@ -249,3 +249,65 @@ def test_text_reader_similar_nets_with_zones(no_pcbnew, tmp_path):
     assert "- `GND` (0 segments, 0 vias, 1 copper zones)" in answer, answer
     answer = run("find_tracks_by_net", board, net_name="VCC")
     assert answer.startswith("No tracks, vias or copper zones found for net 'VCC'."), answer
+
+
+def _many_items_board(segments: int = 55, vias: int = 22, widths=(0.2, 0.3)) -> str:
+    """A KiCad 10 board with segments (of the widths, in turn) and vias on the net GND."""
+    segment_text = "".join(
+        f"  (segment (start {i} 0) (end {i + 1} 0) (width {widths[i % len(widths)]}) "
+        f'(layer "F.Cu") (net "GND") (uuid "s{i}"))\n'
+        for i in range(segments)
+    )
+    via_text = "".join(
+        f'  (via (at {i} 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net "GND") '
+        f'(uuid "v{i}"))\n'
+        for i in range(vias)
+    )
+    return (
+        '(kicad_pcb (version 20260206)\n  (layers (0 "F.Cu" signal) (2 "B.Cu" signal))\n'
+        + segment_text
+        + via_text
+        + ")\n"
+    )
+
+
+def test_text_reader_tells_the_cut_tables(no_pcbnew, tmp_path):
+    # As with pcbnew: a row for the items that the tables do not show, and the advice
+    # about different widths.
+    board = tmp_path / "many.kicad_pcb"
+    board.write_text(_many_items_board(), encoding="utf-8")
+    answer = run("find_tracks_by_net", board, net_name="GND")
+    assert "| ... | (5 more segments) | | | | |" in answer, answer
+    assert "| ... | (2 more vias) | | | |\n" in answer, answer
+    assert "⚠️ The tracks of the net have different widths" in answer, answer
+
+
+def test_text_reader_tables_at_their_limits(no_pcbnew, tmp_path):
+    # 50 segments and 20 vias are all in the tables; one width gives no warning.
+    board = tmp_path / "limits.kicad_pcb"
+    board.write_text(_many_items_board(50, 20, widths=(0.25,)), encoding="utf-8")
+    answer = run("find_tracks_by_net", board, net_name="GND")
+    assert "more segments" not in answer and "more vias" not in answer, answer
+    assert "different widths" not in answer, answer
+    assert "| 50 | (49.00, 0.00) |" in answer and "| 20 | (19.00, 5.00) |" in answer
+
+
+ORDER = """(kicad_pcb (version 20260206)
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal))
+  (arc (start 1 0) (mid 0.7071067811865476 0.7071067811865476) (end 0 1) (width 0.2)
+    (layer "F.Cu") (net "GND") (uuid "a"))
+  (segment (start 5 5) (end 6 5) (width 0.2) (layer "F.Cu") (net "GND") (uuid "s"))
+  (via (at 3 3) (size 0.6) (drill 0.3) (net "GND") (uuid "v"))
+)
+"""
+
+
+def test_text_reader_order_of_the_file_and_via_layers(no_pcbnew, tmp_path):
+    # BOARD::Tracks() has the order of the file (the arc first); a via with no
+    # (layers ...) has F.Cu and B.Cu (the constructor of PCB_VIA).
+    board = tmp_path / "order.kicad_pcb"
+    board.write_text(ORDER, encoding="utf-8")
+    answer = run("find_tracks_by_net", board, net_name="GND")
+    assert "| 1 | (1.00, 0.00) | (0.00, 1.00) |" in answer, answer
+    assert "| 2 | (5.00, 5.00) | (6.00, 5.00) |" in answer, answer
+    assert "| 1 | (3.00, 3.00) | 0.600 | 0.300 | F.Cu -> B.Cu |" in answer, answer

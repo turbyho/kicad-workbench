@@ -308,3 +308,50 @@ def test_file_that_is_not_an_s_expression(tmp_path):
     path.write_text("(kicad_pcb (version 20260206)", encoding="utf-8")
     with pytest.raises(SExprError):
         PCBParser(str(path))._parse_file()
+
+
+def test_the_copper_layer_of_a_track(tmp_path):
+    # A track with a solder mask opening has (layers "F.Cu" "F.Mask"); KiCad drops a
+    # track that is not on a copper layer (parsePCB_TRACK, parseARC).
+    text = """(kicad_pcb (version 20260206)
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (5 "F.SilkS" user))
+  (segment (start 0 0) (end 1 0) (width 0.2) (layers "F.Cu" "F.Mask") (net "A") (uuid "a"))
+  (segment (start 0 0) (end 1 0) (width 0.2) (layer "F.SilkS") (net "A") (uuid "b"))
+  (arc (start 1 0) (mid 0.7071067811865476 0.7071067811865476) (end 0 1) (width 0.2)
+    (layer "B.Cu") (net "A") (uuid "c"))
+)
+"""
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(text, encoding="utf-8")
+    tracks = PCBParser(str(path)).get_tracks()
+    assert [(track.layer, track.net) for track in tracks] == [("F.Cu", "A"), ("B.Cu", "A")]
+
+
+def test_kicad_8_drops_a_track_off_copper(tmp_path):
+    # parsePCB_TRACK of KiCad 8.0.9 has no check of the copper layer, but BOARD::Add
+    # refuses the track (pcbnew 8.0.9, spike/kicad-versions/track_items_check.py).
+    text = """(kicad_pcb (version 20240108)
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user))
+  (net 0 "") (net 1 "A")
+  (segment (start 0 0) (end 1 0) (width 0.2) (layer "F.SilkS") (net 1) (uuid "b"))
+)
+"""
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(text, encoding="utf-8")
+    assert PCBParser(str(path)).get_tracks() == []
+
+
+def test_the_layer_pair_of_a_via(tmp_path):
+    # PCB_VIA::SetLayerPair and SanitizeLayers: a through via is on F.Cu and B.Cu, a
+    # blind via has its pair from the top down (track_items_check.py compares pcbnew).
+    text = """(kicad_pcb (version 20260206)
+  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal))
+  (via blind (at 1 1) (size 0.6) (drill 0.3) (layers "In2.Cu" "F.Cu") (net "A") (uuid "a"))
+  (via (at 2 2) (size 0.6) (drill 0.3) (layers "In1.Cu" "In2.Cu") (net "A") (uuid "b"))
+  (via (at 3 3) (size 0.6) (drill 0.3) (net "A") (uuid "c"))
+)
+"""
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(text, encoding="utf-8")
+    pairs = [(v.top_layer, v.bottom_layer) for v in PCBParser(str(path)).get_vias()]
+    assert pairs == [("F.Cu", "In2.Cu"), ("F.Cu", "B.Cu"), ("F.Cu", "B.Cu")]

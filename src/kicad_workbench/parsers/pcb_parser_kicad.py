@@ -9,6 +9,7 @@ from ..errors import WorkbenchError
 from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import KiCadEncodingError, read_as_kicad
 from .kicad_versions import header_version, kicad_release
+from .pcb_items import PCBTrack, PCBVia, PCBZone
 
 
 class BoardLoadError(WorkbenchError):
@@ -81,39 +82,6 @@ class PCBNet:
     name: str
     code: int
     node_count: int = 0
-
-
-@dataclass
-class PCBTrack:
-    """Track (segment) from PCB file."""
-
-    start: tuple[float, float]
-    end: tuple[float, float]
-    width: float
-    layer: str
-    net: str = ""
-    length: float = 0.0
-
-
-@dataclass
-class PCBVia:
-    """Via from PCB file."""
-
-    position: tuple[float, float]
-    size: float
-    drill: float
-    top_layer: str
-    bottom_layer: str
-    net: str = ""
-
-
-@dataclass
-class PCBZone:
-    """A copper zone of the board."""
-
-    net_name: str
-    layers: list[str]  # the copper layers of the zone, from the top (F.Cu, In1.Cu, B.Cu)
-    filled: bool
 
 
 class PCBParserKiCad:
@@ -228,10 +196,6 @@ class PCBParserKiCad:
             ))
         return tracks
 
-    def get_tracks_by_net(self, net_name: str) -> list[PCBTrack]:
-        """Get track segments for a specific net."""
-        return [t for t in self.get_tracks() if t.net == net_name]
-
     # ── Vias ────────────────────────────────────────────────
 
     def get_vias(self) -> list[PCBVia]:
@@ -252,10 +216,6 @@ class PCBParserKiCad:
                 net=track.GetNetname(),
             ))
         return vias
-
-    def get_vias_for_net(self, net_name: str) -> list[PCBVia]:
-        """Get vias belonging to a specific net."""
-        return [v for v in self.get_vias() if v.net == net_name]
 
     # ── Zones ───────────────────────────────────────────────
 
@@ -290,9 +250,6 @@ class PCBParserKiCad:
             for zone in self.board.Zones()
             if not zone.GetIsRuleArea() and not zone.IsTeardropArea() and zone.IsOnCopperLayer()
         ]
-
-    def get_zones_for_net(self, net_name: str) -> list[PCBZone]:
-        return [z for z in self.get_zones() if z.net_name == net_name]
 
     # ── Board Info ──────────────────────────────────────────
 

@@ -9,6 +9,7 @@ from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import read_as_kicad
 from .c_numbers import to_long
 from .kicad_versions import check_board_version, header_version
+from .pcb_items import PCBTrack, PCBVia, PCBZone
 from .sexpr import Node, parse
 
 
@@ -89,20 +90,20 @@ class _BoardLayers:
     enabled: list[str]
     names: dict[str, str]
 
-    def zone_copper(self, zone: Node) -> set[str]:
-        """The copper layers of the layer set of a zone (also the layers that the board
-        does not enable). parseZONE reads the items in their sequence: the last (layer
-        ...) or (layers ...) gives the layers. (layers ...) has the masks of the parser
-        for "*.Cu", "*In.Cu" and "F&B.Cu" (parseBoardItemLayersAsMask, LSET::AllCuMask);
-        (layer X) has no masks (parseBoardItemLayer, lookUpLayer: "*.Cu" is not a layer
-        name)."""
+    def item_copper(self, item: Node) -> set[str]:
+        """The copper layers of the layer set of a zone or a track (also the layers that
+        the board does not enable). parseZONE and parsePCB_TRACK read the items in their
+        sequence: the last (layer ...) or (layers ...) gives the layers. (layers ...)
+        has the masks of the parser for "*.Cu", "*In.Cu" and "F&B.Cu"
+        (parseBoardItemLayersAsMask, LSET::AllCuMask); (layer X) has no masks
+        (parseBoardItemLayer, lookUpLayer: "*.Cu" is not a layer name)."""
         tokens: list[str] = []
         masks = False
-        for item in zone.children():
-            if item.head == "layer":
-                tokens, masks = [item.value(0, "")], False
-            elif item.head == "layers":
-                tokens, masks = [atom.value for atom in item.atoms()], True
+        for child in item.children():
+            if child.head == "layer":
+                tokens, masks = [child.value(0, "")], False
+            elif child.head == "layers":
+                tokens, masks = [atom.value for atom in child.atoms()], True
         copper: set[str] = set()
         for token in tokens:
             if not masks:
@@ -117,6 +118,13 @@ class _BoardLayers:
             elif self.names.get(token):
                 copper.add(self.names[token])
         return copper
+
+
+def _stack_index(name: str) -> int:
+    """The position of a copper layer from the top (F.Cu is 0, B.Cu the last), as
+    IsCopperLayerLowerThan compares them; a name that is not a standard copper name
+    sorts after them."""
+    return _COPPER_NAMES.index(name) if name in _COPPER_NAMES else len(_COPPER_NAMES)
 
 
 def _board_layers(root: Node) -> _BoardLayers:
@@ -282,6 +290,10 @@ class PCBParser:
         items: dict[str, list[Node]] = defaultdict(list)
         for item in root.children():
             items[item.head].append(item)
+            # The tracks in the order of the file, as BOARD::Tracks() (the parser of
+            # KiCad adds each with ADD_MODE::BULK_APPEND).
+            if item.head in ("segment", "arc"):
+                items["track"].append(item)
         nets = {net.value(0): net.value(1, "") for net in items["net"]}
         layers = _board_layers(root)
 
@@ -289,8 +301,8 @@ class PCBParser:
             "path": str(self.file_path),
             "general": self._parse_general(root, layers),
             "footprints": self._parse_footprints(items["footprint"]),
-            "tracks": self._parse_tracks(items["segment"], items["arc"], nets),
-            "vias": self._parse_vias(items["via"], nets),
+            "tracks": self._parse_tracks(items["track"], nets, layers),
+            "vias": self._parse_vias(items["via"], nets, layers),
             "zones": self._parse_zones(items["zone"], nets, layers),
         }
 
@@ -327,14 +339,23 @@ class PCBParser:
         return footprints
 
     def _parse_tracks(
-        self, segments: list[Node], arcs: list[Node], nets: dict[str, str]
+        self, items: list[Node], nets: dict[str, str], layers: _BoardLayers
     ) -> list[dict[str, Any]]:
-        """Parse the tracks: the straight segments, then the arcs.
+        """Parse the tracks: the straight segments and the arcs, in their order.
 
-        The length of an arc is the length along the arc, as pcbnew gives it.
+        The length of an arc is the length along the arc, as pcbnew gives it. The layer
+        is the copper layer of (layer X), or of (layers ...) with a solder mask layer
+        ("F.Cu" "F.Mask": parseLayersForCuItemWithSoldermask). A track that is not on a
+        copper layer is not on the board: KiCad 9 and 10 drop it in parsePCB_TRACK and
+        parseARC, KiCad 8.0.9 in BOARD::Add. KiCad refuses a board with a track on more
+        than one copper layer (Expecting "single copper layer"): the text reader does
+        not check it, and leaves the track out.
         """
         tracks = []
-        for track in segments + arcs:
+        for track in items:
+            copper = layers.item_copper(track)
+            if len(copper) != 1:
+                continue
             start = _point(track.first("start"))
             end = _point(track.first("end"))
             if track.head == "arc":
@@ -345,24 +366,38 @@ class PCBParser:
                 "start": {"x": start[0], "y": start[1]},
                 "end": {"x": end[0], "y": end[1]},
                 "width": _number(track, "width"),
-                "layer": _text(track, "layer"),
+                "layer": copper.pop(),
                 "net": _net(track, nets),
                 "length": length,
             })
         return tracks
 
-    def _parse_vias(self, items: list[Node], nets: dict[str, str]) -> list[dict[str, Any]]:
-        """Parse the vias."""
+    def _parse_vias(
+        self, items: list[Node], nets: dict[str, str], layers: _BoardLayers
+    ) -> list[dict[str, Any]]:
+        """Parse the vias, with the layer pair of PCB_VIA::SetLayerPair and
+        SanitizeLayers (KiCad 8, 9 and 10): a through via (no type "blind", "buried" or
+        "micro" after "via") is on F.Cu and B.Cu, also with an other pair or no (layers
+        ...) (the constructor of PCB_VIA); an other via has its two layers from the top
+        down. A layer name of the layer table is its standard name (_BoardLayers.names),
+        as for the tracks."""
         vias = []
         for via in items:
             x, y = _point(via.first("at"))
-            layers = via.first("layers")
+            pair = via.first("layers")
+            top = pair.value(0, "F.Cu") if pair else "F.Cu"
+            bottom = pair.value(1, "B.Cu") if pair else "B.Cu"
+            top, bottom = layers.names.get(top) or top, layers.names.get(bottom) or bottom
+            if via.value(0, "") not in ("blind", "buried", "micro"):
+                top, bottom = "F.Cu", "B.Cu"
+            elif _stack_index(bottom) < _stack_index(top):
+                top, bottom = bottom, top
             vias.append({
                 "at": {"x": x, "y": y},
                 "size": _number(via, "size"),
                 "drill": _number(via, "drill"),
-                "top_layer": layers.value(0, "") if layers else "",
-                "bottom_layer": layers.value(1, "") if layers else "",
+                "top_layer": top,
+                "bottom_layer": bottom,
                 "net": _net(via, nets),
             })
         return vias
@@ -377,7 +412,7 @@ class PCBParser:
         no rule area ((keepout ...) or (placement ...)), no teardrop (_is_teardrop), and
         only a zone on a copper layer. A zone with no net is a zone.
         "layers" is the copper layers of the zone on the board, from the top
-        (_BoardLayers.zone_copper).
+        (_BoardLayers.item_copper).
         """
         zones = []
         for zone in items:
@@ -386,7 +421,7 @@ class PCBParser:
             if _is_teardrop(zone):
                 continue
             # ZONE::IsOnCopperLayer: a copper layer of LSET::AllCuMask.
-            copper = layers.zone_copper(zone)
+            copper = layers.item_copper(zone)
             if not copper:
                 continue
             name = zone.first("net_name")
@@ -399,6 +434,40 @@ class PCBParser:
                 "layers": [layer for layer in layers.enabled if layer in copper],
             })
         return zones
+
+    def get_tracks(self) -> list[PCBTrack]:
+        """The tracks (segments and arcs) in the order of the file, as the items of
+        the pcbnew reader."""
+        return [
+            PCBTrack(
+                start=(t["start"]["x"], t["start"]["y"]),
+                end=(t["end"]["x"], t["end"]["y"]),
+                width=t["width"],
+                layer=t["layer"],
+                net=t["net"],
+                length=t["length"],
+            )
+            for t in self._parse_file()["tracks"]
+        ]
+
+    def get_vias(self) -> list[PCBVia]:
+        """The vias in the order of the file, as the items of the pcbnew reader."""
+        return [
+            PCBVia(
+                position=(v["at"]["x"], v["at"]["y"]),
+                size=v["size"],
+                drill=v["drill"],
+                top_layer=v["top_layer"],
+                bottom_layer=v["bottom_layer"],
+                net=v["net"],
+            )
+            for v in self._parse_file()["vias"]
+        ]
+
+    def get_zones(self) -> list[PCBZone]:
+        """The copper zones as the items of the pcbnew reader, with no fill state (the
+        text reader does not read it)."""
+        return [PCBZone(z["net_name"], z["layers"], None) for z in self._parse_file()["zones"]]
 
     def get_footprints(self) -> list[PCBFootprint]:
         """Get all footprints from PCB.

@@ -6,6 +6,7 @@ import asyncio
 import functools
 
 from ..errors import WorkbenchError
+from ..parsers.pcb_items import PCBTrack, PCBVia, PCBZone
 from ..server import mcp
 from ..utils import kicad_cli
 from ..utils.file_versions import with_board_versions
@@ -453,7 +454,7 @@ async def analyze_pcb_nets(file_path: str) -> str:
 
 @mcp.tool()
 @with_board_versions("file_path")
-@_board_tool("")
+@_board_tool(": no fill state of the zones")
 async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     """Give the tracks and the vias of one net of a board, with their lengths and widths.
 
@@ -464,9 +465,9 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
 
     Give the full net name of the board, case-sensitive (for example "/SDA" for a local
     label of the root sheet). The total length is the sum of the track segments, with
-    no vias and no pads. The tables show 50 segments and 20 vias. The warning about
-    mixed track widths is an advice of the tool, not a DRC result. With the text reader
-    (no pcbnew), the tables are cut with no note and there is no width warning.
+    no vias and no pads. The tables show 50 segments and 20 vias, in the order of the
+    board file. The warning about different track widths comes from the tool, not from
+    a DRC. With the text reader (no pcbnew), the zones have no fill state.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -477,161 +478,21 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     """
     try:
         parser = _get_parser(file_path)
-
-        if not _is_pcbnew(parser):
-            # The text reader: _net gives the net names of each file version.
-            data = parser._parse_file()
-            matched_tracks = [t for t in data["tracks"] if t.get("net") == net_name]
-            matched_vias = [v for v in data["vias"] if v.get("net") == net_name]
-            matched_zones = [z for z in data["zones"] if z.get("net_name") == net_name]
-
-            # A net with only zones (for example a GND pour) is a net with copper.
-            if not matched_tracks and not matched_vias and not matched_zones:
-                return _similar_nets(
-                    net_name,
-                    [t.get("net", "") for t in data["tracks"]],
-                    [v.get("net", "") for v in data["vias"]],
-                    [z.get("net_name", "") for z in data["zones"]],
-                )
-
-            total_length = sum(t.get("length", 0) for t in matched_tracks)
-            widths = [t["width"] for t in matched_tracks]
-            layers = sorted({t["layer"] for t in matched_tracks})
-
-            lines = [
-                f"# Track Analysis: {net_name}",
-                "",
-                f"**Track Segments:** {len(matched_tracks)}",
-                f"**Vias:** {len(matched_vias)}",
-                f"**Copper Zones:** {len(matched_zones)}",
-                f"**Total Track Length:** {total_length:.3f} mm",
-                f"**Track Layers:** {', '.join(layers) if layers else 'N/A'}",
-            ]
-
-            if widths:
-                unique_widths = sorted({f"{w:.4f}" for w in widths})
-                lines.append(f"**Track Widths:** {', '.join(unique_widths)} mm")
-
-            if matched_tracks:
-                lines += [
-                    "",
-                    "## Track Segments",
-                    "| # | Start | End | Width | Layer | Length |",
-                    "|---|-------|-----|-------|-------|--------|",
-                ]
-                for i, t in enumerate(matched_tracks[:50], 1):
-                    lines.append(
-                        f"| {i} | ({t['start']['x']:.2f}, {t['start']['y']:.2f}) | "
-                        f"({t['end']['x']:.2f}, {t['end']['y']:.2f}) | {t['width']:.4f} | "
-                        f"{t['layer']} | {t.get('length', 0):.3f} |"
-                    )
-
-            if matched_vias:
-                lines += [
-                    "",
-                    "## Vias",
-                    "| # | Position | Drill | Layers |",
-                    "|---|----------|-------|--------|",
-                ]
-                for i, v in enumerate(matched_vias[:20], 1):
-                    span = v.get("top_layer", "") + " -> " + v.get("bottom_layer", "") if v.get("top_layer") else v.get("layers", "")
-                    lines.append(
-                        f"| {i} | ({v['at']['x']:.2f}, {v['at']['y']:.2f}) | "
-                        f"{v['drill']:.4f} | {span} |"
-                    )
-
-            if matched_zones:
-                lines += [
-                    "",
-                    "## Copper Zones",
-                    "| Net | Layers |",
-                    "|-----|--------|",
-                ]
-                for z in matched_zones:
-                    lines.append(f"| {z['net_name']} | {_zone_layers(z['layers'])} |")
-
-            return "\n".join(lines)
-
-        tracks = parser.get_tracks_by_net(net_name)
-        vias = parser.get_vias_for_net(net_name)
-        zones = parser.get_zones_for_net(net_name)
-
+        # The items of the two readers (pcb_items): the text reader gives no fill state,
+        # and the pcbnew reader gives the user names of the layers (backlog P2).
+        tracks, vias, zones = parser.get_tracks(), parser.get_vias(), parser.get_zones()
+        net_tracks = [t for t in tracks if t.net == net_name]
+        net_vias = [v for v in vias if v.net == net_name]
+        net_zones = [z for z in zones if z.net_name == net_name]
         # A net with only zones (for example a GND pour) is a net with copper.
-        if not tracks and not vias and not zones:
+        if not net_tracks and not net_vias and not net_zones:
             return _similar_nets(
                 net_name,
-                [t.net for t in parser.get_tracks()],
-                [v.net for v in parser.get_vias()],
-                [z.net_name for z in parser.get_zones()],
+                [t.net for t in tracks],
+                [v.net for v in vias],
+                [z.net_name for z in zones],
             )
-
-        total_length = sum(t.length for t in tracks)
-        widths = [t.width for t in tracks]
-        layers = sorted({t.layer for t in tracks})
-
-        lines = [
-            f"# Track Analysis: {net_name}",
-            "",
-            f"**Track Segments:** {len(tracks)}",
-            f"**Vias:** {len(vias)}",
-            f"**Copper Zones:** {len(zones)}",
-            f"**Total Track Length:** {total_length:.3f} mm",
-            f"**Track Layers:** {', '.join(layers) if layers else 'N/A'}",
-        ]
-
-        if widths:
-            unique_widths = sorted({f"{w:.4f}" for w in widths})
-            lines.append(f"**Track Widths:** {', '.join(unique_widths)} mm")
-            if len({round(w, 4) for w in widths}) > 1:
-                lines.append("⚠️ Mixed track widths detected — may indicate manual routing or design rule override.")
-
-        # Track segment details
-        if tracks:
-            lines += [
-                "",
-                "## Track Segments",
-                "| # | Start | End | Width | Layer | Length |",
-                "|---|-------|-----|-------|-------|--------|",
-            ]
-            for i, t in enumerate(tracks[:50], 1):
-                lines.append(
-                    f"| {i} | ({t.start[0]:.2f}, {t.start[1]:.2f}) | "
-                    f"({t.end[0]:.2f}, {t.end[1]:.2f}) | {t.width:.4f} | "
-                    f"{t.layer} | {t.length:.3f} |"
-                )
-            if len(tracks) > 50:
-                lines.append(f"| ... | ({len(tracks) - 50} more segments) | | | | |")
-
-        # Via details
-        if vias:
-            lines += [
-                "",
-                "## Vias",
-                "| # | Position | Size | Drill | Span |",
-                "|---|----------|------|-------|------|",
-            ]
-            for i, v in enumerate(vias[:20], 1):
-                lines.append(
-                    f"| {i} | ({v.position[0]:.2f}, {v.position[1]:.2f}) | "
-                    f"{v.size:.3f} | {v.drill:.3f} | {v.top_layer} -> {v.bottom_layer} |"
-                )
-            if len(vias) > 20:
-                lines.append(f"| ... | ({len(vias) - 20} more vias) | | | |")
-
-        # Zone details
-        if zones:
-            lines += [
-                "",
-                "## Copper Zones",
-                "| Net | Layers | Filled |",
-                "|-----|--------|--------|",
-            ]
-            for z in zones:
-                lines.append(
-                    f"| {z.net_name} | {_zone_layers(z.layers)} | {'Yes' if z.filled else 'No'} |"
-                )
-
-        return "\n".join(lines)
+        return _net_items_answer(net_name, net_tracks, net_vias, net_zones)
 
     except Exception as e:
         return error_answer(e, "Error parsing PCB")
@@ -749,7 +610,7 @@ async def analyze_pcb_signal_integrity(
 
         # If specific net requested, show detail
         if net_name:
-            tracks = parser.get_tracks_by_net(net_name)
+            tracks = [t for t in parser.get_tracks() if t.net == net_name]
             if not tracks:
                 return f"No tracks found for net '{net_name}'."
             total = sum(t.length for t in tracks)
@@ -856,7 +717,7 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
     than one copper layer: the tool gives all of its copper layers on the board, from
     the top, and counts each of them for the GND coverage. On a board with more than 2
     copper layers, a warning tells when the GND zones are not on each copper layer:
-    this warning is an advice of the tool, not a check of KiCad. "filled" is the fill
+    this warning comes from the tool, not from a check of KiCad. "filled" is the fill
     state that the file has. With the text reader (no pcbnew), the words of the power
     nets are different (VDD, VCC, VBUS, LDO, DCDC; GND, PGND, AGND, DGND) and the
     zones have no fill state.
@@ -1027,6 +888,78 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
 
 
 # ── Helpers ──────────────────────────────────────────────────
+
+
+# The warning of find_tracks_by_net for a net with tracks of different widths.
+_MIXED_WIDTHS = (
+    "⚠️ The tracks of the net have different widths. A manual change of the routing or "
+    "of the design rules can be the cause. This warning comes from the tool, not from "
+    "a DRC."
+)
+
+
+def _net_items_answer(
+    net_name: str, tracks: list[PCBTrack], vias: list[PCBVia], zones: list[PCBZone]
+) -> str:
+    """The answer of find_tracks_by_net for the items of one net."""
+    total_length = sum(t.length for t in tracks)
+    widths = sorted({f"{t.width:.4f}" for t in tracks})
+    layers = sorted({t.layer for t in tracks})
+    lines = [
+        f"# Track Analysis: {net_name}",
+        "",
+        f"**Track Segments:** {len(tracks)}",
+        f"**Vias:** {len(vias)}",
+        f"**Copper Zones:** {len(zones)}",
+        f"**Total Track Length:** {total_length:.3f} mm",
+        f"**Track Layers:** {', '.join(layers) if layers else 'N/A'}",
+    ]
+    if widths:
+        lines.append(f"**Track Widths:** {', '.join(widths)} mm")
+        if len(widths) > 1:
+            lines.append(_MIXED_WIDTHS)
+    if tracks:
+        lines += [
+            "",
+            "## Track Segments",
+            "| # | Start | End | Width | Layer | Length |",
+            "|---|-------|-----|-------|-------|--------|",
+        ]
+        for i, t in enumerate(tracks[:50], 1):
+            lines.append(
+                f"| {i} | ({t.start[0]:.2f}, {t.start[1]:.2f}) | "
+                f"({t.end[0]:.2f}, {t.end[1]:.2f}) | {t.width:.4f} | "
+                f"{t.layer} | {t.length:.3f} |"
+            )
+        if len(tracks) > 50:
+            lines.append(f"| ... | ({len(tracks) - 50} more segments) | | | | |")
+    if vias:
+        lines += [
+            "",
+            "## Vias",
+            "| # | Position | Size | Drill | Span |",
+            "|---|----------|------|-------|------|",
+        ]
+        for i, v in enumerate(vias[:20], 1):
+            lines.append(
+                f"| {i} | ({v.position[0]:.2f}, {v.position[1]:.2f}) | "
+                f"{v.size:.3f} | {v.drill:.3f} | {v.top_layer} -> {v.bottom_layer} |"
+            )
+        if len(vias) > 20:
+            lines.append(f"| ... | ({len(vias) - 20} more vias) | | | |")
+    if zones:
+        # One reader gives the fill state of each zone, or of none (the text reader).
+        fill = zones[0].filled is not None
+        lines += [
+            "",
+            "## Copper Zones",
+            "| Net | Layers | Filled |" if fill else "| Net | Layers |",
+            "|-----|--------|--------|" if fill else "|-----|--------|",
+        ]
+        for z in zones:
+            row = f"| {z.net_name} | {_zone_layers(z.layers)} |"
+            lines.append(row + (f" {'Yes' if z.filled else 'No'} |" if fill else ""))
+    return "\n".join(lines)
 
 
 def _zone_layers(layers: list[str]) -> str:

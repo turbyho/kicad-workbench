@@ -19,7 +19,6 @@ from kicad_workbench.parsers.netlist_parser import NetlistParser
 from kicad_workbench.tools import (
     hierarchical_analysis,
     netlist,
-    pin_analysis,
     schematic,
     schematic_editor,
     schematic_search,
@@ -148,13 +147,6 @@ class TestNetlistErrorsOfTheTools:
         assert result == (
             f"❌ The server cannot make the netlist of {sch}: kicad-cli stopped with the exit code 1: cannot load"
         )
-
-    def test_pin_conflicts(self, sch):
-        result = asyncio.run(pin_analysis.detect_pin_conflicts(str(sch)))
-        assert result.startswith(
-            f"❌ The server cannot make the netlist of {sch}: kicad-cli stopped"
-        )
-        assert "Traceback" not in result
 
     def test_search_with_no_netlist_is_an_error(self, sch):
         # The components of the hierarchy come from the netlist of kicad-cli.

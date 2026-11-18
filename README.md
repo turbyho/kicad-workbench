@@ -63,7 +63,7 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   Gerber exports.
 - **Checks.** ERC (with the annotation check of the ERC dialog, which kicad-cli does
   not run) and DRC through kicad-cli, the pin and pad check of "Update PCB from
-  Schematic", the pin conflicts of the netlist, and the links to the libraries and
+  Schematic", the pin conflicts of the ERC, and the links to the libraries and
   the 3D models.
 - **Libraries.** The library tables of KiCad and of the project, a search as in the
   choosers of KiCad, the content of symbols and footprints, and PNG images. New

@@ -15,7 +15,7 @@ mcp = FastMCP(
 
     - Schematics: components, nets, symbols, the sheet hierarchy, the netlist.
     - Boards: footprints, tracks, nets, statistics.
-    - Checks: ERC and DRC of kicad-cli, the pin conflicts of the netlist, the pin and
+    - Checks: ERC and DRC of kicad-cli, the pin conflicts of the ERC, the pin and
       pad checks, the library links.
     - Libraries: the library tables, the search, symbols and footprints, PNG images,
       new project libraries, the rows of the project tables, the upgrade of older

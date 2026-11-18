@@ -1,4 +1,4 @@
-"""Tests of the netlist of the pin conflict, hierarchy and search tools.
+"""Tests of the netlist of the hierarchy and search tools.
 
 The tools read the netlist that kicad-cli writes now (netlist.current_netlist).
 They used a netlist file that they found next to the sheet, or in the temporary
@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from kicad_workbench.errors import InputError
-from kicad_workbench.tools import netlist, pin_analysis
+from kicad_workbench.tools import netlist
 from kicad_workbench.utils import kicad_cli
 from kicad_workbench.utils.kicad_cli import CliExport
 
@@ -30,7 +30,7 @@ def _netlist(nets: str) -> bytes:
     ).encode()
 
 
-# Two output pins on one net: an error of detect_pin_conflicts.
+# Two output pins on one net.
 DRIVERS = _netlist(
     '<net code="1" name="N"><node ref="U1" pin="2" pintype="output"/>'
     '<node ref="U2" pin="2" pintype="output"/></net>'
@@ -40,6 +40,11 @@ FIXED = _netlist(
     '<net code="1" name="N"><node ref="U1" pin="2" pintype="output"/>'
     '<node ref="U2" pin="2" pintype="input"/></net>'
 )
+
+
+def _types(netlist_parser) -> list[str]:
+    """The pin types of the net N."""
+    return [node.type for node in netlist_parser.get_nets()["N"].nodes]
 
 
 @pytest.fixture
@@ -66,8 +71,8 @@ def test_an_old_netlist_file_is_not_used(monkeypatch, sch):
         return CliExport(FIXED, [])
 
     monkeypatch.setattr(netlist, "export_with_kicad_cli", export)
-    result = asyncio.run(pin_analysis.detect_pin_conflicts(str(sch)))
-    assert result.startswith("✅ **No Pin Conflicts Detected**"), result
+    result = asyncio.run(netlist.current_netlist(sch))
+    assert _types(result) == ["output", "input"]
     assert calls == [sch]
     # The file of generate_netlist did not change: the tools do not write it.
     assert netlist.netlist_cache_path(sch).read_bytes() == DRIVERS
@@ -76,10 +81,10 @@ def test_an_old_netlist_file_is_not_used(monkeypatch, sch):
 def test_each_call_reads_the_schematic_again(monkeypatch, sch):
     data = [DRIVERS, FIXED]
     monkeypatch.setattr(netlist, "export_with_kicad_cli", lambda *args: CliExport(data.pop(0), []))
-    first = asyncio.run(pin_analysis.detect_pin_conflicts(str(sch)))
-    second = asyncio.run(pin_analysis.detect_pin_conflicts(str(sch)))
-    assert first.startswith("❌ **Pin Conflicts Detected**"), first
-    assert second.startswith("✅ **No Pin Conflicts Detected**"), second
+    first = asyncio.run(netlist.current_netlist(sch))
+    second = asyncio.run(netlist.current_netlist(sch))
+    assert _types(first) == ["output", "output"]
+    assert _types(second) == ["output", "input"]
 
 
 def test_a_netlist_of_kicad_cli_that_is_not_xml(monkeypatch, sch):

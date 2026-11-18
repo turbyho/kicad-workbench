@@ -203,10 +203,15 @@ class _ErcResult:
     @property
     def passed(self) -> bool:
         """True when the ERC dialog shows no violation and no annotation info bar."""
+        return self.passed_for(self.errors)
+
+    def passed_for(self, errors: list[ERCError]) -> bool:
+        """True when the annotation check ran, the schematic is fully annotated (no info
+        bar) and no violation of errors is active."""
         return (
             self.annotation_checked
             and not self.not_fully_annotated
-            and not any(not error.excluded for error in self.errors)
+            and not any(not error.excluded for error in errors)
         )
 
 
@@ -733,6 +738,42 @@ async def get_erc_violations(
     Returns:
         The ERC violations of the severity.
     """
+    return await erc_violations_answer(schematic_path, severity)
+
+
+# The ERC items of the connections of the symbol pins (ERC_ITEM of KiCad 10.0.6):
+# detect_pin_conflicts. The other items (for example endpoint_off_grid, similar_power,
+# stacked_pin_name) are in run_erc.
+PIN_ERC_TYPES = (
+    "pin_to_pin",  # a conflict in the pin map of the project (an error or a warning)
+    "pin_not_driven",  # an input pin with no output pin on its net
+    "power_pin_not_driven",  # a power input pin with no power output pin
+    "pin_not_connected",  # a pin with no connection and no "no connection" flag
+    "no_connect_connected",  # a pin with a "no connection" flag is connected
+    "isolated_pin_label",  # a label connected to only one pin
+    "duplicate_pins",  # pins of one number on different nets
+    "different_unit_net",  # a shared pin has a different net in an other unit
+    "ground_pin_not_ground",  # a ground pin not on a ground net
+    "missing_input_pin",  # the input pins of a unit that is not placed
+    "missing_bidi_pin",  # the bidirectional pins of a unit that is not placed
+    "missing_power_pin",  # the power input pins of a unit that is not placed
+)
+_SEVERITIES = ("", "error", "warning")
+
+
+async def erc_violations_answer(
+    schematic_path: str, severity: str = "", types: tuple[str, ...] = ()
+) -> str:
+    """The answer of get_erc_violations: the violations of the ERC report of kicad-cli
+    (a new run when the report is older than the schematic files), with a filter by
+    severity and by type (types: empty for all types).
+
+    "✅" only when no violation of the filter is active, the annotation check ran and
+    the schematic is fully annotated (_ErcResult.passed_for). An excluded violation
+    shows in the table and does not count.
+    """
+    if severity not in _SEVERITIES:
+        return f'❌ Invalid severity {severity!r}. Options: "error", "warning" or empty.'
     try:
         sch_path = Path(schematic_path)
         if not sch_path.exists():
@@ -774,24 +815,36 @@ No electrical violations detected.{notes_text}{unannotated_text}"""
 
         # Apply filter
         filtered_errors = _filter_erc_errors(errors, severity)
+        if types:
+            filtered_errors = [e for e in filtered_errors if e.type in types]
+        filter_text = f"severity = '{severity or 'all'}'" + (
+            f", type = {', '.join(types)}" if types else ""
+        )
 
+        active = [e for e in filtered_errors if not e.excluded]
+        excluded = len(filtered_errors) - len(active)
+        excluded_text = f"\n**Excluded (not counted):** {excluded}" if excluded else ""
+
+        if not active:
+            # With no type filter, a violation of an other severity also gives no "✅".
+            passed = erc.passed_for(filtered_errors if types else errors)
+            title = "✅ **No Matching Violations**" if passed else "⚠️ **No Matching Violations**"
+            result = f"""{title}
+
+**Schematic:** {schematic_path}
+**Filter:** {filter_text}{excluded_text}
+
+No active violation matches the filter.{notes_text}"""
+        else:
+            result = f"""# ERC Violations
+
+**Schematic:** {schematic_path}
+**Filter:** {filter_text}
+**Count:** {len(active)}{excluded_text}{notes_text}"""
         if not filtered_errors:
-            title = (
-                "✅ **No Matching Violations**" if erc.passed else "⚠️ **No Matching Violations**"
-            )
-            return f"""{title}
+            return result + unannotated_text
 
-**Schematic:** {schematic_path}
-**Filter:** severity = '{severity or 'all'}'
-
-No violations match the specified filter.{notes_text}{unannotated_text}"""
-
-        # Format results
-        result = f"""# ERC Violations
-
-**Schematic:** {schematic_path}
-**Filter:** severity = '{severity or 'all'}'
-**Count:** {len(filtered_errors)}{notes_text}
+        result += f"""
 
 ## Violations
 

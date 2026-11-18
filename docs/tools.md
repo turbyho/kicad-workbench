@@ -60,9 +60,8 @@ The netlist of kicad-cli is the most exact source for the connections. Use it be
 the schematic tools when the connection is important.
 
 The netlist tools above read the file of `generate_netlist`: make it again after a
-change of the schematic. The pin conflict tool, the hierarchy tools,
-`search_components_by_type` and `get_symbol_details` make the netlist with kicad-cli
-at each call. Thus they always
+change of the schematic. The hierarchy tools, `search_components_by_type` and
+`get_symbol_details` make the netlist with kicad-cli at each call. Thus they always
 give the current state of the schematic, and they need kicad-cli. For a large
 project, each call takes some seconds.
 
@@ -112,7 +111,7 @@ a save in KiCad 8 or later.
 | `check_schematic_pin_pad_mapping(schematic_path, references?)` | For each symbol: the pins with no pad, the pins with no number, the pads with no pin, and the symbols whose footprint KiCad does not find. It uses the netlist and the rules of "Update PCB from Schematic" |
 | `check_pin_pad_mapping(symbol_lib_id, footprint_lib_id?, project_path?)` | The same check for one library symbol and one footprint |
 | `check_library_links(project_path)` | The links of a project to its libraries: the library checks of ERC and DRC, the footprints of the schematic, and the 3D models (as the STEP export finds them) |
-| `detect_pin_conflicts(schematic_path)` | Nets with more than one output or driver pin (errors), nets with one pin (warnings), and pins with no connection (information). The pin types come from the netlist |
+| `detect_pin_conflicts(schematic_path, severity?)` | The items of the ERC of kicad-cli about the connections of the symbol pins, with the pin map, the severities and the exclusions of the project: pin conflicts (`pin_to_pin`), inputs and power inputs with no driver, pins with no connection, labels on only one pin, pins of one number on different nets, and the pins of units that are not placed. It uses the last ERC report until a schematic file changes |
 
 ## Libraries
 

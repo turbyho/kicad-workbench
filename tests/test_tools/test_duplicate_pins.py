@@ -14,7 +14,7 @@ import pytest
 
 from kicad_workbench.errors import InputError
 from kicad_workbench.parsers.netlist_parser import NetlistParser
-from kicad_workbench.tools import netlist, pin_analysis
+from kicad_workbench.tools import netlist
 
 
 def netlist_xml(a_type: str = "passive", nc_same_net: bool = False) -> str:
@@ -97,17 +97,15 @@ def test_trace_of_a_pin_number_on_more_nets():
     assert parser().trace_connection("U1", "9") == {"error": "Pin 9 not found in component U1"}
 
 
-def test_the_type_of_each_node_on_its_net(tmp_path, monkeypatch):
-    # Pin 2 of U1 is an output on /NA and passive on /NB: only /NA has two drivers.
-    netlist_parser = parser(a_type="output")
-
-    async def current_netlist(path):
-        return netlist_parser
-
-    monkeypatch.setattr(pin_analysis, "current_netlist", current_netlist)
-    conflicts = asyncio.run(pin_analysis._pin_conflicts(tmp_path / "a.kicad_sch"))
-    drivers = [c for c in conflicts if c["type"] == "multiple_outputs"]
-    assert [c["net"] for c in drivers] == ["/NA"]
+def test_the_type_of_each_node_on_its_net():
+    # Pin 2 of U1 is an output on /NA and passive on /NB: each node has the type of its
+    # pin on its net.
+    nets = parser(a_type="output").get_nets()
+    types = {
+        net: [node.type for node in nets[net].nodes if (node.reference, node.number) == ("U1", "2")]
+        for net in ("/NA", "/NB")
+    }
+    assert types == {"/NA": ["output"], "/NB": ["passive"]}
 
 
 @pytest.mark.parametrize("pin", ["", "2"])

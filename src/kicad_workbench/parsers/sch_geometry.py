@@ -101,6 +101,109 @@ class Placement:
         return self.x + x, self.y + y
 
 
+# SYMBOL_ORIENTATION_T of KiCad 10.0.6 (eeschema/symbol.h).
+SYM_NORMAL, SYM_ROTATE_CLOCKWISE, SYM_ROTATE_COUNTERCLOCKWISE = 0, 1, 2
+SYM_ORIENT_0, SYM_ORIENT_90, SYM_ORIENT_180, SYM_ORIENT_270 = 3, 4, 5, 6
+SYM_MIRROR_X, SYM_MIRROR_Y = 0x100, 0x200
+
+# A TRANSFORM of KiCad: (x1, y1, x2, y2).
+Transform = tuple[int, int, int, int]
+_IDENTITY: Transform = (1, 0, 0, 1)
+# SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol: the transform of the angle of (at ...).
+_ANGLE_TRANSFORMS: dict[int, Transform] = {
+    0: _IDENTITY,
+    90: (0, 1, -1, 0),
+    180: (-1, 0, 0, -1),
+    270: (0, -1, 1, 0),
+}
+_INCREMENTS: dict[int, Transform] = {
+    SYM_ROTATE_COUNTERCLOCKWISE: (0, 1, -1, 0),
+    SYM_ROTATE_CLOCKWISE: (0, -1, 1, 0),
+    SYM_MIRROR_Y: (-1, 0, 0, 1),
+    SYM_MIRROR_X: (1, 0, 0, -1),
+}
+_ORIENT_STEPS = {
+    SYM_ORIENT_90: (SYM_ROTATE_COUNTERCLOCKWISE,),
+    SYM_ORIENT_180: (SYM_ROTATE_COUNTERCLOCKWISE, SYM_ROTATE_COUNTERCLOCKWISE),
+    SYM_ORIENT_270: (SYM_ROTATE_CLOCKWISE,),
+}
+
+
+def set_orientation(transform: Transform, orientation: int) -> Transform:
+    """Return the transform after SCH_SYMBOL::SetOrientation (KiCad 10.0.6).
+
+    SYM_ORIENT_0 and SYM_NORMAL set the identity. A rotation or a mirror flag alone
+    changes the transform (new = old * increment). SYM_ORIENT_n sets the identity, then
+    rotates. SYM_ORIENT_n plus SYM_MIRROR_X and/or SYM_MIRROR_Y sets SYM_ORIENT_n, then
+    mirrors around X, then around Y. An other value does not change the transform.
+    """
+    if orientation in (SYM_ORIENT_0, SYM_NORMAL):
+        return _IDENTITY
+    if orientation in _INCREMENTS:
+        x1, y1, x2, y2 = transform
+        t_x1, t_y1, t_x2, t_y2 = _INCREMENTS[orientation]
+        return (
+            x1 * t_x1 + x2 * t_y1,
+            y1 * t_x1 + y2 * t_y1,
+            x1 * t_x2 + x2 * t_y2,
+            y1 * t_x2 + y2 * t_y2,
+        )
+    if orientation in _ORIENT_STEPS:
+        result = _IDENTITY
+        for step in _ORIENT_STEPS[orientation]:
+            result = set_orientation(result, step)
+        return result
+    base = orientation & 0xFF
+    mirrors = orientation & (SYM_MIRROR_X | SYM_MIRROR_Y)
+    if base not in (SYM_ORIENT_0, *_ORIENT_STEPS) or not mirrors or orientation & ~0x3FF:
+        return transform  # wxFAIL_MSG: "Invalid schematic symbol orientation type."
+    result = set_orientation(transform, base)
+    for mirror in (SYM_MIRROR_X, SYM_MIRROR_Y):
+        if mirrors & mirror:
+            result = set_orientation(result, mirror)
+    return result
+
+
+# SCH_SYMBOL::GetOrientation: the orientations that it tries, in this order.
+_ORIENTATIONS = (
+    SYM_ORIENT_0,
+    SYM_ORIENT_90,
+    SYM_ORIENT_180,
+    SYM_ORIENT_270,
+    SYM_MIRROR_X + SYM_ORIENT_0,
+    SYM_MIRROR_X + SYM_ORIENT_90,
+    SYM_MIRROR_X + SYM_ORIENT_270,
+    SYM_MIRROR_Y,
+    SYM_MIRROR_Y + SYM_ORIENT_0,
+    SYM_MIRROR_Y + SYM_ORIENT_90,
+    SYM_MIRROR_Y + SYM_ORIENT_180,
+    SYM_MIRROR_Y + SYM_ORIENT_270,
+)
+
+
+def symbol_orientation(where: Placement) -> int:
+    """Return the orientation flags of a placed symbol (SCH_SYMBOL::GetOrientation of
+    KiCad 10.0.6).
+
+    The parser sets the transform of the angle and then applies the mirror
+    (parseSchematicSymbol). GetOrientation changes a copy of the symbol with each value
+    of its list in turn (the copy keeps its transform between the values: SYM_MIRROR_Y
+    alone changes the transform of the value before it), and gives the first value
+    whose transform is the transform of the symbol. No value: SYM_NORMAL.
+    """
+    transform = _ANGLE_TRANSFORMS[where.angle]
+    if where.mirror:
+        transform = set_orientation(
+            transform, SYM_MIRROR_X if where.mirror == "x" else SYM_MIRROR_Y
+        )
+    temp = transform
+    for orientation in _ORIENTATIONS:
+        temp = set_orientation(temp, orientation)
+        if temp == transform:
+            return orientation
+    return SYM_NORMAL
+
+
 def placement(symbol: Node) -> Placement:
     """Return the placement of a (symbol (lib_id ...) ...) of a sheet.
 

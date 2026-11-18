@@ -37,6 +37,7 @@ from pathlib import Path
 
 from ..utils.kicad_text import decode_as_kicad
 from .bus_names import unescape_string
+from .c_numbers import atoi
 from .kicad_fields import SYMBOL_FIELD_NAMES, WX_SPACE
 from .kicad_versions import KicadFileError, file_text, header_version
 from .sexpr import Node, edited, parse, property_atoms, quote
@@ -609,6 +610,26 @@ class LibraryPin:
     x: float
     y: float
     hidden: bool = False  # The token hide, or (hide yes) of KiCad 9 and later.
+    # The angle of the (at x y angle) of the pin, as parseSymbolPin reads it (_pin_angle):
+    # 0 PIN_RIGHT, 90 PIN_UP, 180 PIN_LEFT, 270 PIN_DOWN. KiCad refuses an other angle.
+    # None: the (at ...) has no angle, and KiCad refuses the file.
+    angle: int | None = 0
+
+
+def _pin_angle(at: Node | None) -> int | None:
+    """Return the angle of the (at x y angle) of a pin as parseSymbolPin reads it:
+    NeedNUMBER, then (int)strtol (atoi), thus "90.0" is 90 and "9e1" is 9. A pin with
+    no (at ...) keeps the orientation PIN_RIGHT of its constructor (0). None: the (at
+    ...) has no angle (NeedNUMBER refuses it).
+
+    Raises:
+        InputError: The angle is not a number (NeedNUMBER).
+    """
+    if at is None:
+        return 0
+    if at.number(2) is None:
+        return None
+    return atoi(at.value(2) or "")
 
 
 def hidden(node: Node) -> bool:
@@ -719,6 +740,7 @@ def library_pins(
                     at.number(0, 0.0) if at else 0.0,
                     at.number(1, 0.0) if at else 0.0,
                     hidden(pin),
+                    _pin_angle(at),
                 )
             )
     return pins

@@ -32,6 +32,12 @@ from ..parsers.lib_symbols import (
     unit_count,
 )
 from ..parsers.sch_geometry import (
+    SYM_MIRROR_X,
+    SYM_MIRROR_Y,
+    SYM_ORIENT_0,
+    SYM_ORIENT_90,
+    SYM_ORIENT_180,
+    SYM_ORIENT_270,
     ConnectionPoints,
     Placement,
     Point,
@@ -44,6 +50,7 @@ from ..parsers.sch_geometry import (
     placed_pins,
     placed_symbols,
     placement,
+    symbol_orientation,
     symbol_unit,
     to_mm,
 )
@@ -167,15 +174,84 @@ def _symbol_def_block(lib_block: str, lib_id: str) -> str | None:
     return lib_block[node.start : node.end] if node else None
 
 
+# SPIN_STYLE of KiCad 10.0.6 (sch_label.h) and the angle that the saver writes for each
+# (SCH_IO_KICAD_SEXPR::saveText).
+_SPIN_LEFT, _SPIN_UP, _SPIN_RIGHT, _SPIN_BOTTOM = 0, 1, 2, 3
+_SPIN_ANGLES = {_SPIN_RIGHT: 0, _SPIN_UP: 90, _SPIN_LEFT: 180, _SPIN_BOTTOM: 270}
+# orientLabel: the spin of the orientation of the library pin (the angle of its (at ...)).
+_PIN_SPINS = {0: _SPIN_LEFT, 90: _SPIN_BOTTOM, 270: _SPIN_UP, 180: _SPIN_RIGHT}
+_ROTATE_CCW = {
+    _SPIN_LEFT: _SPIN_BOTTOM,
+    _SPIN_BOTTOM: _SPIN_RIGHT,
+    _SPIN_RIGHT: _SPIN_UP,
+    _SPIN_UP: _SPIN_LEFT,
+}
+_MIRROR_X = {_SPIN_UP: _SPIN_BOTTOM, _SPIN_BOTTOM: _SPIN_UP}
+_MIRROR_Y = {_SPIN_LEFT: _SPIN_RIGHT, _SPIN_RIGHT: _SPIN_LEFT}
+# orientLabel: (the number of CCW rotations, mirror X, mirror Y) of each orientation of
+# GetOrientation. An other orientation (SYM_NORMAL) has no change.
+_LABEL_ORIENTS = {
+    SYM_ORIENT_0: (0, False, False),
+    SYM_ORIENT_90: (1, False, False),
+    SYM_ORIENT_180: (2, False, False),
+    SYM_ORIENT_270: (3, False, False),
+    SYM_MIRROR_X + SYM_ORIENT_0: (0, True, False),
+    SYM_MIRROR_X + SYM_ORIENT_90: (1, True, False),
+    SYM_MIRROR_Y: (0, False, True),
+    SYM_MIRROR_X + SYM_ORIENT_270: (3, True, False),
+    SYM_MIRROR_Y + SYM_ORIENT_0: (0, False, True),
+    SYM_MIRROR_Y + SYM_ORIENT_90: (1, False, True),
+    SYM_MIRROR_Y + SYM_ORIENT_180: (2, False, True),
+    SYM_MIRROR_Y + SYM_ORIENT_270: (3, False, True),
+}
+
+
+def pin_label_angle(pin: LibraryPin, where: Placement) -> int:
+    """Return the angle of a label on a pin of a placed symbol, as KiCad 10.0.6 orients a
+    label that it adds on a pin (orientLabel of eeschema/tools/backannotate.cpp, "Update
+    Schematic from PCB").
+
+    The spin comes from the orientation of the library pin: a pin that goes to the right
+    from its connection point (PIN_RIGHT) gets a label to the left, thus away from the
+    body. Then the spin turns with the orientation of the symbol
+    (sch_geometry.symbol_orientation): CCW rotations, then the mirror around X, then
+    around Y.
+
+    KiCad uses orientLabel for the local labels of the back annotation. The tools use
+    it for the global and the hierarchical labels too: their spin styles have the same
+    angles (SCH_GLOBALLABEL::SetSpinStyle and SCH_HIERLABEL::SetSpinStyle call
+    SCH_LABEL_BASE::SetSpinStyle, and SCH_IO_KICAD_SEXPR::saveText writes the angle of
+    the spin style of each label).
+
+    Raises:
+        InputError: The pin has no angle, or its angle is not 0, 90, 180 or 270: the
+            parser of KiCad refuses the file (parseSymbolPin).
+    """
+    if pin.angle not in _PIN_SPINS:
+        angle = "no angle" if pin.angle is None else f"the angle {pin.angle}"
+        raise InputError(f"pin {pin.number!r} has {angle}, not 0, 90, 180 or 270")
+    spin = _PIN_SPINS[pin.angle]
+    # GetOrientation gives a value of _LABEL_ORIENTS for each transform of the parser
+    # (symbol_orientation); SYM_NORMAL would be a defect of the port.
+    rotations, mirror_x, mirror_y = _LABEL_ORIENTS[symbol_orientation(where)]
+    for _ in range(rotations):
+        spin = _ROTATE_CCW[spin]
+    if mirror_x:
+        spin = _MIRROR_X.get(spin, spin)
+    if mirror_y:
+        spin = _MIRROR_Y.get(spin, spin)
+    return _SPIN_ANGLES[spin]
+
+
 def _pin_anchor(content: str, reference: str, pin: str) -> tuple[Point, int] | None:
     """Return the position (IU) of a pin of a placed symbol, and the angle of a label on it.
 
     The symbols are the symbols with this Reference field: each unit of a
     part is a symbol of its own. The pin is the first pin with the number in
     the unit and the body style of a symbol, with its rotation and mirror
-    (sch_geometry). The angle (0, 90, 180 or 270) points away from the
-    symbol position, thus the labels of the pins point out of the body.
-    None: no symbol has the pin, or the definition is not in lib_symbols.
+    (sch_geometry). The angle is the angle of KiCad for a label on the pin
+    (pin_label_angle). None: no symbol has the pin, or the definition is not in
+    lib_symbols.
     """
     root = parse(content)
     defs = definitions(root)
@@ -190,12 +266,7 @@ def _pin_anchor(content: str, reference: str, pin: str) -> tuple[Point, int] | N
         for lib_pin, (x, y) in placed_pins(symbol, definition, {symbol_unit(symbol)}):
             if lib_pin.number != pin:
                 continue
-            sx, sy = x - where.x, y - where.y
-            if abs(sx) >= abs(sy):
-                angle = 0 if sx >= 0 else 180
-            else:
-                angle = 90 if sy < 0 else 270
-            return (x, y), angle
+            return (x, y), pin_label_angle(lib_pin, where)
     return None
 
 
@@ -1033,11 +1104,13 @@ async def add_hierarchical_label(
 
     A hierarchical label in a sub-sheet connects its net to the pin with the same
     name of the sheet symbol in the parent sheet. The tool puts the label on the
-    connection point of the pin (with the rotation and the mirror of the symbol), with
-    the angle that points away from the body of the symbol. The text goes from the
-    point to the right at 0 degrees, up at 90, to the left at 180 and down at 270, as
-    KiCad draws it: a label at 180 has its text to the left of the point. This is
-    correct, not a defect. With x and y, the angle is 0.
+    connection point of the pin (with the rotation and the mirror of the symbol). The
+    angle comes from the direction of the pin, as KiCad orients a label that "Update
+    Schematic from PCB" adds on a pin: the label points away from the body, also on
+    the long side of a tall symbol. The text goes from the point to the right at 0
+    degrees, up at 90, to the left at 180 and down at 270, as KiCad draws it: a label
+    at 180 has its text to the left of the point. This is correct, not a defect. With
+    x and y, the angle is 0.
     Make sure that the connection is in the netlist: generate_netlist.
 
     Args:
@@ -1094,11 +1167,13 @@ async def add_global_label(
     """Add a global label on a pin of a component.
 
     A global label connects the nets with its name in all sheets of the project. The
-    tool puts the label on the connection point of the pin, with the angle that points
-    away from the body of the symbol. The text goes from the point to the right at 0
-    degrees, up at 90, to the left at 180 and down at 270, as KiCad draws it: a label
-    at 180 has its text to the left of the point. This is correct, not a defect. With x
-    and y, the angle is 0.
+    tool puts the label on the connection point of the pin (with the rotation and the
+    mirror of the symbol). The angle comes from the direction of the pin, as KiCad
+    orients a label that "Update Schematic from PCB" adds on a pin: the label points
+    away from the body, also on the long side of a tall symbol. The text goes from the
+    point to the right at 0 degrees, up at 90, to the left at 180 and down at 270, as
+    KiCad draws it: a label at 180 has its text to the left of the point. This is
+    correct, not a defect. With x and y, the angle is 0.
 
     Args:
         file_path: The .kicad_sch file.

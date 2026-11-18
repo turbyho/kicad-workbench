@@ -13,6 +13,12 @@ except a test with the marker file_versions (the tests of the check;
 spike/kicad-versions/schematic_versions_check.py compares it with KiCad).
 """
 
+import json
+import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+
 import pytest
 
 from kicad_workbench.parsers import c_numbers
@@ -65,3 +71,46 @@ def long64(monkeypatch):
 def long32(monkeypatch):
     """The long of Windows (LLP64, the MSVC build of KiCad)."""
     yield from _long(monkeypatch, 32)
+
+
+@dataclass
+class FakeDrc:
+    """A board and a fake kicad-cli for the DRC tools (tools/validation.py)."""
+
+    pcb: Path
+    calls: list[list[str]] = field(default_factory=list)
+    # The violations of the report for the arguments of kicad-cli.
+    violations: Callable[[list[str]], list[dict]] = lambda args: []
+
+
+@pytest.fixture
+def fake_drc(tmp_path, monkeypatch):
+    """A board with a zone, a fake kicad-cli that writes the report of
+    FakeDrc.violations (and keeps its calls), KiCad 10.0.6, and the reports in tmp_path."""
+    from kicad_workbench.tools import validation
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(
+        '(kicad_pcb (version 20260206) (generator "pcbnew") (zone (net 0) (layer "F.Cu")))\n',
+        encoding="utf-8",
+    )
+    fake = FakeDrc(pcb)
+
+    async def kicad_cli(args, *rest, **kwargs):
+        fake.calls.append(args)
+        output = Path(args[args.index("--output") + 1])
+        report = {
+            "violations": fake.violations(args),
+            "unconnected_items": [],
+            "schematic_parity": [],
+        }
+        output.write_text(json.dumps(report), encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    async def version():
+        return "10.0.6"
+
+    monkeypatch.setattr(validation, "run_kicad_cli", kicad_cli)
+    monkeypatch.setattr(validation, "get_kicad_version", version)
+    monkeypatch.setattr(validation, "_temp_dir", lambda: tmp_path)
+    return fake

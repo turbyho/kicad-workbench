@@ -7,18 +7,10 @@ A fake kicad-cli writes the report: the tests need no KiCad. The DRC of kicad-cl
 import asyncio
 import json
 import subprocess
-from pathlib import Path
 
 import pytest
 
 from kicad_workbench.tools import validation
-
-BOARD = '(kicad_pcb (version 20260206) (generator "pcbnew") (zone (net 0) (layer "F.Cu")))\n'
-
-
-def _report(violations: list[dict]) -> str:
-    return json.dumps({"violations": violations, "unconnected_items": [], "schematic_parity": []})
-
 
 CLEARANCE = {
     "type": "clearance",
@@ -29,27 +21,11 @@ CLEARANCE = {
 
 
 @pytest.fixture
-def board(tmp_path, monkeypatch):
-    """A board, a fake kicad-cli (its calls), and KiCad 10.0.6."""
-    pcb = tmp_path / "b.kicad_pcb"
-    pcb.write_text(BOARD, encoding="utf-8")
-    calls: list[list[str]] = []
-
-    async def kicad_cli(args, *rest, **kwargs):
-        calls.append(args)
-        # With the refill, the old fill of the file gives no violation.
-        output = Path(args[args.index("--output") + 1])
-        refill = "--refill-zones" in args
-        output.write_text(_report([] if refill else [CLEARANCE]), encoding="utf-8")
-        return subprocess.CompletedProcess(args, 0, b"", b"")
-
-    async def version():
-        return "10.0.6"
-
-    monkeypatch.setattr(validation, "run_kicad_cli", kicad_cli)
-    monkeypatch.setattr(validation, "get_kicad_version", version)
-    monkeypatch.setattr(validation, "_temp_dir", lambda: tmp_path)
-    return pcb, calls
+def board(fake_drc):
+    """A board, a fake kicad-cli (its calls), and KiCad 10.0.6. With the refill, the
+    old fill of the file gives no violation."""
+    fake_drc.violations = lambda args: [] if "--refill-zones" in args else [CLEARANCE]
+    return fake_drc.pcb, fake_drc.calls
 
 
 def test_run_drc_passes_the_refill_to_kicad_cli(board):

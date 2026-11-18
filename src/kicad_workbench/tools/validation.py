@@ -217,6 +217,15 @@ def _drc_row(error: DRCError, description_limit: int | None = None) -> str:
     )
 
 
+def _active_and_excluded(errors: list[ERCError] | list[DRCError]) -> tuple[list, str]:
+    """The violations of a filtered list that the project does not exclude, and the
+    line of the excluded ones for the answer of get_erc_violations and
+    get_drc_violations: an excluded violation shows in the table and does not count."""
+    active = [e for e in errors if not e.excluded]
+    excluded = len(errors) - len(active)
+    return active, f"\n**Excluded (not counted):** {excluded}" if excluded else ""
+
+
 def _count_text(errors: list[ERCError] | list[DRCError]) -> str:
     """Give the error, warning and exclusion counts as Markdown list lines."""
     active = [e for e in errors if not e.excluded]
@@ -929,9 +938,7 @@ No electrical violations detected.{notes_text}{unannotated_text}"""
             f", type = {', '.join(types)}" if types else ""
         )
 
-        active = [e for e in filtered_errors if not e.excluded]
-        excluded = len(filtered_errors) - len(active)
-        excluded_text = f"\n**Excluded (not counted):** {excluded}" if excluded else ""
+        active, excluded_text = _active_and_excluded(filtered_errors)
 
         if not active:
             # With no type filter, a violation of an other severity also gives no "✅".
@@ -980,7 +987,9 @@ async def get_drc_violations(
     The tool uses the last DRC report of the same zone mode until the board, a project
     file, a .kicad_dru file or a schematic of the project changes: then it runs the DRC
     again (run_drc). The list has all violations of the type. An excluded violation
-    shows with "(excluded)", and the count includes it.
+    shows with "(excluded)" and does not count. A filter that matches no active
+    violation gives "✅" only when the board has no active violation of an other type,
+    else "⚠️" with their count (also for a type with a typing error).
 
     Args:
         pcb_path: The .kicad_pcb file.
@@ -1025,23 +1034,36 @@ No design rule violations detected."""
 
         # Apply filter
         filtered_errors = _filter_drc_errors(errors, violation_type)
+        filter_text = f"type = '{violation_type or 'all'}'"
 
-        if not filtered_errors:
-            return f"""✅ **No Matching Violations**
+        active, excluded_text = _active_and_excluded(filtered_errors)
+
+        if not active:
+            # "✅" only when the board has no active violation: a filter that matches
+            # nothing (also a type with a typing error) is no pass of the DRC.
+            others = sum(1 for e in errors if not e.excluded)
+            title = "⚠️ **No Matching Violations**" if others else "✅ **No Matching Violations**"
+            other_text = (
+                f"\n\nThe board has {others} active violation(s) of other types." if others else ""
+            )
+            result = f"""{title}
 
 **PCB:** {pcb_path}
 **Zones:** {zones}
-**Filter:** type = '{violation_type or 'all'}'
+**Filter:** {filter_text}{excluded_text}
 
-No violations match the specified filter."""
-
-        # Format results
-        result = f"""# DRC Violations
+No active violation matches the filter.{other_text}"""
+            if not filtered_errors:
+                return result
+        else:
+            result = f"""# DRC Violations
 
 **PCB:** {pcb_path}
 **Zones:** {zones}
-**Filter:** type = '{violation_type or 'all'}'
-**Count:** {len(filtered_errors)}
+**Filter:** {filter_text}
+**Count:** {len(active)}{excluded_text}"""
+
+        result += f"""
 
 ## Violations
 

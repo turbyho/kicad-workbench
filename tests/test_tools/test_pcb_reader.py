@@ -216,3 +216,36 @@ def test_a_value_with_a_bar_is_one_cell(no_pcbnew, tmp_path):
     board.write_text(text.replace('"Value" "10k"', '"Value" "10k|1%"', 1), encoding="utf-8")
     rows = _footprint_rows(run("list_pcb_footprints", board))
     assert "| R1 | 10k\\|1% | R_0805_2012Metric |" in rows[0], rows
+
+
+ZONES_ONLY = """(kicad_pcb (version 20260206)
+  (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal))
+  (zone (net "GND") (layers "F.Cu" "B.Cu") (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1))))
+)
+"""
+
+
+def test_text_reader_a_net_with_only_zones(no_pcbnew, tmp_path):
+    board = tmp_path / "zones.kicad_pcb"
+    board.write_text(ZONES_ONLY, encoding="utf-8")
+    answer = run("find_tracks_by_net", board, net_name="GND")
+    assert "**Copper Zones:** 1" in answer, answer
+    assert "| GND | F.Cu, B.Cu |" in answer, answer
+
+
+def test_text_reader_gives_the_gnd_layer_warning(no_pcbnew, tmp_path):
+    board = tmp_path / "zones.kicad_pcb"
+    board.write_text(ZONES_ONLY, encoding="utf-8")
+    answer = run("analyze_pcb_power_integrity", board)
+    assert "**GND Coverage:** 1 zones across 2 layers" in answer, answer
+    assert "⚠️ GND zones only on 2 of 4 copper layers." in answer, answer
+
+
+def test_text_reader_similar_nets_with_zones(no_pcbnew, tmp_path):
+    # A net with only zones is a similar net too.
+    board = tmp_path / "zones.kicad_pcb"
+    board.write_text(ZONES_ONLY, encoding="utf-8")
+    answer = run("find_tracks_by_net", board, net_name="gnd")
+    assert "- `GND` (0 segments, 0 vias, 1 copper zones)" in answer, answer
+    answer = run("find_tracks_by_net", board, net_name="VCC")
+    assert answer.startswith("No tracks, vias or copper zones found for net 'VCC'."), answer

@@ -175,6 +175,9 @@ async def list_pcb_footprints(
 async def get_pcb_statistics(file_path: str) -> str:
     """Give the size, the layers, the counts and the design rules of a board.
 
+    The zone count is the count of the copper zones, as the Zone Manager of KiCad lists
+    them: no rule area (keepout), no teardrop, and no zone on non-copper layers only.
+
     Args:
         file_path: The .kicad_pcb file.
 
@@ -245,7 +248,9 @@ async def analyze_pcb_nets(file_path: str) -> str:
 
     The tool gives the distribution of the track widths and of the via drills, the
     layer spans of the vias, the tracks of each layer, the nets by the length of their
-    tracks, and a comparison with the design rules of the board.
+    tracks, and a comparison with the design rules of the board. The zone count is the
+    count of the copper zones, as the Zone Manager of KiCad lists them: no rule area
+    (keepout), no teardrop, and no zone on non-copper layers only.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -445,12 +450,17 @@ async def analyze_pcb_nets(file_path: str) -> str:
 async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     """Give the tracks and the vias of one net of a board, with their lengths and widths.
 
+    The tool also gives the copper zones of the net (no rule area, no teardrop), each
+    with all of its copper layers on the board, from the top. "Track Layers" is the
+    layers of the tracks only. For a net with no tracks, vias or zones, the tool gives
+    the nets whose name contains the name (no difference between upper and lower case).
+
     Args:
         file_path: The .kicad_pcb file.
         net_name: The name of the net.
 
     Returns:
-        The tracks and the vias of the net, and the length of the net.
+        The tracks, the vias and the copper zones of the net, and the length of the net.
     """
     try:
         parser = _get_parser(file_path)
@@ -462,19 +472,14 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
             matched_vias = [v for v in data["vias"] if v.get("net") == net_name]
             matched_zones = [z for z in data["zones"] if z.get("net_name") == net_name]
 
-            if not matched_tracks and not matched_vias:
-                # Try case-insensitive partial match
-                all_nets = sorted({
-                    t.get("net", "") for t in data["tracks"] if t.get("net")
-                })
-                suggestions = [n for n in all_nets if net_name.lower() in n.lower()]
-                if suggestions:
-                    return (
-                        f"# Tracks for '{net_name}'\n\n"
-                        "Exact match not found. Similar nets:\n"
-                        + "\n".join(f"- `{n}` ({sum(1 for t in data['tracks'] if t.get('net') == n)} segments)" for n in suggestions)
-                    )
-                return f"No tracks found for net '{net_name}'."
+            # A net with only zones (for example a GND pour) is a net with copper.
+            if not matched_tracks and not matched_vias and not matched_zones:
+                return _similar_nets(
+                    net_name,
+                    [t.get("net", "") for t in data["tracks"]],
+                    [v.get("net", "") for v in data["vias"]],
+                    [z.get("net_name", "") for z in data["zones"]],
+                )
 
             total_length = sum(t.get("length", 0) for t in matched_tracks)
             widths = [t["width"] for t in matched_tracks]
@@ -487,7 +492,7 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
                 f"**Vias:** {len(matched_vias)}",
                 f"**Copper Zones:** {len(matched_zones)}",
                 f"**Total Track Length:** {total_length:.3f} mm",
-                f"**Layers Used:** {', '.join(layers) if layers else 'N/A'}",
+                f"**Track Layers:** {', '.join(layers) if layers else 'N/A'}",
             ]
 
             if widths:
@@ -526,11 +531,11 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
                 lines += [
                     "",
                     "## Copper Zones",
-                    "| Net | Layer |",
-                    "|-----|-------|",
+                    "| Net | Layers |",
+                    "|-----|--------|",
                 ]
                 for z in matched_zones:
-                    lines.append(f"| {z['net_name']} | {z.get('layer', 'N/A')} |")
+                    lines.append(f"| {z['net_name']} | {_zone_layers(z['layers'])} |")
 
             return "\n".join(lines)
 
@@ -538,18 +543,14 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
         vias = parser.get_vias_for_net(net_name)
         zones = parser.get_zones_for_net(net_name)
 
-        if not tracks and not vias:
-            # Try case-insensitive partial match
-            all_tracks = parser.get_tracks()
-            matching = [t for t in all_tracks if net_name.lower() in t.net.lower()]
-            if matching:
-                net_names = sorted({t.net for t in matching})
-                return (
-                    f"# Tracks for '{net_name}'\n\n"
-                    f"Exact match not found. Did you mean one of these?\n"
-                    + "\n".join(f"- `{n}` ({sum(1 for t in matching if t.net == n)} segments)" for n in net_names)
-                )
-            return f"No tracks or vias found for net '{net_name}'."
+        # A net with only zones (for example a GND pour) is a net with copper.
+        if not tracks and not vias and not zones:
+            return _similar_nets(
+                net_name,
+                [t.net for t in parser.get_tracks()],
+                [v.net for v in parser.get_vias()],
+                [z.net_name for z in parser.get_zones()],
+            )
 
         total_length = sum(t.length for t in tracks)
         widths = [t.width for t in tracks]
@@ -562,7 +563,7 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
             f"**Vias:** {len(vias)}",
             f"**Copper Zones:** {len(zones)}",
             f"**Total Track Length:** {total_length:.3f} mm",
-            f"**Layers Used:** {', '.join(layers) if layers else 'N/A'}",
+            f"**Track Layers:** {', '.join(layers) if layers else 'N/A'}",
         ]
 
         if widths:
@@ -609,11 +610,13 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
             lines += [
                 "",
                 "## Copper Zones",
-                "| Net | Layer | Filled |",
-                "|-----|-------|--------|",
+                "| Net | Layers | Filled |",
+                "|-----|--------|--------|",
             ]
             for z in zones:
-                lines.append(f"| {z.net_name} | {z.layer} | {'Yes' if z.filled else 'No'} |")
+                lines.append(
+                    f"| {z.net_name} | {_zone_layers(z.layers)} | {'Yes' if z.filled else 'No'} |"
+                )
 
         return "\n".join(lines)
 
@@ -825,6 +828,12 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
     The tool finds a power net and a ground net from its name (for example VCC, VDD,
     VBUS, GND), and gives the copper zones of each and the tracks of the power nets.
 
+    The copper zones are the zones of the Zone Manager of KiCad: no rule area
+    (keepout), no teardrop, and no zone on non-copper layers only. A zone can be on more
+    than one copper layer: the tool gives all of its copper layers on the board, from
+    the top, and counts each of them for the GND coverage. On a board with more than 2
+    copper layers, a warning tells when the GND zones are not on each copper layer.
+
     Args:
         file_path: The .kicad_pcb file.
 
@@ -854,23 +863,24 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
                 lines += [
                     "",
                     "## Power Copper Zones",
-                    "| Net | Layer |",
-                    "|-----|-------|",
+                    "| Net | Layers |",
+                    "|-----|--------|",
                 ]
                 for z in power_zones:
-                    lines.append(f"| {z['net_name']} | {z.get('layer', 'N/A')} |")
+                    lines.append(f"| {z['net_name']} | {_zone_layers(z['layers'])} |")
 
             if gnd_zones:
                 lines += [
                     "",
                     "## GND Copper Zones",
-                    "| Net | Layer |",
-                    "|-----|-------|",
+                    "| Net | Layers |",
+                    "|-----|--------|",
                 ]
                 for z in gnd_zones:
-                    lines.append(f"| {z['net_name']} | {z.get('layer', 'N/A')} |")
-                gnd_layers = {z.get("layer", "") for z in gnd_zones}
+                    lines.append(f"| {z['net_name']} | {_zone_layers(z['layers'])} |")
+                gnd_layers = {layer for z in gnd_zones for layer in z["layers"]}
                 lines.append(f"\n**GND Coverage:** {len(gnd_zones)} zones across {len(gnd_layers)} layers")
+                lines += _gnd_layer_warning(gnd_layers, data["general"]["layers"])
 
             # Power net tracks
             net_stats: dict[str, dict] = {}
@@ -921,7 +931,7 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
         power_zone_by_net: dict[str, list[str]] = {}
         for z in power_zones:
             power_zone_by_net.setdefault(z.net_name, []).append(
-                f"{z.layer} ({'filled' if z.filled else 'unfilled'})"
+                f"{_zone_layers(z.layers)} ({'filled' if z.filled else 'unfilled'})"
             )
 
         if power_zone_by_net:
@@ -932,14 +942,14 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
                 "|-----|-------|--------|",
             ]
             for net, layer_info in sorted(power_zone_by_net.items()):
-                layers_str = ", ".join(layer_info)
+                layers_str = "; ".join(layer_info)
                 lines.append(f"| {net} | {len(layer_info)} | {layers_str} |")
 
         # GND zones
         gnd_zone_by_net: dict[str, list[str]] = {}
         for z in gnd_zones:
             gnd_zone_by_net.setdefault(z.net_name, []).append(
-                f"{z.layer} ({'filled' if z.filled else 'unfilled'})"
+                f"{_zone_layers(z.layers)} ({'filled' if z.filled else 'unfilled'})"
             )
 
         if gnd_zone_by_net:
@@ -950,22 +960,18 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
                 "|-----|-------|--------|",
             ]
             for net, layer_info in sorted(gnd_zone_by_net.items()):
-                layers_str = ", ".join(layer_info)
+                layers_str = "; ".join(layer_info)
                 lines.append(f"| {net} | {len(layer_info)} | {layers_str} |")
 
             total_gnd_zones = len(gnd_zones)
             filled_gnd_zones = sum(1 for z in gnd_zones if z.filled)
-            gnd_layers = {z.layer for z in gnd_zones}
+            gnd_layers = {layer for z in gnd_zones for layer in z.layers}
             lines += [
                 "",
                 f"**GND Coverage:** {total_gnd_zones} zones across {len(gnd_layers)} layers "
                 f"({filled_gnd_zones} filled)",
             ]
-            if rules["copper_layers"] > 2 and len(gnd_layers) < rules["copper_layers"]:
-                lines.append(
-                    f"⚠️ GND zones only on {len(gnd_layers)} of {rules['copper_layers']} copper layers. "
-                    "Consider adding GND pour on inner layers for better EMI performance."
-                )
+            lines += _gnd_layer_warning(gnd_layers, rules["copper_layers"])
 
         # Power net track routing
         power_track_nets = [
@@ -994,6 +1000,41 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
 
 
 # ── Helpers ──────────────────────────────────────────────────
+
+
+def _zone_layers(layers: list[str]) -> str:
+    """The copper layers of a zone (get_zones) for a table cell."""
+    return ", ".join(layers) if layers else "no copper layer of the board"
+
+
+def _gnd_layer_warning(gnd_layers: set[str], copper_layers: int) -> list[str]:
+    """The warning of analyze_pcb_power_integrity for a board with more than 2 copper
+    layers when the GND zones are not on each copper layer."""
+    if copper_layers <= 2 or len(gnd_layers) >= copper_layers:
+        return []
+    return [
+        f"⚠️ GND zones only on {len(gnd_layers)} of {copper_layers} copper layers. A GND "
+        "zone on each inner layer can decrease the EMI of the board."
+    ]
+
+
+def _similar_nets(net_name: str, tracks: list[str], vias: list[str], zones: list[str]) -> str:
+    """The answer of find_tracks_by_net for a net with no tracks, vias or copper zones:
+    the nets whose name contains the name (no difference between upper and lower case),
+    with the count of each item. The arguments are the nets of the items."""
+    names = sorted({name for name in (*tracks, *vias, *zones) if name})
+    similar = [name for name in names if net_name.lower() in name.lower()]
+    if not similar:
+        return f"No tracks, vias or copper zones found for net '{net_name}'."
+    return (
+        f"# Tracks for '{net_name}'\n\n"
+        "Exact match not found. Similar nets:\n"
+        + "\n".join(
+            f"- `{name}` ({tracks.count(name)} segments, {vias.count(name)} vias, "
+            f"{zones.count(name)} copper zones)"
+            for name in similar
+        )
+    )
 
 
 def _detect_diff_pairs(net_names: set[str]) -> list[tuple[str, str, str]]:

@@ -54,3 +54,85 @@ def test_tracks_and_vias(board):
 def test_counts_of_the_board_info(board):
     info = PCBParserKiCad(str(board)).get_board_info()
     assert (info["tracks_count"], info["vias_count"]) == (2, 1)
+
+
+@pytest.fixture
+def zone_board(tmp_path):
+    """A board with 4 copper layers and zones, made with pcbnew."""
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(4)
+    nets = {}
+    for name in ("GND", "+3V3"):
+        nets[name] = pcbnew.NETINFO_ITEM(board, name)
+        board.Add(nets[name])
+
+    def zone(layers, net=None):
+        item = pcbnew.ZONE(board)
+        layer_set = pcbnew.LSET()
+        for layer in layers:
+            layer_set.AddLayer(layer)
+        item.SetLayerSet(layer_set)
+        if net:
+            item.SetNetCode(nets[net].GetNetCode())
+        outline = item.Outline()
+        outline.NewOutline()
+        for x, y in ((0, 0), (10, 0), (10, 10)):
+            outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+        board.Add(item)
+        return item
+
+    zone([pcbnew.B_Cu, pcbnew.F_Cu], "GND")
+    zone([pcbnew.In2_Cu], "+3V3")
+    rule = zone([pcbnew.In1_Cu])
+    rule.SetIsRuleArea(True)
+    zone([pcbnew.F_SilkS])
+    path = tmp_path / "zones.kicad_pcb"
+    pcbnew.SaveBoard(str(path), board)
+    return path
+
+
+def test_the_copper_zones_and_their_layers(zone_board):
+    # GetLayerName() of a zone gives F.Cu for each zone: a zone keeps its layers in its
+    # layer set. The rule area and the zone on F.SilkS are not copper zones.
+    parser = PCBParserKiCad(str(zone_board))
+    zones = parser.get_zones()
+    assert [(zone.net_name, zone.layers) for zone in zones] == [
+        ("GND", ["F.Cu", "B.Cu"]),
+        ("+3V3", ["In2.Cu"]),
+    ]
+    assert parser.get_board_info()["zones_count"] == 2
+
+
+def test_the_two_readers_give_the_same_zones(zone_board):
+    from kicad_workbench.parsers.pcb_parser import PCBParser
+
+    text = PCBParser(str(zone_board))._parse_file()["zones"]
+    zones = PCBParserKiCad(str(zone_board)).get_zones()
+    assert [(zone["net_name"], zone["layers"]) for zone in text] == [
+        (zone.net_name, zone.layers) for zone in zones
+    ]
+
+
+def test_the_power_tool_counts_each_layer_of_a_zone(zone_board):
+    import asyncio
+
+    from kicad_workbench.tools import pcb
+
+    answer = asyncio.run(pcb.analyze_pcb_power_integrity(str(zone_board)))
+    assert "| GND | 1 | F.Cu, B.Cu (unfilled) |" in answer, answer
+    assert "| +3V3 | 1 | In2.Cu (unfilled) |" in answer, answer
+    assert "**GND Coverage:** 1 zones across 2 layers (0 filled)" in answer, answer
+    assert "GND zones only on 2 of 4 copper layers" in answer, answer
+
+
+def test_a_net_with_only_zones(zone_board):
+    import asyncio
+
+    from kicad_workbench.tools import pcb
+
+    answer = asyncio.run(pcb.find_tracks_by_net(str(zone_board), "+3V3"))
+    assert "**Copper Zones:** 1" in answer, answer
+    assert "| +3V3 | In2.Cu | No |" in answer, answer
+    assert "**Track Layers:** N/A" in answer, answer
+    similar = asyncio.run(pcb.find_tracks_by_net(str(zone_board), "3v3"))
+    assert "- `+3V3` (0 segments, 0 vias, 1 copper zones)" in similar, similar

@@ -98,10 +98,10 @@ a save in KiCad 8 or later.
 |---|---|
 | `list_pcb_footprints(file_path, filter_layer?)` | The footprints, optionally of one layer |
 | `get_pcb_statistics(file_path)` | The size of the board, the layers, the counts, the design rules |
-| `find_tracks_by_net(file_path, net_name)` | The tracks and vias of one net, with their lengths and widths |
+| `find_tracks_by_net(file_path, net_name)` | The tracks, vias and copper zones of one net, with their lengths, widths and layers |
 | `analyze_pcb_nets(file_path)` | The distribution of track widths and vias, the nets by length, the layers |
 | `analyze_pcb_signal_integrity(file_path, net_name?)` | Differential pairs and their length difference (heuristic: the pairs come from the net names, for example `USB_P` and `USB_N`), RF tracks, the longest signal nets |
-| `analyze_pcb_power_integrity(file_path)` | The copper zones of the power and ground nets (count, layers, filled state), and the routing of the power nets (heuristic: the power and ground nets come from the net names) |
+| `analyze_pcb_power_integrity(file_path)` | The copper zones of the power and ground nets (count, all copper layers of each zone, filled state), the GND coverage of the copper layers, and the routing of the power nets (heuristic: the power and ground nets come from the net names) |
 
 ## Checks
 

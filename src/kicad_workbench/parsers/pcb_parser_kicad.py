@@ -109,10 +109,10 @@ class PCBVia:
 
 @dataclass
 class PCBZone:
-    """Copper zone from PCB file."""
+    """A copper zone of the board."""
 
     net_name: str
-    layer: str
+    layers: list[str]  # the copper layers of the zone, from the top (F.Cu, In1.Cu, B.Cu)
     filled: bool
 
 
@@ -260,15 +260,36 @@ class PCBParserKiCad:
     # ── Zones ───────────────────────────────────────────────
 
     def get_zones(self) -> list[PCBZone]:
-        """Get all copper zones."""
+        """The copper zones of the board, as the Zone Manager of KiCad selects them
+        (ZONE_SETTINGS_BAG): no rule area, no teardrop, and only a zone on a copper layer.
+
+        The layers of a zone are the copper layers of its layer set that the board
+        enables (PCB_IO_KICAD_SEXPR::format(ZONE) saves these), from the top, with their
+        standard names. A zone keeps its layers in its layer set (ZONE::SetLayerSet):
+        GetLayerName() reads the layer of BOARD_ITEM, which a zone does not set, thus
+        it gives F.Cu for each zone.
+        """
+        pcbnew = self._pcbnew
         zones = []
-        for zone in self.board.Zones():
+        for zone in self._copper_zones():
             zones.append(PCBZone(
                 net_name=zone.GetNetname(),
-                layer=_canonicalize_layer(zone.GetLayerName()),
+                layers=[
+                    pcbnew.BOARD.GetStandardLayerName(layer)
+                    for layer in zone.GetLayerSet().CuStack()
+                    if self.board.IsLayerEnabled(layer)
+                ],
                 filled=zone.IsFilled(),
             ))
         return zones
+
+    def _copper_zones(self) -> list:
+        """The ZONE items of the copper zones (ZONE_SETTINGS_BAG, see get_zones)."""
+        return [
+            zone
+            for zone in self.board.Zones()
+            if not zone.GetIsRuleArea() and not zone.IsTeardropArea() and zone.IsOnCopperLayer()
+        ]
 
     def get_zones_for_net(self, net_name: str) -> list[PCBZone]:
         return [z for z in self.get_zones() if z.net_name == net_name]
@@ -298,7 +319,7 @@ class PCBParserKiCad:
                 if isinstance(t, self._pcbnew.PCB_VIA)
             ),
             "nets_count": self.board.GetNetCount(),
-            "zones_count": len(list(self.board.Zones())),
+            "zones_count": len(self._copper_zones()),
         }
 
     # ── Design Rules ────────────────────────────────────────

@@ -107,14 +107,15 @@ class TestKicad9:
 
     def test_keepout_is_not_a_copper_zone(self, tmp_path):
         zones = parse_board(tmp_path, KICAD9)["zones"]
-        assert zones == [{"net_name": "GND", "layer": "B.Cu"}]
+        assert zones == [{"net_name": "GND", "layers": ["B.Cu"]}]
 
 
 class TestKicad10:
     def test_nets_are_names(self, tmp_path):
         data = parse_board(tmp_path, KICAD10)
         assert [track["net"] for track in data["tracks"]] == ["GND"]
-        assert data["zones"] == [{"net_name": "GND", "layer": "In1.Cu"}]
+        # In1.Cu is not a copper layer of this board (F.Cu and B.Cu only).
+        assert data["zones"] == [{"net_name": "GND", "layers": []}]
 
     def test_via_with_more_items_and_a_type(self, tmp_path):
         (via,) = parse_board(tmp_path, KICAD10)["vias"]
@@ -154,7 +155,127 @@ class TestMoreItems:
     def test_zones_of_the_board(self, tmp_path):
         # As in pcbnew: a zone in a footprint is not a board zone, and a
         # copper zone with no net is a zone.
-        assert parse_board(tmp_path, MORE)["zones"] == [{"net_name": "", "layer": "B.Cu"}]
+        assert parse_board(tmp_path, MORE)["zones"] == [{"net_name": "", "layers": ["B.Cu"]}]
+
+
+def _zone(head: str, extra: str = "") -> str:
+    return f"  (zone {head} {extra} (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1))))\n"
+
+
+# The zone layers as KiCad 10 reads them (spike/kicad-versions/zone_layers_check.py
+# compares the readers with the save of KiCad 8, 9 and 10).
+ZONES = (
+    """(kicad_pcb (version 20260206)
+  (layers
+    (0 "F.Cu" signal "Top")
+    (4 "Mid1" power)
+    (6 "In2.Cu" signal "GND_PLANE")
+    (2 "B.Cu" signal)
+    (5 "F.SilkS" user "F.Silkscreen")
+    (7 "In3.Cu" signal)
+  )
+"""
+    + _zone('(net "A") (layers "*.Cu")')
+    + _zone('(net "B") (layers "F&B.Cu")')
+    + _zone('(net "C") (layers "*In.Cu")')
+    + _zone('(net "D") (layer "Mid1")')
+    + _zone('(net "E") (layer "In5.Cu")')
+    + _zone('(net "F") (layers "B.Cu" "F.SilkS" "F.Cu")')
+    + _zone('(layer "In2.Cu")', '(placement (enabled yes) (sheetname "/"))')
+    + _zone('(layer "In2.Cu")', "(keepout (tracks not_allowed))")
+    + _zone('(net "H") (layer "F.Cu")', "(attr (teardrop (type padvia)))")
+    + _zone('(layers "F.SilkS" "B.SilkS")')
+    + ")\n"
+)
+
+
+class TestZoneLayers:
+    def test_the_copper_layers_of_the_layer_table(self, tmp_path):
+        # The copper entries end at the first entry with an other type, but the parser
+        # enables the layer of each later entry too: In3.Cu after F.SilkS is a copper
+        # layer of the board (pcbnew of KiCad 10.0.6: 5 copper layers).
+        assert parse_board(tmp_path, ZONES)["general"]["layers"] == 5
+
+    def test_the_layers_of_each_copper_zone(self, tmp_path):
+        zones = parse_board(tmp_path, ZONES)["zones"]
+        assert [(zone["net_name"], zone["layers"]) for zone in zones] == [
+            ("A", ["F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "B.Cu"]),
+            ("B", ["F.Cu", "B.Cu"]),
+            ("C", ["In1.Cu", "In2.Cu", "In3.Cu"]),
+            # "Mid1" is the first inner layer of the table: In1.Cu.
+            ("D", ["In1.Cu"]),
+            # A copper zone on a layer that the board does not enable.
+            ("E", []),
+            # The copper layers, from the top.
+            ("F", ["F.Cu", "B.Cu"]),
+        ]
+
+    def test_no_rule_area_teardrop_or_zone_off_copper(self, tmp_path):
+        # The zones of the Zone Manager (ZONE_SETTINGS_BAG): no rule area ((placement
+        # ...) or (keepout ...)), no teardrop, no zone on non-copper layers only.
+        nets = {zone["net_name"] for zone in parse_board(tmp_path, ZONES)["zones"]}
+        assert nets == {"A", "B", "C", "D", "E", "F"}
+
+
+# The inner names of LSET::NameToLayer, as pcbnew of KiCad 10.0.6 loads them.
+NAMES = (
+    """(kicad_pcb (version 20260206)
+  (layers
+    (0 "F.Cu" signal)
+    (4 "In1Sig" signal)
+    (6 "User.1" signal)
+    (8 "In4" signal)
+    (10 "Mid4" signal)
+    (2 "B.Cu" signal)
+  )
+"""
+    + _zone('(net "A") (layers "*.Cu")')
+    + _zone('(net "B") (layer "F.Cu")', "(attr (teardrop (type track_end)))")
+    + _zone('(net "C") (layer "F.Cu")', "(attr (teardrop))")
+    + _zone('(net "D") (layers "F.Cu" "B.Cu") (layer "In1.Cu")')
+    + _zone('(net "E") (layer "In1.Cu") (layers "F.Cu" "B.Cu")')
+    + ")\n"
+)
+
+
+class TestLayerNames:
+    def test_the_inner_names(self, tmp_path):
+        # "In1Sig": In1.Cu (NameToLayer does not compare the last 3 characters).
+        # "User.1": a layer that is not copper. "In4": In4.Cu (RemoveLast(3) does not
+        # change a text of 1 character). "Mid4": In4.Cu by its position.
+        data = parse_board(tmp_path, NAMES)
+        assert data["general"]["layers"] == 4
+        (zone, *_) = data["zones"]
+        assert zone == {"net_name": "A", "layers": ["F.Cu", "In1.Cu", "In4.Cu", "B.Cu"]}
+
+    def test_the_teardrop_type_and_the_last_layer_item(self, tmp_path):
+        # A teardrop with no type is a zone (TD_NONE). The last (layer ...) or
+        # (layers ...) of a zone gives its layers.
+        zones = parse_board(tmp_path, NAMES)["zones"]
+        assert [(zone["net_name"], zone["layers"]) for zone in zones] == [
+            ("A", ["F.Cu", "In1.Cu", "In4.Cu", "B.Cu"]),
+            ("C", ["F.Cu"]),
+            ("D", ["In1.Cu"]),
+            ("E", ["F.Cu", "B.Cu"]),
+        ]
+
+    def test_a_single_layer_has_no_masks(self, tmp_path):
+        # (layer X) is a layer name (lookUpLayer): "*.Cu" is no layer (KiCad: an
+        # undefined layer), thus the zone is not a copper zone.
+        text = (
+            '(kicad_pcb (version 20260206) (layers (0 "F.Cu" signal) (2 "B.Cu" signal))\n'
+            + _zone('(net "A") (layer "*.Cu")')
+            + _zone('(net "B") (layer "F&B.Cu")')
+            + ")"
+        )
+        assert parse_board(tmp_path, text)["zones"] == []
+
+    def test_no_layer_table(self, tmp_path):
+        # The layers of a new BOARD: F.Cu and B.Cu.
+        text = "(kicad_pcb (version 20260206)\n" + _zone('(net "A") (layers "*.Cu")') + ")"
+        data = parse_board(tmp_path, text)
+        assert data["general"]["layers"] == 2
+        assert data["zones"] == [{"net_name": "A", "layers": ["F.Cu", "B.Cu"]}]
 
 
 @pytest.mark.parametrize("version", [20171130, 20211014, 20991231])

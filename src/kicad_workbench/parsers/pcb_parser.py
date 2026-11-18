@@ -1,13 +1,13 @@
 """Text parser for KiCad PCB files (.kicad_pcb), without pcbnew."""
 
 import math
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
 from ..utils.file_handlers import validate_kicad_file
 from ..utils.kicad_text import read_as_kicad
+from .c_numbers import to_long
 from .kicad_versions import check_board_version, header_version
 from .sexpr import Node, parse
 
@@ -42,7 +42,137 @@ class PCBFootprint:
         )
 
 
-_COPPER_LAYER = re.compile(r"F\.Cu|B\.Cu|In\d+\.Cu")
+# The standard names of the copper layers (LSET::Name), from the top.
+_COPPER_NAMES = ("F.Cu", *(f"In{number}.Cu" for number in range(1, 31)), "B.Cu")
+# The layer types of a copper layer in the layer table (LAYER::ParseType gives
+# LT_UNDEFINED for each other type, for example "user").
+_COPPER_TYPES = {"signal", "power", "mixed", "jumper", "auxiliary", "front", "back"}
+# The names of the fixed map of LSET::NameToLayer that are not copper layers.
+_NON_COPPER_NAMES = {
+    "F.Adhes", "B.Adhes", "F.Paste", "B.Paste", "F.SilkS", "B.SilkS", "F.Mask", "B.Mask",
+    "Dwgs.User", "Cmts.User", "Eco1.User", "Eco2.User", "Edge.Cuts", "Margin", "F.CrtYd",
+    "B.CrtYd", "F.Fab", "B.Fab", "Rescue",
+}  # fmt: skip
+
+
+def _name_to_layer(name: str) -> str | None:
+    """The layer of a name as LSET::NameToLayer (KiCad 10.0.6) gives it: the standard
+    name of a copper layer, "" for a layer that is not copper, or None (-1).
+
+    "In<n>" and any 3 more characters is In<n>.Cu: the function removes the last 3
+    characters (wxString::RemoveLast, Truncate: no change for a text shorter than 3
+    characters) and does not compare them with ".Cu". A number n above 30 gives a
+    layer ID after In30_Cu, which is not a copper layer.
+    """
+    if name in ("F.Cu", "B.Cu"):
+        return name
+    if name in _NON_COPPER_NAMES:
+        return ""
+    if name.startswith("User."):
+        offset = to_long(name[5:])
+        if offset is not None and offset > 0:
+            return ""
+    if name.startswith("In"):
+        rest = name[2:]
+        offset = to_long(rest[:-3] if len(rest) >= 3 else rest)
+        if offset is not None and offset > 0:
+            return f"In{offset}.Cu" if offset <= 30 else ""
+    return None
+
+
+@dataclass
+class _BoardLayers:
+    """The copper layers of a board, as PCB_IO_KICAD_SEXPR_PARSER::parseLayers reads the
+    layer table: enabled is the standard names of the copper layers of the board, from
+    the top; names gives the layer of each copper name that an item can have."""
+
+    enabled: list[str]
+    names: dict[str, str]
+
+    def zone_copper(self, zone: Node) -> set[str]:
+        """The copper layers of the layer set of a zone (also the layers that the board
+        does not enable). parseZONE reads the items in their sequence: the last (layer
+        ...) or (layers ...) gives the layers. (layers ...) has the masks of the parser
+        for "*.Cu", "*In.Cu" and "F&B.Cu" (parseBoardItemLayersAsMask, LSET::AllCuMask);
+        (layer X) has no masks (parseBoardItemLayer, lookUpLayer: "*.Cu" is not a layer
+        name)."""
+        tokens: list[str] = []
+        masks = False
+        for item in zone.children():
+            if item.head == "layer":
+                tokens, masks = [item.value(0, "")], False
+            elif item.head == "layers":
+                tokens, masks = [atom.value for atom in item.atoms()], True
+        copper: set[str] = set()
+        for token in tokens:
+            if not masks:
+                if self.names.get(token):
+                    copper.add(self.names[token])
+            elif token == "*.Cu":
+                copper.update(_COPPER_NAMES)
+            elif token == "*In.Cu":
+                copper.update(_COPPER_NAMES[1:-1])
+            elif token == "F&B.Cu":
+                copper.update(("F.Cu", "B.Cu"))
+            elif self.names.get(token):
+                copper.add(self.names[token])
+        return copper
+
+
+def _board_layers(root: Node) -> _BoardLayers:
+    """The copper layers of the layer table (PCB_IO_KICAD_SEXPR_PARSER::parseLayers).
+
+    The copper entries are the entries at the start of the table, up to the first
+    entry with an other type. KiCad does not use their numbers: the first is F.Cu, the
+    last B.Cu, and an inner layer is the layer of its name when LSET::NameToLayer
+    knows the name (KiCad 9 and 10: also a layer that is not copper, for example
+    "User.1"), else In<position>.Cu. KiCad 8.0.9 uses the position only: the two rules
+    give the same layers for each table that KiCad writes (the inner layers are In1.Cu
+    to In<n>.Cu, in this sequence). The parser also knows each standard name
+    (PCB_IO_KICAD_SEXPR_PARSER::init); the name of a copper entry of the table replaces
+    it. The parser enables the layer of each later entry too: a later entry with a
+    copper name enables that copper layer. names gives "" for a name of a layer that is
+    not copper. A board with no layer table has the layers of a new BOARD: F.Cu and
+    B.Cu.
+    """
+    names = {name: name for name in _COPPER_NAMES}
+    table = root.first("layers")
+    if table is None:
+        return _BoardLayers(enabled=["F.Cu", "B.Cu"], names=names)
+    entries = [entry.value(0, "") for entry in table.children()]
+    types = [entry.value(1, "") for entry in table.children()]
+    count = next(
+        (index for index, kind in enumerate(types) if kind not in _COPPER_TYPES), len(types)
+    )
+    copper = entries[:count]
+    enabled = []
+    for position, name in enumerate(copper):
+        if position == 0:
+            layer = "F.Cu"
+        elif position == len(copper) - 1:
+            layer = "B.Cu"
+        else:
+            known = _name_to_layer(name)
+            layer = f"In{position}.Cu" if known is None else known
+        names[name] = layer
+        if layer:
+            enabled.append(layer)
+    enabled += [names[name] for name in entries[count:] if names.get(name)]
+    return _BoardLayers(enabled=[name for name in _COPPER_NAMES if name in enabled], names=names)
+
+
+def _is_teardrop(zone: Node) -> bool:
+    """True for a teardrop zone: parseZONE sets a teardrop type for (attr (teardrop
+    (type padvia))) and (attr (teardrop (type track_end))). With no type, the zone keeps
+    TD_NONE (a zone that is not a teardrop). An other type is a parse error of KiCad
+    (Expecting): the text reader does not check it, and the zone is not a teardrop."""
+    for attr in zone.children("attr"):
+        for teardrop in attr.children("teardrop"):
+            for kind in teardrop.children("type"):
+                if kind.value(0, "") in ("padvia", "track_end"):
+                    return True
+    return False
+
 
 def _net(item: Node, nets: dict[str, str]) -> str:
     """Return the net name of a track, a via or a zone.
@@ -153,33 +283,27 @@ class PCBParser:
         for item in root.children():
             items[item.head].append(item)
         nets = {net.value(0): net.value(1, "") for net in items["net"]}
+        layers = _board_layers(root)
 
         self._data = {
             "path": str(self.file_path),
-            "general": self._parse_general(root),
+            "general": self._parse_general(root, layers),
             "footprints": self._parse_footprints(items["footprint"]),
             "tracks": self._parse_tracks(items["segment"], items["arc"], nets),
             "vias": self._parse_vias(items["via"], nets),
-            "zones": self._parse_zones(items["zone"], nets),
+            "zones": self._parse_zones(items["zone"], nets, layers),
         }
 
         return self._data
 
-    def _parse_general(self, root: Node) -> dict[str, Any]:
+    def _parse_general(self, root: Node, layers: _BoardLayers) -> dict[str, Any]:
         """Parse the board thickness and the number of copper layers."""
         general = root.first("general")
         thickness = general.first("thickness") if general else None
 
-        # The layer table: (layers (0 "F.Cu" signal) (2 "B.Cu" signal) ...).
-        # Only F.Cu, B.Cu and In<N>.Cu are copper. F.SilkS, F.Mask and the
-        # other "F." layers are not.
-        table = root.first("layers")
-        names = {layer.value(0) for layer in table.children()} if table else set()
-        copper = [name for name in names if name and _COPPER_LAYER.fullmatch(name)]
-
         return {
             "thickness": thickness.number(0, 1.6) if thickness else 1.6,
-            "layers": len(copper) or 2,
+            "layers": len(layers.enabled) or 2,
         }
 
     def _parse_footprints(self, items: list[Node]) -> list[dict[str, Any]]:
@@ -243,27 +367,36 @@ class PCBParser:
             })
         return vias
 
-    def _parse_zones(self, items: list[Node], nets: dict[str, str]) -> list[dict[str, Any]]:
+    def _parse_zones(
+        self, items: list[Node], nets: dict[str, str], layers: _BoardLayers
+    ) -> list[dict[str, Any]]:
         """Parse the copper zones of the board.
 
-        As in pcbnew (BOARD::Zones()), the zones in footprints are not board
-        zones, and a zone with no net is a zone. A rule area (keepout) is not
-        a copper zone, thus it is not in the list.
+        As in pcbnew, the zones in footprints are not board zones (BOARD::Zones()).
+        The copper zones are the zones of the Zone Manager of KiCad (ZONE_SETTINGS_BAG):
+        no rule area ((keepout ...) or (placement ...)), no teardrop (_is_teardrop), and
+        only a zone on a copper layer. A zone with no net is a zone.
+        "layers" is the copper layers of the zone on the board, from the top
+        (_BoardLayers.zone_copper).
         """
         zones = []
         for zone in items:
-            if zone.first("keepout") is not None:
+            if zone.first("keepout") is not None or zone.first("placement") is not None:
+                continue
+            if _is_teardrop(zone):
+                continue
+            # ZONE::IsOnCopperLayer: a copper layer of LSET::AllCuMask.
+            copper = layers.zone_copper(zone)
+            if not copper:
                 continue
             name = zone.first("net_name")
-            layers = zone.first("layers")
-            layer = _text(zone, "layer")
-            if not layer and layers:
-                layer = " ".join(atom.value for atom in layers.atoms())
             zones.append({
                 # KiCad 9 and earlier: (net 1) (net_name "GND").
                 # KiCad 10: (net "GND").
                 "net_name": name.value(0, "") if name else _net(zone, nets),
-                "layer": layer,
+                # The layers that PCB_IO_KICAD_SEXPR::format(ZONE) saves: the
+                # layers that the board enables, from the top.
+                "layers": [layer for layer in layers.enabled if layer in copper],
             })
         return zones
 

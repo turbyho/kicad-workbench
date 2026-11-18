@@ -8,9 +8,10 @@ from .version_check import VersionNotes
 # Create MCP server
 mcp = FastMCP(
     name="kicad-workbench",
-    instructions="""KiCad Workbench: the tools read, check and change KiCad 8, 9 and 10
-    projects as the installed KiCad does (kicad-cli, pcbnew and the rules of the KiCad
-    source).
+    instructions="""KiCad Workbench: the tools read, check and change KiCad projects as
+    the installed KiCad does (kicad-cli, pcbnew and the rules of the KiCad source). The
+    supported version is KiCad 10 and later. The existing tools also work with KiCad 8
+    and 9, and a new tool gives an error with them.
 
     - Schematics: components, nets, symbols, the sheet hierarchy, the netlist.
     - Boards: footprints, tracks, nets, statistics.

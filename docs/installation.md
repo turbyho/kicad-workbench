@@ -2,9 +2,9 @@
 
 ## Requirements
 
-- KiCad 8, 9 or 10, with kicad-cli. We recommend KiCad 10 or later. New features are
-  for KiCad 10 and later only: with KiCad 8 or 9, such a tool gives an error. The
-  server finds kicad-cli in this order: the path in the environment variable
+- KiCad 10 or later, with kicad-cli: the supported version. The existing tools also
+  work with KiCad 8 and 9, as before. New features are for KiCad 10 and later only:
+  with KiCad 8 or 9, such a tool gives an error. The server finds kicad-cli in this order: the path in the environment variable
   `KICAD_CLI`, then `PATH`, then the standard install folder of KiCad (see "kicad-cli
   not found"). A `KICAD_CLI` with a path that is not a file is an error: the server
   does not use a different kicad-cli then. With no kicad-cli, each tool that works

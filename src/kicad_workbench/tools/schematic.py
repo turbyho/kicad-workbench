@@ -3,7 +3,6 @@
 import asyncio
 import copy
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from ..parsers.sheet_list import EMPTY_REASONS
 from ..server import mcp
 from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
+from ..utils.name_filter import compile_filter, select
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.tool_errors import error_answer
 from .library import cell
@@ -385,7 +385,10 @@ async def search_symbols(
 
     Args:
         file_path: A .kicad_sch file of the project.
-        pattern: A regular expression of Python (no difference of case).
+        pattern: A regular expression with the syntax of the Python module re (no
+            difference of case). Empty: all components. A pattern that is not a
+            regular expression gives an error, and a search that takes longer than
+            15 s gives an error.
         search_fields: The fields to search: "all" (default), "reference", "value"
             or "library".
 
@@ -407,22 +410,18 @@ async def search_symbols(
                 f"❌ search_fields {search_fields!r} is not known: give all, reference, value "
                 "or library."
             )
-        try:
-            regex = re.compile(pattern, re.IGNORECASE)
-        except re.error as e:
-            return f"❌ The pattern {pattern!r} is not a regular expression: {e}"
+        regex = compile_filter(pattern, "pattern")
         kicad = await get_kicad_version()
         if kicad_problem := installed_kicad_problem(kicad):
             return f"❌ {kicad_problem}"
-        placed, problems = await asyncio.to_thread(placed_components, path, kicad)
 
         def texts(comp: SchematicComponent) -> list[str]:
             values = {"reference": comp.reference, "value": comp.value, "library": comp.library_id}
             return [values[name] for name in fields]
 
-        components = [
-            p.component for p in placed if any(regex.search(t) for t in texts(p.component))
-        ]
+        placed, problems = await asyncio.to_thread(placed_components, path, kicad)
+        # An empty pattern matches each component.
+        components = await select(regex, [p.component for p in placed], texts, "pattern")
 
         if not components:
             return "\n\n".join(

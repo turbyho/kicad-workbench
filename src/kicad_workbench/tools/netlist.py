@@ -13,6 +13,7 @@ from ..parsers.sheet_list import str_num_cmp
 from ..server import mcp
 from ..utils.file_versions import with_schematic_versions
 from ..utils.kicad_cli import KicadCliError, cli_root, cli_sheet_paths, export_with_kicad_cli
+from ..utils.name_filter import compile_filter, select
 from ..utils.sch_hierarchy import AmbiguousRootError, SheetPath, schematic_project_file
 from ..utils.tool_errors import error_answer
 from ..utils.user_files import write_atomic
@@ -417,16 +418,20 @@ async def get_netlist_nets(
 
     Args:
         netlist_path: A netlist file of generate_netlist.
-        filter_pattern: Optional regular expression of Python for the net names (no
-            difference of case), found in a part of the full name with the sheet
-            path. Empty: all nets.
+        filter_pattern: Optional regular expression for the net names (the syntax of
+            the Python module re, no difference of case), found in a part of the
+            full name with the sheet path. Empty: all nets. A pattern that is not a
+            regular expression gives an error before the tool reads the netlist, and
+            a search that takes longer than 15 s gives an error.
 
     Returns:
         The nets with their pins.
     """
     try:
+        flt = compile_filter(filter_pattern)
         parser = await asyncio.to_thread(NetlistParser, netlist_path)
         nets = parser.get_nets()
+        shown = await select(flt, sorted(nets.items()), lambda item: [item[0]])
 
         lines = [
             f"## Nets from Netlist: {netlist_path}",
@@ -435,12 +440,7 @@ async def get_netlist_nets(
             "",
         ]
 
-        for net_name, net in sorted(nets.items()):
-            if filter_pattern:
-                import re
-                if not re.search(filter_pattern, net_name, re.IGNORECASE):
-                    continue
-
+        for net_name, net in shown:
             lines.append(f"### {net_name}")
             lines.append(f"**Code:** {net.code}")
             lines.append(f"**Connections:** {len(net.pins)} pins")

@@ -80,14 +80,6 @@ class TestSchematicParser:
         assert r1.value == "10k"
         assert r1.footprint == "Resistor_SMD:R_0805_2012Metric"
 
-    def test_search_components(self, example_schematic):
-        """Test searching components by pattern."""
-        parser = SchematicParser(str(example_schematic))
-        results = parser.search_components("10k")
-
-        assert len(results) > 0
-        assert any(c.value == "10k" for c in results)
-
 
 @pytest.mark.usefixtures("kicad_version")
 class TestSchematicTools:

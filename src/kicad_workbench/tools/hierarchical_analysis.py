@@ -5,6 +5,7 @@ from pathlib import Path
 from ..parsers.kicad_fields import with_field_rules_note
 from ..server import mcp
 from ..utils.file_versions import with_schematic_versions
+from ..utils.name_filter import compile_filter, select
 from ..utils.tool_errors import error_answer
 from .netlist import current_netlist, reference_key
 
@@ -145,7 +146,9 @@ async def analyze_hierarchical_nets(
             sub-sheet: the tool uses the netlist of the root schematic).
         filter_pattern: Optional regular expression for the net names (no
             difference of case), found in a part of the full name with the sheet
-            path ("/Power/VIN"). Empty: all nets.
+            path ("/Power/VIN"), with the syntax of the Python module re. Empty: all
+            nets. A pattern that is not a regular expression gives an error, and a
+            search that takes longer than 15 s gives an error.
         show_hierarchy: True (default): list the sheet paths of the hierarchy with
             their files.
 
@@ -153,25 +156,18 @@ async def analyze_hierarchical_nets(
         The nets by group, with the number of pins of each net.
     """
     try:
-        import re
-
+        flt = compile_filter(filter_pattern)
         if not Path(file_path).is_file():
             return f"❌ File not found: {file_path}"
         nl = await current_netlist(Path(file_path))
         sheets = nl.get_sheets()
 
-        # docstring promises a regex; honour it (was a plain substring check).
-        try:
-            flt = re.compile(filter_pattern, re.IGNORECASE) if filter_pattern else None
-        except re.error as e:
-            return f"❌ The filter pattern {filter_pattern!r} is not a regular expression: {e}"
+        nets = await select(flt, list(nl.get_nets().items()), lambda item: [item[0]])
 
         # NetlistNet.pins is a list[(ref, pin)] that is actually populated,
         # unlike SchematicNet.pins which is always empty.
         hierarchical_nets = {}
-        for name, net in nl.get_nets().items():
-            if flt and not flt.search(name):
-                continue
+        for name, net in nets:
             hierarchical_nets[name] = {
                 "location": "Netlist (whole board)",
                 "pins": net.pins,

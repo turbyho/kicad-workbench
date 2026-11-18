@@ -245,6 +245,7 @@ _CHECKS_OF_THE_CODE = {
     ("parsers/sexpr.py", "edited", "ValueError"),
     ("utils/file_versions.py", "_with_check", "NameError"),
     ("utils/file_versions.py", "_with_warnings", "TypeError"),
+    ("utils/name_filter.py", "_search_sync", "RuntimeError"),
 }
 
 

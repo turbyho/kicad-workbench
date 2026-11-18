@@ -1,6 +1,5 @@
 """Text parser for KiCad schematic files (.kicad_sch)."""
 
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import cmp_to_key
@@ -967,28 +966,6 @@ class SchematicParser:
             if component.reference == reference:
                 return component
         return None
-
-    def search_components(self, pattern: str) -> list[SchematicComponent]:
-        """Search for components by pattern.
-
-        Args:
-            pattern: Search pattern (matches reference, value, or library_id)
-
-        Returns:
-            List of matching components
-        """
-        regex = re.compile(pattern, re.IGNORECASE)
-        results = []
-
-        for component in self.get_components():
-            if (
-                regex.search(component.reference)
-                or regex.search(component.value)
-                or regex.search(component.library_id)
-            ):
-                results.append(component)
-
-        return results
 
     def get_component_connections(self, reference: str) -> dict[str, Any]:
         """Get all network connections for a component.

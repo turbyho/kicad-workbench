@@ -1,6 +1,7 @@
 """The tracks, the vias and the copper zones of a board: the items that the two board
 readers give (pcb_parser_kicad.PCBParserKiCad through pcbnew, pcb_parser.PCBParser
-with no pcbnew). The layer names are the names that each reader gives."""
+with no pcbnew). The layer names are the standard names of the copper layers (F.Cu,
+In1.Cu, B.Cu), not the user names of the layer table."""
 
 from dataclasses import dataclass
 

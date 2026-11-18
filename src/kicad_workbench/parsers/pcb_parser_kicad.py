@@ -37,30 +37,6 @@ def _no_board_reason(path, kicad: str) -> str:
     )
 
 
-# pcbnew returns user-facing layer names (TOP, BOTTOM, L2 INNER, etc.)
-# but users typically reference canonical names (F.Cu, B.Cu, In1.Cu, etc.)
-_CANONICAL_LAYER_MAP: dict[str, str] = {
-    "TOP": "F.Cu",
-    "BOTTOM": "B.Cu",
-}
-_INNER_RE = __import__("re").compile(r"^L(\d+)\s+INNER$")
-
-
-def _canonicalize_layer(name: str) -> str:
-    """Convert pcbnew layer name to canonical KiCad name."""
-    if name in _CANONICAL_LAYER_MAP:
-        return _CANONICAL_LAYER_MAP[name]
-    m = _INNER_RE.match(name)
-    if m:
-        # L2 INNER -> In1.Cu (pcbnew L2 = 1st inner = In1.Cu)
-        return f"In{int(m.group(1)) - 1}.Cu"
-    # Handle "L2 LNNER" typo from some KiCad versions
-    m2 = __import__("re").match(r"^L(\d+)\s+LNNER$", name)
-    if m2:
-        return f"In{int(m2.group(1)) - 1}.Cu"
-    return name
-
-
 @dataclass
 class PCBFootprint:
     """Footprint from PCB file."""
@@ -125,10 +101,14 @@ class PCBParserKiCad:
         tracks = self.board.Tracks()
         return [tracks[i].Cast() for i in range(len(tracks))]
 
-    def _layer_name(self, layer_id_or_name) -> str:
-        """Get canonical layer name (F.Cu, B.Cu, In1.Cu, etc.)."""
-        raw = self.board.GetLayerName(layer_id_or_name)
-        return _canonicalize_layer(raw)
+    def _layer_name(self, layer: int) -> str:
+        """The standard name of a copper layer (F.Cu, In1.Cu, B.Cu), as the board file
+        and the text reader give it (user decision, 2026-11-18): not the user name of
+        the layer table that BOARD::GetLayerName gives ("Top"). The tracks, the vias
+        and the footprints are on copper layers. BOARD::GetStandardLayerName gives
+        LayerName, which does not translate a copper layer (KiCad 8, 9 and 10).
+        LSET.Name of KiCad 8.0.9 gives a wxChar object in Python, not a text."""
+        return self._pcbnew.BOARD.GetStandardLayerName(layer)
 
     # ── Footprints ──────────────────────────────────────────
 
@@ -154,7 +134,7 @@ class PCBParserKiCad:
                     position=self._pos_mm(pos),
                     rotation=fp.GetOrientation().AsDegrees(),
                     pad_count=fp.GetPadCount(),  # all pads, also NPTH
-                    layer=_canonicalize_layer(fp.GetLayerName()),
+                    layer=self._layer_name(fp.GetLayer()),
                     properties=properties,
                 )
             )
@@ -229,13 +209,12 @@ class PCBParserKiCad:
         GetLayerName() reads the layer of BOARD_ITEM, which a zone does not set, thus
         it gives F.Cu for each zone.
         """
-        pcbnew = self._pcbnew
         zones = []
         for zone in self._copper_zones():
             zones.append(PCBZone(
                 net_name=zone.GetNetname(),
                 layers=[
-                    pcbnew.BOARD.GetStandardLayerName(layer)
+                    self._layer_name(layer)
                     for layer in zone.GetLayerSet().CuStack()
                     if self.board.IsLayerEnabled(layer)
                 ],

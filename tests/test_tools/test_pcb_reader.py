@@ -311,3 +311,10 @@ def test_text_reader_order_of_the_file_and_via_layers(no_pcbnew, tmp_path):
     assert "| 1 | (1.00, 0.00) | (0.00, 1.00) |" in answer, answer
     assert "| 2 | (5.00, 5.00) | (6.00, 5.00) |" in answer, answer
     assert "| 1 | (3.00, 3.00) | 0.600 | 0.300 | F.Cu -> B.Cu |" in answer, answer
+
+
+def test_a_footprint_filter_with_a_user_name(no_pcbnew):
+    # A footprint is on F.Cu or B.Cu: a user name of the layer ("Top") is an error, not
+    # an empty list.
+    answer = run("list_pcb_footprints", BOARD, filter_layer="Top")
+    assert answer.startswith("❌ filter_layer 'Top' is not F.Cu or B.Cu"), answer

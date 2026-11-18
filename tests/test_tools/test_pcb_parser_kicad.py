@@ -136,3 +136,37 @@ def test_a_net_with_only_zones(zone_board):
     assert "**Track Layers:** N/A" in answer, answer
     similar = asyncio.run(pcb.find_tracks_by_net(str(zone_board), "3v3"))
     assert "- `+3V3` (0 segments, 0 vias, 1 copper zones)" in similar, similar
+
+
+def test_the_standard_names_of_the_layers(tmp_path):
+    # User decision 2026-11-18: the standard name (F.Cu), not the user name ("Top").
+    board = pcbnew.BOARD()
+    board.SetLayerName(pcbnew.F_Cu, "Top")
+    board.SetLayerName(pcbnew.B_Cu, "Bottom side")
+    track = pcbnew.PCB_TRACK(board)
+    track.SetStart(pcbnew.VECTOR2I(0, 0))
+    track.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(1), 0))
+    track.SetLayer(pcbnew.F_Cu)
+    board.Add(track)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(0, 0))
+    board.Add(via)
+    path = tmp_path / "named.kicad_pcb"
+    pcbnew.SaveBoard(str(path), board)
+    parser = PCBParserKiCad(str(path))
+    assert parser.board.GetLayerName(pcbnew.F_Cu) == "Top"
+    assert [t.layer for t in parser.get_tracks()] == ["F.Cu"]
+    assert [(v.top_layer, v.bottom_layer) for v in parser.get_vias()] == [("F.Cu", "B.Cu")]
+
+
+def test_the_standard_name_of_a_footprint_layer(tmp_path):
+    board = pcbnew.BOARD()
+    board.SetLayerName(pcbnew.B_Cu, "Bottom side")
+    footprint = pcbnew.FOOTPRINT(board)
+    footprint.SetReference("R1")
+    board.Add(footprint)
+    footprint.Flip(footprint.GetPosition(), pcbnew.FLIP_DIRECTION_LEFT_RIGHT)
+    path = tmp_path / "flipped.kicad_pcb"
+    pcbnew.SaveBoard(str(path), board)
+    (found,) = PCBParserKiCad(str(path)).get_footprints()
+    assert found.layer == "B.Cu"

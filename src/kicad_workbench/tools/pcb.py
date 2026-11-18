@@ -130,16 +130,27 @@ async def list_pcb_footprints(
 ) -> str:
     """Give the footprints of a board.
 
+    The layer of a footprint is the standard name of its copper layer, F.Cu or B.Cu,
+    also when the layer table of the board has a user name for it ("Top"): KiCad shows
+    the user name in its GUI.
+
     Args:
         file_path: The .kicad_pcb file.
-        filter_layer: Optional layer of the footprints to give, for example
-            "F.Cu" or "B.Cu". Empty: all footprints.
+        filter_layer: Optional layer of the footprints to give: "F.Cu" or "B.Cu" (a
+            user name of the layer gives an error). Empty: all footprints.
 
     Returns:
         A table of the footprints: reference, value, library ID, layer, position,
         rotation and number of pads.
     """
     try:
+        # A footprint is on F.Cu or on B.Cu (FOOTPRINT::Flip): an other filter finds no
+        # footprint, also a user name of the layer.
+        if filter_layer and filter_layer not in ("F.Cu", "B.Cu"):
+            return (
+                f"❌ filter_layer {filter_layer!r} is not F.Cu or B.Cu: a footprint is on "
+                "one of these layers, with their standard names."
+            )
         parser = _get_parser(file_path)
         # The two readers give the same fields: the library ID as the board file
         # has it (LIB_ID::Format), and the number of all pads (FOOTPRINT::GetPadCount).
@@ -463,6 +474,10 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     layers of the tracks only. For a net with no tracks, vias or zones, the tool gives
     the nets whose name contains the name (no difference between upper and lower case).
 
+    The layers are the standard names of the copper layers (F.Cu, In1.Cu, B.Cu), also
+    when the layer table of the board has user names for them ("Top"): KiCad shows the
+    user names in its GUI.
+
     Give the full net name of the board, case-sensitive (for example "/SDA" for a local
     label of the root sheet). The total length is the sum of the track segments, with
     no vias and no pads. The tables show 50 segments and 20 vias, in the order of the
@@ -478,8 +493,7 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     """
     try:
         parser = _get_parser(file_path)
-        # The items of the two readers (pcb_items): the text reader gives no fill state,
-        # and the pcbnew reader gives the user names of the layers (backlog P2).
+        # The items of the two readers (pcb_items): the text reader gives no fill state.
         tracks, vias, zones = parser.get_tracks(), parser.get_vias(), parser.get_zones()
         net_tracks = [t for t in tracks if t.net == net_name]
         net_vias = [v for v in vias if v.net == net_name]

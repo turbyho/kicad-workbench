@@ -11,6 +11,7 @@ from ..server import mcp
 from ..utils import kicad_cli
 from ..utils.file_versions import with_board_versions
 from ..utils.kicad_python import KicadPythonError, check_same_kicad
+from ..utils.pcbnew_thread import in_pcbnew_thread
 from ..utils.tool_errors import error_answer
 from .library import cell
 
@@ -66,29 +67,44 @@ def _board_tool(limits: str):
     (kicad-cli gives no version), the tool gives the error of no_kicad_message: the
     tools work with the files as the installed KiCad does. The pcbnew of the server
     process must be of the KiCad of kicad-cli (_check_pcbnew_version).
+
+    The board tool is a plain function, off the event loop: the import of pcbnew, the
+    check of its version and the tool with pcbnew run in one call in the pcbnew thread
+    (utils/pcbnew_thread.py: pcbnew is not thread-safe); the tool with the text reader
+    runs in the pool of asyncio.to_thread.
     """
 
     def decorator(function):
         @functools.wraps(function)
         async def wrapper(*args, **kwargs):
-            try:
-                text_reader = not _pcbnew_importable()
-            except PcbnewImportError as e:
-                return f"❌ {e}"
-            # The installed KiCad is the KiCad of kicad-cli (CLAUDE.md rule 4).
+            # The installed KiCad is the KiCad of kicad-cli (CLAUDE.md rule 4). First:
+            # this error needs no pcbnew, thus no wait for the pcbnew thread.
             kicad = await kicad_cli.get_kicad_version()
-            if problem := kicad_cli.installed_kicad_problem(kicad):
-                return f"❌ {problem}"
-            if not text_reader:
-                # The pcbnew of the server process reads the board.
+
+            def with_pcbnew() -> str | None:
+                """The answer of the tool with pcbnew, or None with no pcbnew."""
                 try:
-                    await asyncio.to_thread(_check_pcbnew_version, kicad)
+                    if not _pcbnew_importable():
+                        return None
+                except PcbnewImportError as e:
+                    return f"❌ {e}"
+                if problem := kicad_cli.installed_kicad_problem(kicad):
+                    return f"❌ {problem}"
+                try:
+                    _check_pcbnew_version(kicad)
                 except KicadPythonError as e:
                     return f"❌ {e}"
                 except Exception as e:
                     return error_answer(e, "The version of the pcbnew of the server process")
-            result = await function(*args, **kwargs)
-            if text_reader and not result.startswith("❌"):
+                return function(*args, **kwargs)
+
+            result = await in_pcbnew_thread(with_pcbnew)
+            if result is not None:
+                return result
+            if problem := kicad_cli.installed_kicad_problem(kicad):
+                return f"❌ {problem}"
+            result = await asyncio.to_thread(function, *args, **kwargs)
+            if not result.startswith("❌"):
                 result += f"\n\n{TEXT_READER_WARNING}{limits}."
             return result
 
@@ -124,7 +140,7 @@ def _is_pcbnew(parser) -> bool:
 @mcp.tool()
 @with_board_versions("file_path")
 @_board_tool("")
-async def list_pcb_footprints(
+def list_pcb_footprints(
     file_path: str,
     filter_layer: str | None = None,
 ) -> str:
@@ -184,7 +200,7 @@ async def list_pcb_footprints(
 @mcp.tool()
 @with_board_versions("file_path")
 @_board_tool(": no board outline, no design rules")
-async def get_pcb_statistics(file_path: str) -> str:
+def get_pcb_statistics(file_path: str) -> str:
     """Give the size, the layers, the counts and the design rules of a board.
 
     The zone count is the count of the copper zones, as the Zone Manager of KiCad lists
@@ -258,7 +274,7 @@ async def get_pcb_statistics(file_path: str) -> str:
 @mcp.tool()
 @with_board_versions("file_path")
 @_board_tool(": no design rules")
-async def analyze_pcb_nets(file_path: str) -> str:
+def analyze_pcb_nets(file_path: str) -> str:
     """Give the routing of a board: track widths, vias, net lengths and layers.
 
     The tool gives the distribution of the track widths and of the via drills, the
@@ -466,7 +482,7 @@ async def analyze_pcb_nets(file_path: str) -> str:
 @mcp.tool()
 @with_board_versions("file_path")
 @_board_tool(": no fill state of the zones")
-async def find_tracks_by_net(file_path: str, net_name: str) -> str:
+def find_tracks_by_net(file_path: str, net_name: str) -> str:
     """Give the tracks and the vias of one net of a board, with their lengths and widths.
 
     The tool also gives the copper zones of the net (no rule area, no teardrop), each
@@ -515,7 +531,7 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
 @mcp.tool()
 @with_board_versions("file_path")
 @_board_tool(": no design rules")
-async def analyze_pcb_signal_integrity(
+def analyze_pcb_signal_integrity(
     file_path: str,
     net_name: str = "",
 ) -> str:
@@ -720,7 +736,7 @@ async def analyze_pcb_signal_integrity(
 @mcp.tool()
 @with_board_versions("file_path")
 @_board_tool(": no fill state of the zones")
-async def analyze_pcb_power_integrity(file_path: str) -> str:
+def analyze_pcb_power_integrity(file_path: str) -> str:
     """Give the copper zones of a board and the routing of its power nets (heuristic).
 
     The tool finds a power net and a ground net from its name (for example VCC, VDD,

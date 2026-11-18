@@ -61,7 +61,10 @@ class PCBNet:
 
 
 class PCBParserKiCad:
-    """PCB file parser using KiCad's official Python API (pcbnew)."""
+    """PCB file parser using KiCad's official Python API (pcbnew).
+
+    In the server process, use it only in the pcbnew thread (utils/pcbnew_thread.py):
+    pcbnew is not thread-safe."""
 
     def __init__(self, file_path: str) -> None:
         self.file_path = validate_kicad_file(file_path, ".kicad_pcb")

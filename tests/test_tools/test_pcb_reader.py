@@ -318,3 +318,53 @@ def test_a_footprint_filter_with_a_user_name(no_pcbnew):
     # an empty list.
     answer = run("list_pcb_footprints", BOARD, filter_layer="Top")
     assert answer.startswith("❌ filter_layer 'Top' is not F.Cu or B.Cu"), answer
+
+
+@pytest.mark.parametrize("tool, kwargs", TOOLS)
+def test_the_text_reader_reads_off_the_event_loop(no_pcbnew, monkeypatch, tool, kwargs):
+    # A large board must not block the server: the reader runs in a worker thread.
+    import threading
+
+    from kicad_workbench.errors import InputError
+
+    threads = []
+
+    def reader(file_path):
+        threads.append(threading.current_thread())
+        raise InputError("stop")
+
+    monkeypatch.setattr(pcb, "_get_parser", reader)
+    assert run(tool, BOARD, **kwargs) == "❌ stop"
+    assert threads and threads[0] is not threading.main_thread()
+
+
+def test_pcbnew_runs_in_its_thread_one_call_at_a_time(monkeypatch):
+    # pcbnew is not thread-safe: each call of each board tool loads the board in the one
+    # pcbnew thread, one after the other, also when the calls come at the same time.
+    import threading
+    import time
+
+    threads, active, most = [], [0], [0]
+    lock = threading.Lock()
+
+    def load_board(path):
+        with lock:
+            threads.append(threading.current_thread().name)
+            active[0] += 1
+            most[0] = max(most[0], active[0])
+        time.sleep(0.05)
+        with lock:
+            active[0] -= 1
+        raise OSError("stop")
+
+    fake_pcbnew(monkeypatch, load_board, "8.0.9")
+
+    async def calls():
+        return await asyncio.gather(
+            *(getattr(pcb, tool)(str(BOARD), **kwargs) for tool, kwargs in TOOLS)
+        )
+
+    answers = asyncio.run(calls())
+    assert all(answer.startswith("❌ pcbnew of KiCad 8.0.9 cannot read") for answer in answers)
+    assert len(threads) == len(TOOLS) and len(set(threads)) == 1, threads
+    assert threads[0].startswith("pcbnew") and most[0] == 1

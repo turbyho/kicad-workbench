@@ -1,9 +1,14 @@
 # Tools
 
-The server has 68 tools. Each tool returns Markdown text (the image tools also return
+The server has 69 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
+
+A tool call that takes longer than 20 s becomes a background job (an MCP client stops
+a call after its timeout: Claude Desktop and the MCP SDK after 60 s). The answer starts
+with "⏳" and gives the job ID; the work continues. `job_status` gives the result. See
+"Background jobs" below.
 
 An argument with `?` is optional. A path argument is the path of a file of the
 project: `.kicad_sch` (schematic), `.kicad_pcb` (board), `.kicad_pro` (project), or a
@@ -218,3 +223,20 @@ The registry is open and needs no login (default [PartReel](https://partreel.com
 | `search_parts_registry(query, limit?)` | Parts whose ID, name, family, category, manufacturer or keywords match |
 | `get_registry_part(part_id)` | The record of a part: the download URLs, the datasheet link, the dimensions |
 | `download_registry_part(part_id, save_dir, formats?)` | Downloads the files of a part: the footprint and the symbol, or the formats that `formats` gives (also the 3D model). `save_dir` must exist, in the working folder, the home folder or a folder of `PARTS_REGISTRY_SAVE_ROOTS`. Only HTTPS from the hosts of the registry, at most 50 MB for each file, and only the file extensions of each format |
+
+## Background jobs
+
+| Tool | What it does |
+|---|---|
+| `job_status(job_id?, cancel?)` | With no ID: the jobs of the server process (running, done, failed, cancelled). With an ID: the state of the job, or its result (the same text as the tool gives). `cancel` stops the task at its next step. Work in a thread does not stop: kicad-cli, the Python of KiCad or a file write can still end and change files; only the schematic edit tools (`add_component_from_library`, `add_wire`, the label tools) do not save when the cancel comes before their save |
+
+Each tool call runs as a task. The server waits for it up to 20 s: a call that ends in
+time gives its result as before. A longer call becomes a job. A call of the same tool
+with the same arguments while the job runs starts no second run: it waits for the same
+job (the same arguments after the defaults of the tool; 30 and 30.0 are the same
+number). The list of `job_status` also has the calls that run in their first 20 s. The
+jobs are in the memory of the server process: a restart of the server (of the
+MCP client) loses them. A finished job stays 1 h (the 50 newest finished jobs). The
+model is the model of the MCP Tasks extension (a task ID, its state, its result, a
+cancel).
+

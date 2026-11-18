@@ -99,6 +99,8 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   footprints (on request also their 3D models).
 
 All tools are in [docs/tools.md](https://github.com/turbyho/kicad-workbench/blob/main/docs/tools.md).
+A tool call that takes longer than 20 s becomes a background job, thus the timeout of
+the MCP client (60 s in Claude Desktop) does not lose its result: `job_status` gives it.
 
 ## Requirements
 

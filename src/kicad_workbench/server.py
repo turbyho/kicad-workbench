@@ -2,6 +2,7 @@
 
 from fastmcp import FastMCP
 
+from .background_jobs import JOB_WAIT, BackgroundJobs
 from .kicad_build_notes import KicadBuildNotes
 from .version_check import VersionNotes
 
@@ -29,12 +30,23 @@ mcp = FastMCP(
     An error starts with "❌", a warning with "⚠️". When a tool gives a step for the
     user (for example the conversion of a file in KiCad, or the install of KiCad),
     tell the user.
-    """,
+
+    A tool call that takes longer than {wait} s becomes a background job (an MCP client
+    stops a call after its timeout, Claude Desktop after 60 s): the answer starts with
+    "⏳" and gives the job ID. The work continues. Call job_status with the job ID for
+    the result, or with no ID for the list of the jobs. A call of the tool with the same
+    arguments while the job runs starts no second run: it waits for the same job.
+    """.format(wait=f"{JOB_WAIT:.0f}"),
 )
 
 
-# The notes about a newer release and a restart of the client (version_check).
+# The notes about a newer release and a restart of the client (version_check). The
+# outermost middleware: the client gets the notes with each answer, also with the "⏳"
+# answer of a job.
 mcp.add_middleware(VersionNotes())
+# The tool calls that take longer than JOB_WAIT become background jobs. The result of a
+# job has the notes of the middleware inside (KicadBuildNotes).
+mcp.add_middleware(BackgroundJobs())
 # The warning for an installed KiCad that the server did not compare with its rules.
 mcp.add_middleware(KicadBuildNotes())
 
@@ -45,6 +57,7 @@ from .tools import (  # noqa: F401, E402
     field_check,
     hierarchical_analysis,
     ipc,
+    jobs,
     library,
     netlist,
     parts_registry,

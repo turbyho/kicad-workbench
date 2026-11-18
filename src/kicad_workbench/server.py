@@ -21,7 +21,7 @@ mcp = FastMCP(
     - Libraries: the library tables, the search, symbols and footprints, PNG images,
       new project libraries, the rows of the project tables, the upgrade of older
       project libraries, the copy of symbols and footprints into them, the properties
-      of their symbols.
+      of their symbols, derived symbols.
     - BOM: the BOM of kicad-cli, and the check of the confirmed MPNs.
     - Edits: symbols, wires, labels, the fields of placed symbols, new projects and
       boards.

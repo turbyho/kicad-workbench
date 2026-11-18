@@ -45,11 +45,16 @@ class CopyError(WorkbenchError):
     """The copy is not possible, or the check of the result failed."""
 
 
+def escape_lib_id(text: str) -> str:
+    """EscapeString(text, CTX_LIBID): CR and LF dropped, the characters of _LIBID_ESCAPES
+    as escapes."""
+    return "".join(_LIBID_ESCAPES.get(char, char) for char in text if char not in "\n\r")
+
+
 def dialog_symbol_name(text: str) -> str:
     """The name that the "Save Symbol As" dialog gives (SAVE_SYMBOL_AS_DIALOG): the text
     with no white space at its ends, each space as "_", then EscapeString(CTX_LIBID)."""
-    name = text.strip(WX_SPACE).replace(" ", "_")
-    return "".join(_LIBID_ESCAPES.get(char, char) for char in name if char not in "\n\r")
+    return escape_lib_id(text.strip(WX_SPACE).replace(" ", "_"))
 
 
 def footprint_name_problem(name: str) -> str | None:

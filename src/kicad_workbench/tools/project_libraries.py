@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
+from ..parsers.bus_names import unescape_string
 from ..parsers.kicad_fields import WX_SPACE
 from ..parsers.kicad_versions import KICAD10, verified_triple
 from ..parsers.lib_symbols import read_library, symbol_chain
+from ..parsers.sexpr import property_atoms
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, file_locks, save_file, save_files
 from ..utils.file_stamp import FileStamp, file_stamp, read_stamped
@@ -31,6 +33,7 @@ from ..utils.kicad_cli import get_kicad_version, kicad_10_problem
 from ..utils.kicad_lock import check_project_not_open
 from ..utils.kicad_text import decode_as_kicad
 from ..utils.library_copy import (
+    SymbolCopy,
     dialog_symbol_name,
     footprint_copy,
     footprint_name_problem,
@@ -40,8 +43,9 @@ from ..utils.library_copy import (
     symbol_copy,
     symbols_in_version,
 )
+from ..utils.library_derive import derived_symbol, new_symbol_name
 from ..utils.library_lookup import find_kicad_library, find_library_symbol
-from ..utils.library_symbol_fields import change_fields, symbol_editor_text_size
+from ..utils.library_symbol_fields import change_fields, symbol_editor_text_size, text_problem
 from ..utils.library_tables import (
     LibraryRow,
     LibraryTableError,
@@ -1162,6 +1166,155 @@ async def set_library_symbol_properties(
             fields,
             keywords,
             footprint_filters,
+        )
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+def _derived_symbol(
+    context: _Context,
+    _kind,
+    parent_lib_id: str,
+    name: str,
+    keep_footprint: bool,
+    keep_datasheet: bool,
+    transfer_user_fields: bool,
+    keep_user_field_content: bool,
+) -> str:
+    library, parent_name = _split_id(parent_lib_id, "symbol")
+    if keep_user_field_content and not transfer_user_fields:
+        # The dialog disables this check box with no transfer (onCheckTransferUserFields).
+        raise InputError("keep_user_field_content needs transfer_user_fields=True.")
+    # FIELD_VALIDATOR(FIELD_T::VALUE) of the name control, before GetName.
+    if problem := text_problem("Value", name, root=False):
+        raise InputError(problem)
+    new_name = new_symbol_name(name)
+    if not new_name:
+        # The validator of SYMBOL_EDIT_FRAME::CreateNewSymbol.
+        raise InputError("Symbol must have a name.")
+    path, warnings = _project_library(context, "symbol", library)
+    data, stamp, symbols = _read_symbol_library(path)
+    if parent_name not in symbols:
+        raise InputError(f"The library '{library}' ({path}) has no symbol '{parent_name}'.")
+    if new_name in symbols:
+        raise InputError(
+            f"Symbol '{unescape_string(new_name)}' already exists in library '{library}'. "
+            "The tool does not replace a symbol: give an other name."
+        )
+    chain = symbol_chain(symbols, parent_name)
+    symbol = derived_symbol(
+        chain, new_name, keep_footprint, keep_datasheet, transfer_user_fields,
+        keep_user_field_content,
+    )  # fmt: skip
+    text = library_text(decode_as_kicad(data, path), SymbolCopy([(new_name, symbol)]), [])
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-derive-") as work:
+        new_data = kicad_save_symbols(text, path, Path(work), {*symbols, new_name})
+    warnings += _save_guarded(context, [(path, new_data)], {path: stamp})
+    empty = [
+        label
+        for label, keep in (("the Footprint", keep_footprint), ("the Datasheet", keep_datasheet))
+        if not keep
+    ]
+    fields_line = "- The mandatory fields are copies of the fields of the parent"
+    if empty:
+        fields_line += f"; {' and '.join(empty)} {'is' if len(empty) == 1 else 'are'} empty"
+    lines = [
+        f"✅ The library '{library}' has the new symbol '{new_name}', derived from "
+        f"'{parent_name}'.",
+        "",
+        f"- Library: {path}",
+        fields_line + ".",
+    ]
+    if chain[-1].node.first("power") is not None:
+        lines.append("- A power symbol: the Value is the name of the new symbol.")
+    if transfer_user_fields:
+        lines.append(
+            "- The user fields of the parent are copied"
+            + (" with their text." if keep_user_field_content else ", with an empty text.")
+        )
+    if new_name != name:
+        lines.append(f"- The name {name!r} is '{new_name}' in the library (escapes, spaces).")
+    lines.append("- KiCad saved the library (kicad-cli), and a second save gave the same bytes.")
+    if any(
+        prop_name in ("ki_keywords", "ki_fp_filters")
+        for symbol_item in chain
+        for prop_name, _prop in _properties_of(symbol_item.node)
+    ):
+        lines.append(
+            "- KiCad 10.0 saves the keywords and the footprint filters of the parent into "
+            "the new symbol (LIB_SYMBOL::GetKeyWords)."
+        )
+    lines.append("- Set the Value, the MPN and the other fields with set_library_symbol_properties.")
+    return "\n".join(lines + [f"\n⚠️ {warning}" for warning in warnings])
+
+
+def _properties_of(node) -> list[tuple[str, object]]:
+    """The names of the (property ...) of a symbol, with their nodes."""
+    found = []
+    for prop in node.children("property"):
+        atoms = property_atoms(prop)
+        if atoms:
+            found.append((atoms[0].value, prop))
+    return found
+
+
+@mcp.tool()
+async def create_derived_symbol(
+    project_path: str,
+    parent_lib_id: str,
+    name: str,
+    keep_footprint: bool = False,
+    keep_datasheet: bool = False,
+    transfer_user_fields: bool = False,
+    keep_user_field_content: bool = False,
+) -> str:
+    """Make a new symbol that extends a symbol of the same project library, as "Derive
+    from existing symbol" of the symbol editor of KiCad 10 does.
+
+    The new symbol has the units, the pins and the drawings of its parent (extends).
+    Its mandatory fields are copies of the fields of the parent: the Footprint and the
+    Datasheet are empty unless keep_footprint and keep_datasheet; the Value of a power
+    symbol is the new name. With transfer_user_fields, the new symbol gets a copy of each
+    user field of the parent (MPN, for example), with an empty text unless
+    keep_user_field_content. The arguments have the defaults of the dialog of KiCad (the
+    check boxes are off). KiCad 10.0 saves the keywords and the footprint filters of the
+    parent into the new symbol (LIB_SYMBOL::GetKeyWords). Set the Value, the MPN and the
+    other fields after this with set_library_symbol_properties.
+
+    The parent must be in a library of the project table, in the version of the
+    installed KiCad: for a symbol of a global library, copy it first with
+    copy_symbol_to_library. As the dialog, the tool writes the escapes of the name
+    ("{colon}" for ":") and a space as "_". A name that the library has already is an
+    error: the tool does not replace a symbol. KiCad saves the library (kicad-cli), and
+    a second save must give the same bytes. KiCad must not have the project open. The
+    installed KiCad must be KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        parent_lib_id: The parent, "<library>:<symbol>", of a library of the project
+            table. The new symbol goes into the same library.
+        name: The name of the new symbol.
+        keep_footprint: Keep the Footprint of the parent ("Keep linked footprint").
+        keep_datasheet: Keep the Datasheet of the parent ("Keep linked datasheet").
+        transfer_user_fields: Copy the user fields of the parent ("Transfer
+            user-defined fields").
+        keep_user_field_content: With transfer_user_fields, keep their texts ("Keep
+            content of user-defined fields").
+
+    Returns:
+        The new symbol, or an error.
+    """
+    try:
+        return await _run(
+            project_path,
+            None,
+            _derived_symbol,
+            parent_lib_id,
+            name,
+            keep_footprint,
+            keep_datasheet,
+            transfer_user_fields,
+            keep_user_field_content,
         )
     except Exception as e:
         return error_answer(e, "Error")

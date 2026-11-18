@@ -106,6 +106,7 @@ async def render_pcb(
 
     The image has the board and the 3D models of the footprints: a footprint with no
     3D model has no body in the image. Use the image for a visual review of the layout.
+    The tool replaces an existing image file with the same name.
 
     Args:
         pcb_path: The .kicad_pcb file.
@@ -182,7 +183,8 @@ async def export_pcb_3d(
 
     The model has the board and the 3D models of its footprints. kicad-cli does not
     add a 3D model that it cannot find or read: the tool then gives a warning with the
-    footprints and the reason. Tell the user about each such footprint.
+    footprints and the reason. Tell the user about each such footprint. The tool
+    replaces an existing STEP file with the same name.
 
     Args:
         pcb_path: The .kicad_pcb file.
@@ -333,7 +335,8 @@ async def export_schematic_svg(
     of the project. For an other file (a sub-sheet), the files are the pages of
     its sheet paths (a sheet that the hierarchy uses two times gives two pages).
     An SVG file is a vector image: a zoom shows each detail with no loss. The tool
-    needs kicad-cli.
+    needs kicad-cli. The tool replaces a file with the same name in output_dir; the
+    other files of the folder stay.
 
     Args:
         schematic_path: A .kicad_sch file of the project.

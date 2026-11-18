@@ -764,6 +764,18 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
     of fields for all its references (U201 and U301): give the same fields for
     each of these references, or write different fields through a variant.
 
+    The tool refuses a reference that is not annotated (U?), a duplicate reference,
+    the field Reference, a mandatory field name in an other case ("value": give
+    "Value"), the fields Sim.Enable and Spice_Netlist_Enabled (KiCad removes them when
+    it loads the symbol), a symbol that has a field name more than one time, a file
+    that KiCad loads under more than one name, and a project whose full sheet
+    hierarchy the tool cannot read. An error gives the reason, and the step in KiCad
+    when one is necessary.
+
+    A new field has the position of the symbol and the angle of the Reference field,
+    as KiCad adds it. In a file of KiCad 8, a new field is visible on the body of the
+    symbol: this is correct, not a defect.
+
     Use it for the fields that project_check of datasheet-lens or
     check_symbol_fields gives (MPN_Confirmed and Value_Confirmed for a
     confirmation; Value, MPN, MPN_Confirmed and Value_Confirmed for the move of

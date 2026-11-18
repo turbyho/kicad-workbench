@@ -23,6 +23,9 @@ async def trace_hierarchical_connection(
     netlist has no power symbols and no symbol with no library symbol. The tool
     needs kicad-cli.
 
+    The connected pins of a net are the pins of the other components: a pin of the
+    same component on the net is not in the list. Each net shows 15 pins or less.
+
     Args:
         file_path: A .kicad_sch file of the project (the root schematic or a
             sub-sheet: the tool uses the netlist of the root schematic).
@@ -128,11 +131,21 @@ async def analyze_hierarchical_nets(
     at each level of the hierarchy. It groups them as power, interface and signal
     nets (by their names), and gives the sheet paths of the hierarchy.
 
+    The groups come from parts of the net names (heuristic): power has VDD, VSS, GND,
+    VCC, VBAT, VPP, +3V or +5V, interface has I2C, SPI, UART, SDA, SCL, MOSI, MISO, TX
+    or RX, and signal is each other net. The tool lists at most 20 power nets, 30
+    interface nets and 20 signal nets, sorted by name: use filter_pattern for the
+    others. The netlist of KiCad has a net "unconnected-(...)" for each unconnected
+    pin, with the pin name in it: these nets are in the total, and in a group by
+    their names ("unconnected-(U1-TXD-Pad5)" is an interface net). The total counts
+    the nets after filter_pattern.
+
     Args:
         file_path: A .kicad_sch file of the project (the root schematic or a
             sub-sheet: the tool uses the netlist of the root schematic).
         filter_pattern: Optional regular expression for the net names (no
-            difference of case). Empty: all nets.
+            difference of case), found in a part of the full name with the sheet
+            path ("/Power/VIN"). Empty: all nets.
         show_hierarchy: True (default): list the sheet paths of the hierarchy with
             their files.
 

@@ -567,7 +567,8 @@ async def ipc_place_footprints(
     KiCad does the change. One call is one undo step. The tool checks all placements
     first, and changes nothing when a check fails. The tool can only change the side:
     a change of the position, the rotation or the lock gives an error (the limits
-    footprint_update_loses_data and footprint_move_children of ipc_status).
+    footprint_update_loses_data and footprint_move_children of ipc_status). A
+    footprint that is not on F.Cu or B.Cu gives an error.
 
     Args:
         board_path: The path of the .kicad_pcb file that is open in the PCB editor.
@@ -1008,6 +1009,11 @@ async def ipc_add_tracks(
     board does not have. KiCad 10.0.6 must have the schematic editor closed (KiCad bug
     #24966).
 
+    When the running KiCad has the limit free_via (ipc_status), each via must be at an
+    end of a new track of the same call: an other via gives an error. A track with the
+    same start and end, and a via drill that is not smaller than the via size, give
+    an error. After an error, the tool changed nothing.
+
     Args:
         board_path: The path of the .kicad_pcb file that is open in the PCB editor.
         net: The name of the net, for example "GND" or "/SDA" (case-sensitive).
@@ -1153,7 +1159,8 @@ async def ipc_add_zone(
     the user did not give them, ask the user. KiCad adds the zone in one undo step, with
     no fill: fill it with ipc_refill_zones. KiCad checks no clearance: the answer tells
     the user to run DRC. KiCad 10.0.6 must have the schematic editor closed (KiCad bug
-    #24966).
+    #24966). An outline that crosses itself, has the same point two times one after the
+    other, or has no area gives an error.
 
     Args:
         board_path: The path of the .kicad_pcb file that is open in the PCB editor.
@@ -1257,7 +1264,8 @@ async def ipc_add_board_outline(
     error: the tools delete no items (KiCad 10.0.6 gives no result of a delete, limit
     delete_results); the user deletes the old outline in the PCB editor. Footprints can
     have Edge.Cuts shapes too: the tool does not count them. KiCad 10.0.6 must have the
-    schematic editor closed (KiCad bug #24966).
+    schematic editor closed (KiCad bug #24966). An outline that crosses itself, has the
+    same point two times one after the other, or has no area gives an error.
 
     Args:
         board_path: The path of the .kicad_pcb file that is open in the PCB editor.

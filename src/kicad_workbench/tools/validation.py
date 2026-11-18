@@ -418,7 +418,15 @@ async def run_erc(
 
     The tool uses the severities of the project. It also runs the annotation check
     of the ERC dialog of KiCad (symbols that are not annotated, duplicate
-    references, units with different values), which kicad-cli does not run.
+    references, units with different values), which kicad-cli does not run. For a
+    sub-sheet, the tool checks the root schematic of the project (the answer tells
+    it).
+
+    The table shows the first 20 violations, with the description cut to 50
+    characters: first the violations of the annotation check, then the violations of
+    the report of kicad-cli in its order. get_erc_violations gives all of them. The
+    table also has the violations that the project excludes, marked "(excluded)":
+    Total Violations counts them, the counts of errors and warnings do not.
 
     Args:
         schematic_path: A .kicad_sch file of the project.
@@ -624,6 +632,13 @@ async def run_drc(
     the board. The answer tells if the DRC used new zone fills or the fills of the
     file.
 
+    The table shows 20 violations: the errors first, and in each severity the
+    unconnected items and the schematic parity items before the other violations
+    (they are at the end of the report). The description is cut to 40 characters:
+    get_drc_violations gives all of them. The table also has the violations that the
+    project excludes, marked "(excluded)", after the others: Total Violations counts
+    them, the counts of errors and warnings do not.
+
     Args:
         pcb_path: The .kicad_pcb file.
         refill_zones: True: kicad-cli fills all zones again before the DRC
@@ -819,6 +834,11 @@ async def get_erc_violations(
 ) -> str:
     """Give the ERC violations of a schematic, with a filter by severity.
 
+    The tool uses the last ERC report until a schematic file or a project file
+    changes: then it runs the ERC again (as run_erc, with the annotation check of the
+    ERC dialog). The list has all violations of the severity. An excluded violation
+    shows with "(excluded)" and does not count.
+
     Args:
         schematic_path: A .kicad_sch file of the project.
         severity: Optional severity: "error" or "warning". Empty: all violations.
@@ -957,8 +977,10 @@ async def get_drc_violations(
 ) -> str:
     """Give the DRC violations of a board, with a filter by type.
 
-    The tool uses the last DRC report of the same zone mode until the board or the
-    project changes: then it runs the DRC again (run_drc).
+    The tool uses the last DRC report of the same zone mode until the board, a project
+    file, a .kicad_dru file or a schematic of the project changes: then it runs the DRC
+    again (run_drc). The list has all violations of the type. An excluded violation
+    shows with "(excluded)", and the count includes it.
 
     Args:
         pcb_path: The .kicad_pcb file.
@@ -1041,6 +1063,10 @@ async def export_erc_report(
     output_path: str = "",
 ) -> str:
     """Run the ERC of kicad-cli on a schematic and copy its JSON report into a file.
+
+    The tool replaces an existing output file. The JSON report is the report of
+    kicad-cli: it has the excluded violations ("excluded": true), and not the
+    annotation errors of the ERC dialog (the answer tells them).
 
     Args:
         schematic_path: A .kicad_sch file of the project.
@@ -1129,6 +1155,9 @@ async def export_drc_report(
     refill_zones: bool = False,
 ) -> str:
     """Run the DRC of kicad-cli on a board and copy its JSON report into a file.
+
+    The tool replaces an existing output file. The JSON report is the report of
+    kicad-cli: it has the excluded violations ("excluded": true).
 
     Args:
         pcb_path: The .kicad_pcb file.

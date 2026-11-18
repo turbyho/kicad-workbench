@@ -277,7 +277,8 @@ async def generate_netlist(
     kicad-cli writes the netlist (KiCad XML) of the full project into a file in the
     temporary folder of the system. Give this file to trace_netlist_connection,
     get_netlist_nets and get_netlist_components. Make the netlist again after a change
-    of the schematic.
+    of the schematic. The file name comes from the root schematic: each call replaces
+    the netlist file of an earlier call for the same project.
 
     Args:
         schematic_path: A .kicad_sch file of the project.
@@ -325,6 +326,10 @@ async def trace_netlist_connection(
 
     The netlist of kicad-cli is the most exact source for the connections. Make it
     with generate_netlist, and again after a change of the schematic.
+
+    The pins on a net are the pins of the other components: a pin of the same
+    component on the net is not in the list. Give no pin_number to see each pin of the
+    component. The reference and the pin number are case-sensitive.
 
     Args:
         netlist_path: A netlist file of generate_netlist.
@@ -406,10 +411,15 @@ async def get_netlist_nets(
 ) -> str:
     """Give the nets of a netlist file with their pins.
 
+    Total Nets counts all nets of the netlist, also with filter_pattern. Each net shows
+    its first 10 pins. The netlist of KiCad has a net "unconnected-(...)" for each
+    unconnected pin: these nets are in the list.
+
     Args:
         netlist_path: A netlist file of generate_netlist.
-        filter_pattern: Optional regular expression for the net names (no
-            difference of case). Empty: all nets.
+        filter_pattern: Optional regular expression of Python for the net names (no
+            difference of case), found in a part of the full name with the sheet
+            path. Empty: all nets.
 
     Returns:
         The nets with their pins.
@@ -458,6 +468,9 @@ async def get_netlist_components(
     filter_ref: str = "",
 ) -> str:
     """Give the components of a netlist file with the nets of their pins.
+
+    Total Components counts all components of the netlist, also with filter_ref. The
+    netlist has no power symbols.
 
     Args:
         netlist_path: A netlist file of generate_netlist.

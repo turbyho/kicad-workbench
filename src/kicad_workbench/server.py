@@ -31,6 +31,16 @@ mcp = FastMCP(
     user (for example the conversion of a file in KiCad, or the install of KiCad),
     tell the user.
 
+    The tools read the files on the disk: a change that is not saved in KiCad is not
+    in the result. A tool that writes a schematic, a board or a project file refuses
+    the file when KiCad has it open (the lock file of KiCad). Tell the user to save the
+    files first (and to close them for a write). The ipc_ tools are different: they use
+    the running KiCad (ipc_status).
+
+    With kicad-cli 10.0.0 to 10.0.6, a tool that needs the full project (the netlist,
+    ERC, the BOM, the SVG export) gives an error for a project with more than one
+    top-level sheet: these versions of kicad-cli load only one top-level sheet.
+
     A tool call that takes longer than {wait} s becomes a background job (an MCP client
     stops a call after its timeout, Claude Desktop after 60 s): the answer starts with
     "⏳" and gives the job ID. The work continues. Call job_status with the job ID for

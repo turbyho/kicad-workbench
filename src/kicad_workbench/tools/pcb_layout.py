@@ -65,9 +65,11 @@ async def setup_pcb_layout(
 ) -> str:
     """Make a new board with an outline, next to the schematic.
 
-    The board has the name of the schematic, a rectangle on Edge.Cuts, two copper
-    layers and the default design rules. It has no footprints, tracks or nets: use
-    "Update PCB from Schematic" of KiCad for the footprints.
+    The board has the name of the schematic, a rectangle of four lines on Edge.Cuts,
+    two copper layers and the default design rules. It has no footprints, tracks or
+    nets: use "Update PCB from Schematic" of KiCad for the footprints. The rectangle
+    goes from (0, 0) to (width, height): its top left corner is at the top left corner
+    of the page.
 
     pcbnew of the installed KiCad makes the board (a Python with pcbnew is
     necessary), thus the board has the file format of the installed KiCad, as
@@ -265,6 +267,14 @@ async def export_gerber(
 
     The tool runs "kicad-cli pcb export gerbers", then "kicad-cli pcb export drill",
     and gives the files that kicad-cli wrote.
+
+    kicad-cli uses its default plot options, not the plot settings of the board (no
+    --board-plot-params), and plots the zone fill of the file (no --check-zones): fill
+    the zones and save the board first. The drill files use the default options of
+    kicad-cli, not the settings of the drill dialog. Thus the files can be different
+    from the files of the Plot dialog of KiCad. The tool deletes no file in output_dir:
+    a file of an earlier export stays, and the list gives only the files that this
+    export wrote or changed. A failed drill export is a warning: the Gerber files stay.
 
     Args:
         pcb_path: The .kicad_pcb file.

@@ -521,6 +521,12 @@ async def add_library_to_table(
     upgrade; a library of a newer file version is an error. KiCad must not have the
     project open. The installed KiCad must be KiCad 10.0.
 
+    The URI of the new row has a path variable of KiCad when its folder holds the
+    library (the variable with the most folder levels), else ${KIPRJMOD} when the
+    project folder holds it, else the absolute path (NormalizePath). As the table
+    dialog, the tool writes some characters of the nickname as escapes, for example
+    ":" as "{colon}".
+
     Args:
         project_path: The .kicad_pro file or the project folder.
         kind: "symbol" or "footprint".

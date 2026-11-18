@@ -24,7 +24,8 @@ async def search_parts_registry(query: str, limit: int = 20) -> str:
 
     The tool compares the query with the ID, the name, the family, the category, the
     manufacturer and the keywords of each part. Example queries: "usb c connector",
-    "0402 capacitor", "nrf9151".
+    "0402 capacitor", "nrf9151". The results are the first matches in the order of the
+    registry index, with no ranking.
 
     Args:
         query: The words to find. Each word must match. "*" is a wildcard.
@@ -85,13 +86,20 @@ async def download_registry_part(
     The tool downloads only through HTTPS, only from the hosts of the registry, at
     most 50 MB for each file, and only the file extensions of each format.
 
+    The tool replaces a file with the same name in save_dir. It does not check the
+    file version, and does not add the files to a library table: KiCad reads a
+    .kicad_mod file only in a footprint library folder (.pretty). Add the library with
+    add_library_to_table: then copy_symbol_to_library and copy_footprint_to_library
+    can copy its items into a project library.
+
     Args:
         part_id: The ID of the part (search_parts_registry gives it).
         save_dir: A folder that exists, for example the library folder of the
             project: in the working folder, the home folder or a folder of
             PARTS_REGISTRY_SAVE_ROOTS.
-        formats: The files to download: "footprint", "symbol", "step" and
-            "preview". Default: the footprint and the symbol.
+        formats: The files to download: "footprint", "symbol", "step", "preview"
+            (.glb), "footprint_svg" and "symbol_svg". Default: the footprint and the
+            symbol.
 
     Returns:
         The paths of the files, or an error.

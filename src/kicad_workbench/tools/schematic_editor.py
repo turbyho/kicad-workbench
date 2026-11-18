@@ -1111,7 +1111,21 @@ async def add_hierarchical_label(
     degrees, up at 90, to the left at 180 and down at 270, as KiCad draws it: a label
     at 180 has its text to the left of the point. This is correct, not a defect. With
     x and y, the angle is 0.
-    Make sure that the connection is in the netlist: generate_netlist.
+
+    The tool changes only the sub-sheet. It does not add the sheet pin to the sheet
+    symbol in the parent sheet, and KiCad connects the label to the parent sheet only
+    through a sheet pin with the same name. Tell the user to add the sheet pin in the
+    schematic editor of KiCad: until then, ERC gives hier_label_mismatch. Make sure
+    that the connection is in the netlist: generate_netlist.
+
+    The tool finds the symbol by the Reference field in the file, not by the reference
+    of each sheet path: in a sheet that the hierarchy uses more than one time, the
+    reference of an other sheet path is not found.
+
+    KiCad must not have the schematic open: the tool refuses the write (the lock file
+    of KiCad). The tool also refuses the write when the file changed after the tool read
+    it. A schematic of an older file version than the installed KiCad writes is an
+    error: the user converts it in KiCad first (the output gives the step).
 
     Args:
         file_path: The .kicad_sch file of the sub-sheet.
@@ -1174,6 +1188,19 @@ async def add_global_label(
     point to the right at 0 degrees, up at 90, to the left at 180 and down at 270, as
     KiCad draws it: a label at 180 has its text to the left of the point. This is
     correct, not a defect. With x and y, the angle is 0.
+
+    A new global label has the hidden field Intersheetrefs at its point, as KiCad
+    makes it. KiCad shows the field next to the label only when the schematic setting
+    shows the references to other sheets. This is correct, not a defect.
+
+    The tool finds the symbol by the Reference field in the file, not by the reference
+    of each sheet path: in a sheet that the hierarchy uses more than one time, the
+    reference of an other sheet path is not found.
+
+    KiCad must not have the schematic open: the tool refuses the write (the lock file
+    of KiCad). The tool also refuses the write when the file changed after the tool read
+    it. A schematic of an older file version than the installed KiCad writes is an
+    error: the user converts it in KiCad first (the output gives the step).
 
     Args:
         file_path: The .kicad_sch file.
@@ -1441,6 +1468,23 @@ async def add_component_from_library(
     between two pins of the new symbol, and adds a junction where a pin is in
     the middle of a wire. The output tells each junction and each changed wire.
 
+    The tool places the symbol at 0 degrees, with no mirror, in body style 1. It
+    cannot rotate or mirror a symbol, and cannot place an other body style (De
+    Morgan): tell the user to do this in KiCad. One call places one unit: for the
+    other units of a package, call the tool again with the same reference and the
+    next unit. The tool does not check that the reference is unique in the project:
+    run_erc finds a duplicate reference.
+
+    When the hierarchy uses the sheet more than one time, only the sheet of
+    sheet_path gets the reference. When KiCad loads the schematic, it gives the
+    other uses of the sheet the same reference (the output tells it): the user
+    annotates the schematic in KiCad to give them their references.
+
+    KiCad must not have the schematic open: the tool refuses the write (the lock file
+    of KiCad). The tool also refuses the write when the file changed after the tool read
+    it. A schematic of an older file version than the installed KiCad writes is an
+    error: the user converts it in KiCad first (the output gives the step).
+
     Args:
         file_path: The .kicad_sch file.
         library_name: The library name of the library tables.
@@ -1448,7 +1492,8 @@ async def add_component_from_library(
         reference: The reference, for example "R1".
         value: The text of the Value field.
         footprint: The footprint. Empty: the footprint of the library symbol.
-        x, y: The position in mm.
+        x, y: The position in mm of the symbol origin (the point (0, 0) of the
+            library symbol), not of the body center or of a pin.
         unit: The unit, from 1 to the number of units of the symbol.
         sheet_path: Only for a sheet file that the hierarchy uses more than
             one time: the sheet that gets the reference, as the sheet names
@@ -1458,6 +1503,10 @@ async def add_component_from_library(
             from a connection point of the sheet (a pin, a wire, a label), the
             symbol stays at x, y. False: use x, y as they are. The output
             tells the pins off the grid.
+
+    Returns:
+        The placed symbol and its position, the junctions and the changed wires,
+        the pins off the connection grid, and the notes.
     """
     for field, text in (("Reference", reference), ("Value", value), ("Footprint", footprint)):
         if error := _field_error(field, text):
@@ -1652,6 +1701,14 @@ async def add_wire(
     The connection grid is schematic.connection_grid_size of the project file
     (default 1.27 mm). ERC finds a wire end off this grid (endpoint_off_grid).
 
+    The tool adds wires only, not buses or bus entries. A wire that the sheet has
+    already gives "No change".
+
+    KiCad must not have the schematic open: the tool refuses the write (the lock file
+    of KiCad). The tool also refuses the write when the file changed after the tool read
+    it. A schematic of an older file version than the installed KiCad writes is an
+    error: the user converts it in KiCad first (the output gives the step).
+
     Args:
         file_path: The .kicad_sch file.
         points: The points (x, y) in mm. Each point after the first ends a segment.
@@ -1661,6 +1718,10 @@ async def add_wire(
             of a wire moves only along the wire. A horizontal or vertical
             segment stays horizontal or vertical. False: use the points as
             they are. The output tells the points off the grid.
+
+    Returns:
+        The new segments, the junctions and the changed wires, the points that
+        moved to the connection grid and the points off the grid, or "No change".
     """
     try:
         return await _run_edit(_add_wire_sync, file_path, points, snap_to_grid)
@@ -1717,7 +1778,14 @@ async def add_label(
     The text goes from the point to the right at 0 degrees, up at 90, to the left at 180
     and down at 270, and KiCad keeps it upright: a label at 180 has its text to the left
     of the point (right justified), as KiCad draws it. This is correct, not a defect. The
-    point is the connection point: put it on the end of a wire or on a pin.
+    point is the connection point: put it on the end of a wire or on a pin. A label
+    connects at each point of a wire, also in its middle: the tool adds no junction for
+    it. A label on a bus names the bus.
+
+    KiCad must not have the schematic open: the tool refuses the write (the lock file
+    of KiCad). The tool also refuses the write when the file changed after the tool read
+    it. A schematic of an older file version than the installed KiCad writes is an
+    error: the user converts it in KiCad first (the output gives the step).
 
     Args:
         file_path: The .kicad_sch file.
@@ -1728,7 +1796,11 @@ async def add_label(
             text does not cover them.
         snap_to_grid: True: move the label to the nearest point of the
             connection grid of the project (default 1.27 mm), except on a
-            connection point of the sheet (a pin, a wire, a label).
+            connection point of the sheet (a pin, a wire, a label). A label in the
+            middle of a wire moves only along the wire.
+
+    Returns:
+        The position of the label.
     """
     if error := _multiline_label_error(text):
         return error

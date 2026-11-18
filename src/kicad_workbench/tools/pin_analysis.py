@@ -36,9 +36,9 @@ async def detect_pin_conflicts(
       is not placed.
 
     The other items of the ERC (for example a wire end off the grid) are in run_erc.
-    The tool uses the last ERC report until a schematic file changes: then it runs the
-    ERC again. An excluded
-    violation shows with "(excluded)" and does not count. "✅" comes only when the
+    The tool uses the last ERC report until a schematic file or a project file
+    changes: then it runs the ERC again. An excluded violation shows with "(excluded)"
+    and does not count. "✅" comes only when the
     schematic is fully annotated: KiCad connects the pins by their references. With
     KiCad 8 or 9 installed, the answer has a warning: the list of items is the list of
     KiCad 10.

@@ -177,6 +177,9 @@ async def get_pcb_statistics(file_path: str) -> str:
 
     The zone count is the count of the copper zones, as the Zone Manager of KiCad lists
     them: no rule area (keepout), no teardrop, and no zone on non-copper layers only.
+    The size is the bounding box of the Edge.Cuts shapes of the board and of its
+    footprints, with the line width (BOARD::ComputeBoundingBox): an outline of 100 x
+    100 mm with lines of 0.15 mm gives 100.15 x 100.15 mm.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -251,6 +254,10 @@ async def analyze_pcb_nets(file_path: str) -> str:
     tracks, and a comparison with the design rules of the board. The zone count is the
     count of the copper zones, as the Zone Manager of KiCad lists them: no rule area
     (keepout), no teardrop, and no zone on non-copper layers only.
+
+    The tool lists the 20 nets with the longest tracks. The warning about narrow
+    tracks is a rule of the tool (a track narrower than half of the current track
+    width of the board settings), not a DRC result: run_drc gives the checks of KiCad.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -455,6 +462,12 @@ async def find_tracks_by_net(file_path: str, net_name: str) -> str:
     layers of the tracks only. For a net with no tracks, vias or zones, the tool gives
     the nets whose name contains the name (no difference between upper and lower case).
 
+    Give the full net name of the board, case-sensitive (for example "/SDA" for a local
+    label of the root sheet). The total length is the sum of the track segments, with
+    no vias and no pads. The tables show 50 segments and 20 vias. The warning about
+    mixed track widths is an advice of the tool, not a DRC result. With the text reader
+    (no pcbnew), the tables are cut with no note and there is no width warning.
+
     Args:
         file_path: The .kicad_pcb file.
         net_name: The name of the net.
@@ -633,10 +646,20 @@ async def analyze_pcb_signal_integrity(
 ) -> str:
     """Give the differential pairs, the RF tracks and the longest signal nets of a board (heuristic).
 
-    The tool finds a differential pair from the names of two nets (for example USB_P
-    and USB_N, DP and DN) and gives the difference of their lengths. It finds an RF
-    track from the name of its net. It also gives the longest signal nets and the
-    nets with the most vias.
+    The tool finds a differential pair from the ends of two net names, case-sensitive:
+    _P/_N, _DP/_DN, _TXP/_TXN, _RXP/_RXN, _M/_S and _POS/_NEG (for example USB_DP and
+    USB_DN). It does not find + and - (USB_D+ and USB_D-). The status of a pair uses
+    fixed limits of the tool (OK below 0.127 mm, Marginal below 0.5 mm, else
+    Mismatch), not the rules of the board. The length is the sum of the track
+    segments, with no vias and no pads.
+
+    An RF net has ANT, RF or FEED in its name, and not VDD or GND. The longest signal
+    nets (15) are the nets whose name has no power word (VDD, VCC, GND, VSS, 3V3, 5V,
+    1V8, PGND, VBUS). The tool also gives the 10 nets with the most vias.
+
+    With the text reader (no pcbnew), the tool gives only the differential pairs and
+    the longest signal nets: no RF tracks, no nets with vias, no design rules, and
+    net_name has no effect.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -832,7 +855,11 @@ async def analyze_pcb_power_integrity(file_path: str) -> str:
     (keepout), no teardrop, and no zone on non-copper layers only. A zone can be on more
     than one copper layer: the tool gives all of its copper layers on the board, from
     the top, and counts each of them for the GND coverage. On a board with more than 2
-    copper layers, a warning tells when the GND zones are not on each copper layer.
+    copper layers, a warning tells when the GND zones are not on each copper layer:
+    this warning is an advice of the tool, not a check of KiCad. "filled" is the fill
+    state that the file has. With the text reader (no pcbnew), the words of the power
+    nets are different (VDD, VCC, VBUS, LDO, DCDC; GND, PGND, AGND, DGND) and the
+    zones have no fill state.
 
     Args:
         file_path: The .kicad_pcb file.

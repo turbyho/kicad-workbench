@@ -372,6 +372,12 @@ async def search_library_symbols(
     all libraries (some seconds); then an index in the user cache directory is
     used until a library file changes.
 
+    The tool searches only libraries of the type KiCad, not a disabled library, and
+    not a hidden library unless include_hidden or library asks for it. A library file
+    of a newer version than the installed KiCad gives no results (KiCad cannot read
+    it). The output tells a library of an other type and a library file that the tool
+    cannot read.
+
     Args:
         query: Words to find, for example "op amp rail-to-rail".
         project_path: Optional project (.kicad_pro, .kicad_sch, .kicad_pcb or
@@ -401,6 +407,12 @@ async def search_library_footprints(
     is that of the footprint chooser of KiCad: an exact name first, then the
     best score. The first search reads all libraries (some seconds); then an
     index in the user cache directory is used until a library file changes.
+
+    The tool searches only libraries of the type KiCad, not a disabled library, and
+    not a hidden library unless include_hidden or library asks for it. A library file
+    of a newer version than the installed KiCad gives no results (KiCad cannot read
+    it). The output tells a library of an other type and a library file that the tool
+    cannot read.
 
     Args:
         query: Words to find, for example "0603 resistor".
@@ -620,6 +632,10 @@ async def get_library_symbol(lib_id: str, project_path: str = "") -> str:
     the project, as in the symbol chooser of KiCad. A derived symbol (extends
     ...) is shown as KiCad places it: the fields of the symbol and of its
     parents, the flags of its parent, and the units and pins of its root symbol.
+
+    The tool reads symbol libraries of KiCad 8 and later. An older library gives an
+    error with the step for the user (kicad-cli sym upgrade), and a library of a
+    newer version than the installed KiCad gives an error.
 
     Args:
         lib_id: The library ID, for example "Device:R" or "MCU_ST_STM32F4:STM32F405RGTx".
@@ -1305,7 +1321,8 @@ async def check_pin_pad_mapping(
     KiCad. A pin number that no pad has, and a pin with no number, are errors.
     A pad with a number that no pin has gets no net: this is a warning. KiCad
     10 reads a stacked pin number ("[1-4]") as more than one pad number. The
-    check uses the pins of all units, for each body style.
+    check uses the pins of all units, for each body style. A power symbol gives an
+    error: KiCad puts no power symbol into the netlist.
 
     Args:
         symbol_lib_id: The library ID of the symbol, for example "Device:R".

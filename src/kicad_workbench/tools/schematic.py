@@ -108,10 +108,14 @@ async def list_schematic_components(
     that the hierarchy uses two times gives two references). Power symbols are not
     components. The tool needs kicad-cli (the rules of the KiCad version).
 
+    Each placed unit of a package is a row of its own with the same reference (U1 four
+    times for four units), and the table has no unit column. This is correct, not a
+    duplicate reference. Total counts the rows (the placed units), not the packages.
+
     Args:
         file_path: A .kicad_sch file of the project.
         filter_type: Optional start of the references, for example "R", "C" or
-            "U" (no difference of case).
+            "U" (no difference of case). "R" also gives RV1 and RN1.
         filter_value: Optional text in the Value field (no difference of case).
         filter_dnp: Optional: True gives only the DNP components, False only the
             components that are not DNP.
@@ -374,9 +378,14 @@ async def search_symbols(
 ) -> str:
     """Find the components of a schematic whose reference, value or library ID match a pattern.
 
+    The tool searches only the components of this file (in each of its sheet paths),
+    not the sheets below it. A component matches when the pattern is in a part of the
+    text (Python re.search). The table shows the first 50 matches, and the count of
+    the others.
+
     Args:
         file_path: A .kicad_sch file of the project.
-        pattern: A regular expression (no difference of case).
+        pattern: A regular expression of Python (no difference of case).
         search_fields: The fields to search: "all" (default), "reference", "value"
             or "library".
 
@@ -452,11 +461,16 @@ async def list_schematic_nets(
     file_path: str,
     filter_power: bool = False,
 ) -> str:
-    """Give the nets of a schematic file.
+    """Give the names of the labels and of the power symbols of a schematic file.
 
-    The tool reads the labels and the power symbols of the file. A net with no label
-    of a sub-sheet needs the full hierarchy: use generate_netlist on the root
-    schematic for all nets.
+    The table gives the names of the labels and of the power symbols of this file, not
+    the nets of KiCad: KiCad adds the sheet path to a local label of a sub-sheet
+    ("/Power/VIN"), gives one name to a net with more labels, and names a net with no
+    label. A label with no connection is in the list too. Each name is in the list one
+    time. Type is the first kind that has the name, in this sequence: global, local,
+    hierarchical, power. Code is the index of the name when the tool reads the kinds
+    in this sequence, each in the order of the file (from 0): it is not the net code
+    of the netlist. Use generate_netlist on the root schematic for the nets of KiCad.
 
     Args:
         file_path: A .kicad_sch file of the project.
@@ -464,7 +478,7 @@ async def list_schematic_nets(
             "vss", "+" or "-" (heuristic).
 
     Returns:
-        A table of the nets: name, type and code.
+        A table of the names: name, type and code.
     """
     try:
         if not Path(file_path).is_file():
@@ -556,7 +570,10 @@ async def get_schematic_info(file_path: str) -> str:
 
     The components and the sheet symbols are the ones that KiCad loads for the
     project of the file (the references of each sheet path). The tool needs
-    kicad-cli (the rules of the KiCad version).
+    kicad-cli (the rules of the KiCad version). A package with more units is one
+    component. Total Nets is the number of the names of the labels and of the power
+    symbols of the file (as list_schematic_nets gives them), not the number of the
+    nets of the netlist.
 
     Args:
         file_path: A .kicad_sch file of the project.

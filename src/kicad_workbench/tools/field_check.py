@@ -350,9 +350,10 @@ async def check_symbol_fields(schematic_path: str) -> str:
     them at any time) of the default variant and of each variant (KiCad 10).
     For each symbol it gives the conflicts, the changes that the user must
     confirm, the symbols that are not confirmed, the moves of the old convention,
-    and the symbols with no part. Each message gives
-    the change for set_symbol_fields. Write the fields only after the user
-    confirmed them.
+    and the symbols with no part. Each message gives the change for
+    set_symbol_fields. Write the fields only after the user confirmed them. A symbol
+    with "Exclude from BOM" is not in the BOM of kicad-cli: the tool does not check
+    its fields. A power symbol is never in the BOM.
 
     Args:
         schematic_path: A .kicad_sch file of the project. The tool checks the

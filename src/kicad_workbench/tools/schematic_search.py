@@ -26,6 +26,14 @@ async def search_components_by_type(
     path. The netlist has no power symbols and no symbol with no library symbol.
     The tool needs kicad-cli.
 
+    The types OLED, sensor, display, SPI, I2C, UART, power, memory and wireless
+    search a list of words (for example SPI: spi, mosi, miso, sck, cs). An other type
+    is one word to search. The tool finds a word in a part of the value, of the
+    footprint or of a net name of the component (no difference of case). Thus a
+    component on a net of the type (a pull-up resistor on SDA) is in the result, and
+    short words (cs, tx, rx, esp) give false matches. The output gives the words.
+    Each component shows its first 10 connections.
+
     Args:
         file_path: A .kicad_sch file of the project.
         component_type: The type of component, for example "OLED", "sensor",

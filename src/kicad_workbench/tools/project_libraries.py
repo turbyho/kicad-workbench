@@ -21,13 +21,13 @@ from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_fields import WX_SPACE
-from ..parsers.kicad_versions import KICAD10, kicad_release, verified_triple
+from ..parsers.kicad_versions import KICAD10, verified_triple
 from ..parsers.lib_symbols import read_library, symbol_chain
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, file_locks, save_file, save_files
 from ..utils.file_stamp import FileStamp, file_stamp, read_stamped
 from ..utils.file_versions import FileVersionError, check_library_versions, library_file_version
-from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
+from ..utils.kicad_cli import get_kicad_version, kicad_10_problem
 from ..utils.kicad_lock import check_project_not_open
 from ..utils.kicad_text import decode_as_kicad
 from ..utils.library_copy import (
@@ -108,13 +108,8 @@ async def _context(project_path: str, kind: str | None) -> _Context:
         raise InputError("Give project_path: the .kicad_pro file or the project folder.")
     project = Path(os.path.abspath(found))
     kicad = await get_kicad_version()
-    if problem := installed_kicad_problem(kicad):
+    if problem := kicad_10_problem(kicad, "The tools for the project library tables have"):
         raise InputError(problem)
-    if kicad_release(kicad) is not KICAD10:
-        raise InputError(
-            f"The installed KiCad is {kicad}. The tools for the project library tables have "
-            "the rules of KiCad 10.0 only."
-        )
     await asyncio.to_thread(_check_not_open, project)
     return _Context(project, kicad)
 

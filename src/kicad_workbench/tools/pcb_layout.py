@@ -21,6 +21,7 @@ from ..utils.kicad_cli import (
     decode_output,
     get_kicad_version,
     installed_kicad_problem,
+    kicad_10_problem,
     run_kicad_cli,
 )
 from ..utils.kicad_lock import check_board_not_open, write_board, write_with_warning
@@ -257,29 +258,72 @@ def _summarize_pcb(text: str) -> str:
     )
 
 
+def _board_settings(pcb: Path) -> tuple[str, bool]:
+    """The --drill-origin of kicad-cli for the drill origin of the board, and True when
+    the board has a zone. The function blocks: run it off the event loop.
+
+    The drill origin is "plot" (the auxiliary origin) when the plot settings of the
+    board use the auxiliary origin, as the drill dialog of KiCad (DIALOG_GENDRILL:
+    GetUseAuxOrigin of PCB_PLOT_PARAMS); else "absolute". The plot settings are
+    (setup (pcbplotparams (useauxorigin yes) ...)): the parsers of KiCad read each
+    item in its sequence, thus the last one gives the value, and
+    PCB_PLOT_PARAMS_PARSER::parseBool reads yes, no, true and false.
+
+    Raises:
+        InputError: The server cannot read the board, thus it does not know its drill
+            origin.
+    """
+    try:
+        root = parse(read_as_kicad(pcb))
+    except (OSError, KiCadEncodingError, SExprError) as e:
+        raise InputError(
+            f"The server cannot read the plot settings of the board {pcb}: {e}"
+        ) from e
+    use_aux = False
+    for setup in root.children("setup"):
+        for params in setup.children("pcbplotparams"):
+            for flag in params.children("useauxorigin"):
+                use_aux = flag.value(0, "") in ("yes", "true")
+    return ("plot" if use_aux else "absolute"), bool(root.children("zone"))
+
+
 @mcp.tool()
 @with_board_versions("pcb_path")
 async def export_gerber(
     pcb_path: str,
     output_dir: str = "",
+    refill_zones: bool = False,
 ) -> str:
     """Export the Gerber and drill files of a board with kicad-cli, for fabrication.
 
     The tool runs "kicad-cli pcb export gerbers", then "kicad-cli pcb export drill",
     and gives the files that kicad-cli wrote.
 
-    kicad-cli uses its default plot options, not the plot settings of the board (no
-    --board-plot-params), and plots the zone fill of the file (no --check-zones): fill
-    the zones and save the board first. The drill files use the default options of
-    kicad-cli, not the settings of the drill dialog. Thus the files can be different
-    from the files of the Plot dialog of KiCad. The tool deletes no file in output_dir:
-    a file of an earlier export stays, and the list gives only the files that this
-    export wrote or changed. A failed drill export is a warning: the Gerber files stay.
+    The Gerber files use the plot settings that the board saves, as the Plot dialog of
+    KiCad (--board-plot-params, PCBNEW_JOBS_HANDLER::JobExportGerbers): the options
+    of the dialog and its selection of the layers that are not copper. kicad-cli plots
+    each copper layer of the board, also a copper layer that the dialog does not
+    select. The output folder of the dialog has no effect: the files go to
+    output_dir. The drill files have the drill origin of the board (the auxiliary
+    origin when the plot settings use it, as the drill dialog). The other options of
+    the drill dialog (format, units, zeros, map) are settings of the user, not of the
+    board: the drill files use the default options of kicad-cli (Excellon, mm).
+    kicad-cli always writes the Gerber job file (.gbrjob), also when the plot settings
+    of the board do not create it: kicad-cli has no option for it.
+
+    The tool deletes no file in output_dir: a file of an earlier export stays, and the
+    list gives only the files that this export wrote or changed. A failed drill export
+    is a warning: the Gerber files stay.
 
     Args:
         pcb_path: The .kicad_pcb file.
         output_dir: Optional folder of the files. Default: the folder "gerber"
             next to the board.
+        refill_zones: True: kicad-cli fills all zones again before the plot
+            (--check-zones), as the Plot dialog of KiCad does by default (its check
+            box "Check zone fills before plotting" is on). The fill is only in
+            memory: the board file does not change. False (default): the Gerber
+            files have the zone fills that are saved in the file. Needs KiCad 10.0.
 
     Returns:
         The files that kicad-cli wrote, or an error.
@@ -288,6 +332,13 @@ async def export_gerber(
         pcb = Path(pcb_path)
         if not pcb.exists():
             return f"❌ PCB file not found: {pcb_path}"
+
+        # --check-zones of kicad-cli is new in KiCad 10 (new work: the rules of KiCad
+        # 10.0 only).
+        problem = kicad_10_problem(await get_kicad_version(), "refill_zones has")
+        if refill_zones and problem:
+            return f"❌ {problem}"
+        drill_origin, has_zones = await asyncio.to_thread(_board_settings, pcb)
 
         out_path = Path(output_dir) if output_dir else pcb.parent / "gerber"
         out_path.mkdir(parents=True, exist_ok=True)
@@ -301,10 +352,13 @@ async def export_gerber(
 
         # Gerbers first (required); drill is best-effort afterwards. Note the
         # subcommand is "gerbers" (plural) and the output flag is "-o", not
-        # "--output-dir" — KiCad 8, 9 and 10 use this form. With no --layers it
-        # plots every layer defined in the board, so it generalises to N-layer.
+        # "--output-dir": KiCad 8, 9 and 10 use this form. --board-plot-params: the
+        # plot settings of the board (KiCad 8, 9 and 10).
+        gerber_args = ["pcb", "export", "gerbers", "--board-plot-params"]
+        if refill_zones:
+            gerber_args.append("--check-zones")
         try:
-            rc, err = await _run(["pcb", "export", "gerbers", "-o", str(out_path), str(pcb)])
+            rc, err = await _run([*gerber_args, "-o", str(out_path), str(pcb)])
         except FileNotFoundError as e:  # kicad-cli is not there
             return f"❌ {e}"
         if rc != 0:
@@ -315,7 +369,8 @@ async def export_gerber(
 
         drill_note = ""
         try:
-            rc2, err2 = await _run(["pcb", "export", "drill", "-o", str(out_path), str(pcb)])
+            drill_args = ["pcb", "export", "drill", "--drill-origin", drill_origin]
+            rc2, err2 = await _run([*drill_args, "-o", str(out_path), str(pcb)])
             if rc2 != 0:
                 drill_note = (
                     f"\n\n⚠️ Drill export returned rc={rc2}: "
@@ -335,15 +390,29 @@ async def export_gerber(
             return f"❌ kicad-cli reported success but produced no files in {out_path}.{drill_note}"
 
         listing = "\n".join(f"- {n}" for n in new_files)
+        if refill_zones:
+            zones = "filled again before the plot (in memory: the board file did not change)"
+        elif not has_zones:
+            zones = "the board has no zones"
+        else:
+            zones = "the fills saved in the board file" + (
+                " (refill_zones=True fills them again)" if problem is None else ""
+            )
+        origin = "the auxiliary origin" if drill_origin == "plot" else "the absolute origin"
         return f"""✅ Gerber export complete.
 
 **PCB:** {pcb_path}
 **Output directory:** {out_path}
+**Plot settings:** the plot settings of the board (each copper layer of the board)
+**Zones:** {zones}
+**Drill files:** the default options of kicad-cli, with {origin} of the board
+**Job file:** kicad-cli always writes the Gerber job file (.gbrjob), also when the plot
+settings of the board do not create it (kicad-cli has no option for it)
 
 **Files generated ({len(new_files)}):**
 {listing}{drill_note}
 
-Send all of these to your fabricator (e.g. JLCPCB, PCBWay, OSH Park).
+Give all these files to the fabricator.
 """
 
     except Exception as e:

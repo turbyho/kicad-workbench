@@ -211,7 +211,7 @@ KiCad 10.0.6 now. More tools come in the next versions.
 | `export_schematic_svg(schematic_path, output_dir?)` | SVG files made by kicad-cli with the full hierarchy: all pages for the root schematic, the pages of its sheet paths for a sub-sheet |
 | `render_pcb(pcb_path, side?, output_path?, width?, height?, quality?, rotate?)` | A 3D view of the board as PNG or JPEG (the extension of `output_path`), made by kicad-cli of KiCad 9 or later (kicad-cli 8 has no "pcb render") |
 | `export_pcb_3d(pcb_path, output_path?, board_only?)` | A STEP model of the board, made by kicad-cli. A 3D model that kicad-cli did not add gives a warning with the footprint and the reason |
-| `export_gerber(pcb_path, output_dir?)` | Gerber and drill files, made by kicad-cli |
+| `export_gerber(pcb_path, output_dir?, refill_zones?)` | Gerber and drill files, made by kicad-cli with the plot settings and the drill origin of the board; `refill_zones` fills the zones again before the plot (KiCad 10.0) |
 
 ## Parts registry
 

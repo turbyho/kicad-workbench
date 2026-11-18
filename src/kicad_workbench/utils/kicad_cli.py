@@ -32,6 +32,7 @@ from pathlib import Path
 
 from ..errors import InputError, WorkbenchError
 from ..parsers.kicad_versions import (
+    KICAD10,
     RELEASES,
     is_release_candidate,
     is_verified_nightly,
@@ -171,6 +172,23 @@ def installed_kicad_problem(kicad: str | None) -> str | None:
             f"rules of the KiCad releases only. Tell the user: use a KiCad release that "
             f"the server knows ({known})."
         )
+    return None
+
+
+def kicad_10_problem(kicad: str | None, subject: str) -> str | None:
+    """Return why a function with the rules of KiCad 10.0 only cannot work with the
+    installed KiCad, or None (CLAUDE.md rule 4: new work has the rules of KiCad 10
+    only; a nightly build or a later version gets no rule).
+
+    Args:
+        kicad: The version of kicad_cli_version_sync.
+        subject: The start of the message with its verb, for example "refill_zones
+            has".
+    """
+    if problem := installed_kicad_problem(kicad):
+        return problem
+    if kicad_release(kicad) is not KICAD10:
+        return f"{subject} the rules of KiCad 10.0 only. The installed KiCad is {kicad}."
     return None
 
 

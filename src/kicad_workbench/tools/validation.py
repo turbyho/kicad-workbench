@@ -24,7 +24,6 @@ from ..parsers.check_report_parser import (
     read_erc_report,
     read_report_file,
 )
-from ..parsers.kicad_versions import KICAD10, kicad_release
 from ..parsers.sch_geometry import IU_PER_MM
 from ..parsers.sexpr import parse
 from ..server import mcp
@@ -37,6 +36,7 @@ from ..utils.kicad_cli import (
     decode_output,
     get_kicad_version,
     installed_kicad_problem,
+    kicad_10_problem,
     run_kicad_cli,
 )
 from ..utils.kicad_project import (
@@ -104,22 +104,17 @@ async def _drc_mode(pcb: Path, refill_zones: bool) -> _DrcMode:
             KiCad 10.0 only; a nightly build or a later version gets no rule).
     """
     version = await get_kicad_version()
-    kicad_10 = installed_kicad_problem(version) is None and kicad_release(version) is KICAD10
+    problem = kicad_10_problem(version, "refill_zones has")
     if refill_zones:
-        if problem := installed_kicad_problem(version):
+        if problem:
             raise InputError(problem)
-        if not kicad_10:
-            raise InputError(
-                f"refill_zones has the rules of KiCad 10.0 only. The installed KiCad is "
-                f"{version}."
-            )
         zones = "filled again before the DRC (in memory: the board file did not change)"
     elif await asyncio.to_thread(_has_zones, pcb) is False:
         zones = "the board has no zones"
     else:
         zones = "the fills saved in the board file (not filled again" + (
             "; refill_zones=True fills them as the DRC dialog of KiCad does by default)"
-            if kicad_10
+            if problem is None
             else ")"
         )
     return _DrcMode(refill_zones, _report_path(pcb, "drc_refill" if refill_zones else "drc"), zones)

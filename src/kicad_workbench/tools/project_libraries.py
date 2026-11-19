@@ -15,6 +15,7 @@ change, and its next write of the table would remove it.
 import asyncio
 import os
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +25,7 @@ from ..parsers.bus_names import unescape_string
 from ..parsers.kicad_fields import WX_SPACE
 from ..parsers.kicad_versions import KICAD10, verified_triple
 from ..parsers.lib_symbols import read_library, symbol_chain
-from ..parsers.sexpr import property_atoms
+from ..parsers.sexpr import Node, parse, property_atoms
 from ..server import mcp
 from ..utils.file_save import SaveFilesError, file_locks, save_file, save_files
 from ..utils.file_stamp import FileStamp, file_stamp, read_stamped
@@ -45,6 +46,15 @@ from ..utils.library_copy import (
 )
 from ..utils.library_derive import derived_symbol, new_symbol_name
 from ..utils.library_lookup import find_kicad_library, find_library_symbol
+from ..utils.library_rename import (
+    deleted_library,
+    derived_symbols,
+    descendants,
+    footprint_rename_problem,
+    renamed_library,
+    renamed_symbol_name,
+    symbol_in_use,
+)
 from ..utils.library_symbol_fields import change_fields, symbol_editor_text_size, text_problem
 from ..utils.library_tables import (
     LibraryRow,
@@ -60,6 +70,7 @@ from ..utils.library_upgrade import (
     git_note,
     symbol_names,
 )
+from ..utils.library_uses import Uses, footprint_uses, symbol_uses
 from ..utils.project_library_tables import (
     FOOTPRINT_EXTENSION,
     KICAD_TYPE,
@@ -160,6 +171,8 @@ def _save_guarded(
     files: list[tuple[Path, bytes]],
     stamps: dict[Path, FileStamp | None],
     prepare=None,
+    remove: tuple[Path, ...] = (),
+    remove_first: bool = False,
 ) -> list[str]:
     """Write files as one change, with the lock of each file. Just before the write, the
     lock of the project and the stamps are checked again: KiCad can have opened the
@@ -168,11 +181,16 @@ def _save_guarded(
     Args:
         prepare: An optional function that runs under the locks before the save, and
             gives warnings.
+        remove: The files to remove after the save (the old file of a renamed
+            footprint, a deleted footprint), as KiCad removes them after its save.
+        remove_first: Remove the files before the save (RenameFootprint of KiCad 10.0.7
+            and later). When the save then fails, the tool writes their old bytes again.
 
     Raises:
-        InputError: The project is open, a file changed, or the save failed.
+        InputError: The project is open, a file changed, the save failed, or a file
+            cannot be removed (the message tells the state of the files).
     """
-    with file_locks([path for path, _data in files]):
+    with file_locks([path for path, _data in files] + list(remove)):
         _check_not_open(context.project)
         for path, stamp in stamps.items():
             if file_stamp(path) != stamp:
@@ -181,10 +199,51 @@ def _save_guarded(
                     "file, to keep that change. Do this operation again."
                 )
         warnings = prepare() if prepare is not None else []
+        removed: list[tuple[Path, bytes, int]] = []
+        if remove_first:
+            for path in remove:
+                try:
+                    data, mode = path.read_bytes(), path.stat().st_mode
+                    path.unlink()
+                except OSError as e:
+                    raise InputError(
+                        f"The tool cannot remove the file {path}: {e}. "
+                        f"{_restored(removed) or 'The tool wrote no file.'}"
+                    ) from e
+                removed.append((path, data, mode))
+        if files:
+            try:
+                warnings += save_files(files)
+            except SaveFilesError as e:
+                raise InputError(f"{e} {_restored(removed)}".strip()) from e
+        if remove_first:
+            return warnings
+        for path in remove:
+            try:
+                path.unlink()
+            except OSError as e:
+                state = "The tool"
+                if files:
+                    state = f"The tool wrote {', '.join(str(p) for p, _data in files)}, but it"
+                raise InputError(f"{state} cannot remove the file {path}: {e}") from e
+        return warnings
+
+
+def _restored(removed: list[tuple[Path, bytes, int]]) -> str:
+    """Write the old bytes and the old permission bits of the removed files again, and
+    tell the result."""
+    texts = []
+    for path, data, mode in removed:
         try:
-            return warnings + save_files(files)
-        except SaveFilesError as e:
-            raise InputError(str(e)) from e
+            save_file(path, data)
+            os.chmod(path, stat.S_IMODE(mode))
+        except OSError as e:
+            texts.append(f"The tool removed {path}, and it cannot write it again: {e}")
+        else:
+            texts.append(
+                f"The tool wrote the old bytes of {path} again, with its old permission bits."
+            )
+    return " ".join(texts)
 
 
 def _write(
@@ -794,6 +853,19 @@ async def upgrade_project_libraries(
 # The copy of a symbol or a footprint into a project library (phase 4, step 4).
 
 
+def _row_path(context: _Context, row: TableRow, nickname: str) -> Path:
+    """The library of a row of the project table: its URI with the path variables.
+
+    Raises:
+        InputError: The URI is not an absolute path.
+    """
+    env = kicad_environment(context.kicad)
+    expanded = expand(row.text("uri"), env, project_variables(context.project))
+    if not os.path.isabs(expanded):
+        raise InputError(f"The URI of the library '{nickname}' is not an absolute path.")
+    return Path(os.path.abspath(expanded))
+
+
 def _project_library(context: _Context, kind: str, nickname: str) -> tuple[Path, list[str]]:
     """The library of a row of the project table, in the version of the installed KiCad.
 
@@ -811,15 +883,11 @@ def _project_library(context: _Context, kind: str, nickname: str) -> tuple[Path,
         # The Save As dialogs list the disabled rows too (LIBRARY_MANAGER::Rows).
         warnings.append(
             f"The row of '{nickname}' is disabled: KiCad does not load the library, thus "
-            "KiCad does not show the copy until the row is enabled."
+            "KiCad does not show the change until the row is enabled."
         )
     if row.text("type") != KICAD_TYPE:
         raise InputError(f"The library '{nickname}' is not of the KiCad format.")
-    env = kicad_environment(context.kicad)
-    expanded = expand(row.text("uri"), env, project_variables(context.project))
-    if not os.path.isabs(expanded):
-        raise InputError(f"The URI of the library '{nickname}' is not an absolute path.")
-    path = Path(os.path.abspath(expanded))
+    path = _row_path(context, row, nickname)
     if kind == "symbol" and not path.is_file():
         raise InputError(
             f"The library '{nickname}' ({path}) is not a .kicad_sym file. The tool writes "
@@ -972,7 +1040,7 @@ def _copy_footprint(
         )
     stamp = file_stamp(target)
     with tempfile.TemporaryDirectory(prefix="kicad-workbench-copy-") as work:
-        _file_name, data = footprint_copy(source, new, Path(work))
+        _file_name, data, _value_changed = footprint_copy(source, new, Path(work))
     replaced = stamp is not None
     warnings += _save_guarded(context, [(target, data)], {target: stamp})
     lines = [
@@ -1244,7 +1312,9 @@ def _derived_symbol(
             "- KiCad 10.0 saves the keywords and the footprint filters of the parent into "
             "the new symbol (LIB_SYMBOL::GetKeyWords)."
         )
-    lines.append("- Set the Value, the MPN and the other fields with set_library_symbol_properties.")
+    lines.append(
+        "- Set the Value, the MPN and the other fields with set_library_symbol_properties."
+    )
     return "\n".join(lines + [f"\n⚠️ {warning}" for warning in warnings])
 
 
@@ -1316,5 +1386,415 @@ async def create_derived_symbol(
             transfer_user_fields,
             keep_user_field_content,
         )
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+# The rename and the delete of a symbol or a footprint of a project library (phase 4,
+# step 7).
+
+
+def _uses_lines(uses: Uses, none_text: str) -> list[str]:
+    """The answer lines of the uses of the old library IDs: KiCad does not change them."""
+    lines = []
+    if uses.lines:
+        lines += [
+            "",
+            f"⚠️ The project uses {', '.join(uses.used)}. KiCad does not change these uses, "
+            "and neither does the tool:",
+            "",
+            *[f"- {line}" for line in uses.lines],
+        ]
+    elif not uses.problems:
+        lines.append(f"- {none_text}")
+    lines += [f"\n⚠️ {problem}" for problem in uses.problems]
+    return lines
+
+
+def _symbol_library_files(context: _Context) -> tuple[list[tuple[str, Path]], list[str]]:
+    """(nickname, library) of each symbol library of the project table (a file or a
+    folder of symbol files), and the rows that the tool cannot read."""
+    try:
+        table = read_project_table(context.project, "symbol")
+    except (LibraryTableError, OSError) as e:
+        return [], [f"The tool cannot read the project symbol table for the uses: {e}"]
+    found, problems = [], []
+    for row in table.rows:
+        nickname = row.text("name")
+        if row.text("type") != KICAD_TYPE:
+            problems.append(
+                f"The symbol library '{nickname}' is not of the KiCad format: the tool did "
+                "not look for uses in it."
+            )
+            continue
+        try:
+            path = _row_path(context, row, nickname)
+        except InputError as e:
+            problems.append(f"{e} The tool did not look for uses in it.")
+            continue
+        if not path.exists():
+            problems.append(
+                f"The symbol library '{nickname}' ({path}) is not there: the tool did not "
+                "look for uses in it."
+            )
+            continue
+        found.append((nickname, path))
+    return found, problems
+
+
+def _library_symbols(path: Path) -> tuple[FileStamp, dict, Node]:
+    """The stamp, the symbols and the parsed text of a library file. The edits need the
+    parsed text: the symbols of read_library hold only the last symbol of each name.
+
+    Raises:
+        InputError: The file changed during the read.
+    """
+    data, stamp, symbols = _read_symbol_library(path)
+    text = decode_as_kicad(data, path)
+    # The positions of the nodes of symbols are positions in the text that read_library
+    # parsed.
+    if any(symbol.node.source != text for symbol in symbols.values()):
+        raise InputError(f"The text of {path} is not the text that the tool read. Do it again.")
+    root = next(iter(symbols.values())).node.root if symbols else parse(text)
+    return stamp, symbols, root
+
+
+def _rename_symbol(context: _Context, _kind, lib_id: str, new_name: str) -> str:
+    library, name = _split_id(lib_id, "symbol")
+    new = renamed_symbol_name(new_name)
+    if not new:
+        raise InputError("Symbol must have a name.")
+    path, warnings = _project_library(context, "symbol", library)
+    stamp, symbols, root = _library_symbols(path)
+    if name not in symbols:
+        raise InputError(f"The library '{library}' ({path}) has no symbol '{name}'.")
+    if new == name:
+        return f"✅ The symbol '{name}' of the library '{library}' has this name: no file written."
+    other = symbol_in_use(symbols, name, new)
+    if other is not None:
+        text = f"Symbol '{unescape_string(new)}' already exists in library '{library}'."
+        if other != new:
+            text += (
+                f" (The library has '{unescape_string(other)}': KiCad compares the names with "
+                "no difference of case.)"
+            )
+        raise InputError(
+            f"{text} The tool does not replace a symbol: give an other name, or delete that "
+            "symbol first (delete_library_symbol)."
+        )
+    children = derived_symbols(symbols).get(name, [])
+    library_text, value_changed = renamed_library(root, symbols, name, new)
+    names = (set(symbols) - {name}) | {new}
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-rename-") as work:
+        new_data = kicad_save_symbols(library_text, path, Path(work), names)
+    warnings += _save_guarded(context, [(path, new_data)], {path: stamp})
+    old_id = f"{library}:{name}"
+    uses = symbol_uses(context.project, context.kicad, [old_id])
+    lines = [
+        f"✅ The symbol '{name}' of the library '{library}' has the new name '{new}'.",
+        "",
+        f"- Library: {path}",
+    ]
+    if new != new_name:
+        lines.append(f"- The name {new_name!r} is '{new}' in the library (trim, escapes).")
+    if value_changed:
+        lines.append("- The Value was the old name: it is the new name, as KiCad does.")
+    if len(children) == 1:
+        lines.append(f"- The derived symbol {children[0]} extends '{new}'.")
+    elif children:
+        lines.append(f"- The derived symbols {', '.join(children)} extend '{new}'.")
+    lines.append("- KiCad saved the library (kicad-cli), and a second save gave the same bytes.")
+    lines += _uses_lines(
+        uses, f"The schematic of the project has no symbol with the lib_id {old_id}."
+    )
+    return "\n".join(lines + [f"\n⚠️ {warning}" for warning in warnings])
+
+
+def _delete_symbol(context: _Context, _kind, lib_id: str, delete_derived: bool) -> str:
+    library, name = _split_id(lib_id, "symbol")
+    path, warnings = _project_library(context, "symbol", library)
+    stamp, symbols, root = _library_symbols(path)
+    if name not in symbols:
+        raise InputError(f"The library '{library}' ({path}) has no symbol '{name}'.")
+    derived = descendants(derived_symbols(symbols), name)
+    if derived and not delete_derived:
+        raise InputError(
+            "Deleting a base symbol will delete all symbols derived from it: "
+            f"{', '.join(derived)}. Give delete_derived=True to delete them all (KiCad: "
+            "Delete All Listed Symbols)."
+        )
+    deleted = {name, *derived}
+    library_text = deleted_library(root, deleted)
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-delete-") as work:
+        new_data = kicad_save_symbols(library_text, path, Path(work), set(symbols) - deleted)
+    warnings += _save_guarded(context, [(path, new_data)], {path: stamp})
+    old_ids = [f"{library}:{item}" for item in [name, *derived]]
+    uses = symbol_uses(context.project, context.kicad, old_ids)
+    lines = [
+        f"✅ The symbol '{name}' is deleted from the library '{library}'.",
+        "",
+        f"- Library: {path}",
+    ]
+    if derived:
+        lines.append(
+            f"- The derived symbols are deleted too (as KiCad does): {', '.join(derived)}."
+        )
+    lines.append("- KiCad saved the library (kicad-cli), and a second save gave the same bytes.")
+    lines += _uses_lines(
+        uses,
+        f"The schematic of the project has no symbol with the lib_id {' or '.join(old_ids)}.",
+    )
+    return "\n".join(lines + [f"\n⚠️ {warning}" for warning in warnings])
+
+
+def _project_footprint(
+    context: _Context, lib_id: str
+) -> tuple[str, str, Path, Path, FileStamp | None, list[str]]:
+    """(library, name, the library folder, the footprint file, its stamp, warnings) of a
+    footprint of a library of the project table. The stamp is the state of the file
+    that the tool checked: the write refuses a file that changed after it.
+
+    Raises:
+        InputError: No such library or footprint, or the library is not in the version
+            of the installed KiCad.
+    """
+    library, name = _split_id(lib_id, "footprint")
+    folder, warnings = _project_library(context, "footprint", library)
+    source = folder / f"{name}.kicad_mod"
+    stamp = file_stamp(source)
+    if source not in footprint_files(folder):
+        raise InputError(f"The library '{library}' ({folder}) has no footprint '{name}'.")
+    return library, name, folder, source, stamp, warnings
+
+
+def _footprint_uses_lines(context: _Context, old_id: str) -> list[str]:
+    libraries, problems = _symbol_library_files(context)
+    uses = footprint_uses(context.project, context.kicad, old_id, libraries)
+    uses.problems = problems + uses.problems
+    return _uses_lines(
+        uses,
+        f"The project has no use of {old_id} (the Footprint fields of the schematic and of "
+        "the project symbol libraries, the board).",
+    )
+
+
+def _entry_names(folder: Path) -> set[str]:
+    """The names of the entries of a folder, as the file system keeps them."""
+    return {entry.name for entry in folder.iterdir()}
+
+
+def _rename_footprint(context: _Context, _kind, lib_id: str, new_name: str) -> str:
+    library, name, folder, source, source_stamp, warnings = _project_footprint(context, lib_id)
+    # RENAME_DIALOG: wxString::Trim of the two ends.
+    new = new_name.strip(WX_SPACE)
+    if problem := footprint_rename_problem(new):
+        raise InputError(problem)
+    if new == name:
+        return (
+            f"✅ The footprint '{name}' of the library '{library}' has this name: no file written."
+        )
+    target = folder / f"{new}.kicad_mod"
+    # One entry of the folder for the two names: a change of only the case (or of the
+    # Unicode form) on a file system that does not keep them apart (Windows, macOS).
+    one_file = (
+        target.exists()
+        and os.path.samefile(target, source)
+        and target.name not in _entry_names(folder)
+    )
+    if one_file and verified_triple(context.kicad) < (10, 0, 7):
+        raise InputError(
+            f"The file system of {folder} has no difference of case in file names: "
+            f"'{new}' and '{name}' are one file. KiCad {context.kicad} saves the new name, "
+            "then deletes the old name, thus it removes the footprint (KiCad 10.0.7 "
+            "repaired this). The tool refuses this rename: give an other name first, then "
+            "the new name."
+        )
+    if (target.exists() or target.is_symlink()) and not one_file:
+        raise InputError(
+            f"Footprint '{new}' already exists in library '{library}'. The tool does not "
+            "replace a footprint: give an other name, or delete that footprint first "
+            "(delete_library_footprint)."
+        )
+    with tempfile.TemporaryDirectory(prefix="kicad-workbench-rename-") as work:
+        _file_name, data, value_changed = footprint_copy(source, new, Path(work))
+    if one_file:
+        # RenameFootprint of KiCad 10.0.7 and later: FootprintDelete, then FootprintSave.
+        stamps = {source: source_stamp}
+    else:
+        # The end state is the same in the two orders: the save first keeps the old file
+        # when the save fails.
+        stamps = {target: None, source: source_stamp}
+    warnings += _save_guarded(
+        context, [(target, data)], stamps, remove=(source,), remove_first=one_file
+    )
+    old_id = f"{library}:{name}"
+    lines = [
+        f"✅ The footprint '{name}' of the library '{library}' has the new name '{new}'.",
+        "",
+        f"- New file: {target}",
+    ]
+    if not one_file:
+        lines.append(f"- Removed: {source}")
+    if value_changed:
+        lines.append("- The Value was the old name: it is the new name, as KiCad does.")
+    lines.append("- KiCad saved the footprint (kicad-cli), and a second save gave the same bytes.")
+    lines += _footprint_uses_lines(context, old_id)
+    return "\n".join(lines + [f"\n⚠️ {warning}" for warning in warnings])
+
+
+def _delete_footprint(context: _Context, _kind, lib_id: str) -> str:
+    library, name, _folder, source, stamp, warnings = _project_footprint(context, lib_id)
+    warnings += _save_guarded(context, [], {source: stamp}, remove=(source,))
+    old_id = f"{library}:{name}"
+    lines = [
+        f"✅ The footprint '{name}' is deleted from the library '{library}'.",
+        "",
+        f"- Removed: {source}",
+    ]
+    lines += _footprint_uses_lines(context, old_id)
+    return "\n".join(lines + [f"\n⚠️ {warning}" for warning in warnings])
+
+
+@mcp.tool()
+async def rename_library_symbol(project_path: str, lib_id: str, new_name: str) -> str:
+    """Give a symbol of a project library an other name, as "Rename" of the library tree
+    of the symbol editor of KiCad 10 does.
+
+    As the rename dialog, the tool removes the white space at the two ends of the name
+    and writes the escapes of the name ("{colon}" for ":"). A space stays a space (not
+    "_", as in create_derived_symbol). The Value gets the new name when it was equal to
+    the old name. The symbols derived from the symbol extend the new name.
+
+    A name that the library has already is an error, also with an other case (KiCad
+    compares the names with no difference of case): the tool does not replace a symbol.
+    A change of only the case of the name of the symbol itself is not an error.
+
+    KiCad does not change the schematics that use the old name, and neither does the
+    tool: the answer gives the placed symbols with the old lib_id as a warning.
+
+    The library must be a symbol library file of the project table, in the version of
+    the installed KiCad (else: upgrade_project_libraries first). KiCad saves the library
+    (kicad-cli), and a second save must give the same bytes. KiCad must not have the
+    project open. The installed KiCad must be KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        lib_id: The symbol, "<library>:<symbol>", of a library of the project table.
+        new_name: The new name.
+
+    Returns:
+        The new name, the uses of the old name in the schematic, or an error.
+    """
+    try:
+        return await _run(project_path, None, _rename_symbol, lib_id, new_name)
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+@mcp.tool()
+async def delete_library_symbol(
+    project_path: str, lib_id: str, delete_derived: bool = False
+) -> str:
+    """Delete a symbol from a project library, as "Delete" of the library tree of the
+    symbol editor of KiCad 10 does.
+
+    KiCad deletes a symbol together with all symbols derived from it (also the derived
+    symbols of a derived symbol). With delete_derived=False, a symbol with derived
+    symbols is an error that gives their names. delete_derived=True deletes them all, as
+    "Delete All Listed Symbols" of KiCad.
+
+    KiCad does not change the schematics that use a deleted symbol, and neither does
+    the tool: the answer gives the placed symbols with a deleted lib_id as a warning.
+    The schematic keeps its copy of each symbol, but an update from the library then
+    fails.
+
+    The library must be a symbol library file of the project table, in the version of
+    the installed KiCad (else: upgrade_project_libraries first). KiCad saves the library
+    (kicad-cli), and a second save must give the same bytes. KiCad must not have the
+    project open. The installed KiCad must be KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        lib_id: The symbol, "<library>:<symbol>", of a library of the project table.
+        delete_derived: True deletes the symbols derived from the symbol too.
+
+    Returns:
+        The deleted symbols, the uses of their names in the schematic, or an error.
+    """
+    try:
+        return await _run(project_path, None, _delete_symbol, lib_id, delete_derived)
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+@mcp.tool()
+async def rename_library_footprint(project_path: str, lib_id: str, new_name: str) -> str:
+    """Give a footprint of a project library an other name, as "Rename" of the library
+    tree of the footprint editor of KiCad 10 does.
+
+    KiCad saves the footprint as "<new name>.kicad_mod", then removes the old file. The
+    Value gets the new name when it was equal to the old name. As the rename dialog, the
+    tool removes the white space at the two ends of the name. A name with one of the
+    characters \\ / : " < > | * ? is an error: KiCad changes them to "_" in the file
+    name, and reads the name from the file name.
+
+    A name that the library has already is an error: the tool does not replace a
+    footprint. On a file system with no difference of case in file names (Windows,
+    macOS), a change of only the case of the name is one file: KiCad 10.0.7 and later
+    delete the old footprint first, then save the new one, and so does the tool. With
+    KiCad 10.0.6 (it saves first, then deletes, and thus removes the footprint) the tool
+    refuses such a rename: do it in two steps.
+
+    KiCad does not change the uses of the old name, and neither does the tool: the
+    answer gives as a warning the Footprint fields of the placed symbols (also of their
+    variants) and of the symbols of the project symbol libraries, and the footprints of
+    the board of the project, that have the old library ID.
+
+    The library must be a footprint library of the project table, in the version of the
+    installed KiCad (else: upgrade_project_libraries first). A footprint that is not on
+    F.Cu is refused. KiCad saves the footprint (kicad-cli), and a second save must give
+    the same bytes. KiCad must not have the project open. The installed KiCad must be
+    KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        lib_id: The footprint, "<library>:<footprint>", of a library of the project
+            table.
+        new_name: The new name.
+
+    Returns:
+        The new file, the uses of the old name in the project, or an error.
+    """
+    try:
+        return await _run(project_path, None, _rename_footprint, lib_id, new_name)
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+@mcp.tool()
+async def delete_library_footprint(project_path: str, lib_id: str) -> str:
+    """Delete a footprint from a project library, as "Delete" of the library tree of
+    the footprint editor of KiCad 10 does: KiCad removes the file of the footprint.
+
+    KiCad does not change the uses of the footprint, and neither does the tool: the
+    answer gives as a warning the Footprint fields of the placed symbols (also of their
+    variants) and of the symbols of the project symbol libraries, and the footprints of
+    the board of the project, that have its library ID. The board keeps its copy of
+    each footprint.
+
+    The library must be a footprint library of the project table, in the version of the
+    installed KiCad (else: upgrade_project_libraries first). KiCad must not have the
+    project open. The installed KiCad must be KiCad 10.0.
+
+    Args:
+        project_path: The .kicad_pro file or the project folder.
+        lib_id: The footprint, "<library>:<footprint>", of a library of the project
+            table.
+
+    Returns:
+        The removed file, the uses of the footprint in the project, or an error.
+    """
+    try:
+        return await _run(project_path, None, _delete_footprint, lib_id)
     except Exception as e:
         return error_answer(e, "Error")

@@ -210,6 +210,11 @@ class Node:
         return self._doc.text
 
     @property
+    def root(self) -> "Node":
+        """The top-level list of the parsed text (the result of parse)."""
+        return Node(self._doc, 0)
+
+    @property
     def start(self) -> int:
         return self._doc.opens[self._index]
 

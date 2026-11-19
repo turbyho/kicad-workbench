@@ -1,6 +1,6 @@
 # Tools
 
-The server has 70 tools. Each tool returns Markdown text (the image tools also return
+The server has 74 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -156,6 +156,10 @@ to `<table>.bak` first, as KiCad does.
 | `copy_footprint_to_library(project_path, lib_id, target_library, new_name?, overwrite?)` | Copies a footprint into a library of the project table, as "Save As" of the footprint editor. A footprint that is not on F.Cu is refused |
 | `set_library_symbol_properties(project_path, lib_id, fields?, keywords?, footprint_filters?)` | Changes the fields, the keywords and the footprint filters of a symbol of a project library, as the Symbol Properties dialog: a new field is hidden at (0, 0) with the text size of the symbol editor settings, the mandatory fields cannot be removed, a path to a file that exists gets "file://" (as the dialog). KiCad saves the library (kicad-cli) |
 | `create_derived_symbol(project_path, parent_lib_id, name, keep_footprint?, keep_datasheet?, transfer_user_fields?, keep_user_field_content?)` | Makes a new symbol that extends a symbol of the same project library, as "Derive from existing symbol" of the symbol editor: copies of the mandatory fields (the Footprint and the Datasheet empty unless kept), the user fields with the transfer options of the dialog. A name that the library has is an error. KiCad saves the library (kicad-cli) |
+| `rename_library_symbol(project_path, lib_id, new_name)` | Gives a symbol of a project library an other name, as "Rename" of the symbol editor: trim and escapes (a space stays), the Value follows when it was equal to the old name, the derived symbols extend the new name. A name that the library has (with no difference of case) is an error. A warning gives the placed symbols with the old lib_id: KiCad does not change them |
+| `delete_library_symbol(project_path, lib_id, delete_derived?)` | Deletes a symbol of a project library, as "Delete" of the symbol editor. A symbol with derived symbols needs `delete_derived=True` (KiCad deletes them all). A warning gives the placed symbols with a deleted lib_id |
+| `rename_library_footprint(project_path, lib_id, new_name)` | Gives a footprint of a project library an other name, as "Rename" of the footprint editor: a new file, the old file removed, the Value follows when it was equal to the old name. A name that the library has, or that the file name changes, is an error. A warning gives the Footprint fields (schematic, project symbol libraries) and the board footprints with the old library ID |
+| `delete_library_footprint(project_path, lib_id)` | Removes the file of a footprint of a project library, as "Delete" of the footprint editor. A warning gives the uses of the footprint in the project |
 | `upgrade_project_libraries(project_path, libraries?, include_outside?)` | Converts the libraries of an older file version of the project tables with `kicad-cli sym upgrade` and `kicad-cli fp upgrade`. KiCad saves the result again: the bytes must not change and the names must stay, else the tool writes nothing for that library. No backup: the output names a library that git cannot give back. A library outside the project folder only when `libraries` names it or with `include_outside=True` |
 
 ## Bill of materials

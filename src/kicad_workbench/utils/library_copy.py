@@ -33,10 +33,10 @@ from .kicad_text import decode_as_kicad
 from .library_upgrade import FOOTPRINT_FILE, footprint_files, run_upgrade, symbol_names
 
 # The characters that the validator of the "Save Footprint As" dialog refuses
-# (FOOTPRINT::StringLibNameInvalidChars), and the other characters that
+# (FOOTPRINT::StringLibNameInvalidChars), and the characters that
 # ReplaceIllegalFileNameChars changes in the file name (GetIllegalFileNameWxChars).
 FOOTPRINT_NAME_CHARS = '%$<>\t\n\r"\\/:'
-FILE_NAME_CHARS = "|*?"
+ILLEGAL_FILE_NAME_CHARS = '\\/:"<>|*?'
 # EscapeString with CTX_LIBID.
 _LIBID_ESCAPES = {"\\": "{backslash}", "<": "{lt}", ">": "{gt}", ":": "{colon}", '"': "{dblquote}"}
 
@@ -67,7 +67,13 @@ def footprint_name_problem(name: str) -> str | None:
             f"The footprint name {name!r} has the characters {bad}: the Save As dialog of "
             "KiCad refuses them."
         )
-    bad = sorted({char for char in name if char in FILE_NAME_CHARS})
+    return file_name_problem(name)
+
+
+def file_name_problem(name: str) -> str | None:
+    """The error for a footprint name that ReplaceIllegalFileNameChars changes in the
+    file name (FootprintSave), or None."""
+    bad = sorted({char for char in name if char in ILLEGAL_FILE_NAME_CHARS})
     if bad:
         return (
             f"The footprint name {name!r} has the characters {bad}: KiCad changes them to "
@@ -91,7 +97,7 @@ def value_text(symbol: Node) -> str | None:
     return atom.value if atom is not None else None
 
 
-def _renamed(symbol: LibrarySymbol, name: str, value: str | None) -> str:
+def renamed_symbol(symbol: LibrarySymbol, name: str, value: str | None) -> str:
     """The text of a symbol with a new name (and its sub-symbols), and a new Value."""
     node = symbol.node
     edits = []
@@ -135,15 +141,17 @@ def symbol_copy(
         node = parse(text)
         flat = LibrarySymbol(new_name, node, leaf.file, leaf.version)
         if follows:
-            text = _renamed(flat, new_name, new_name)
+            text = renamed_symbol(flat, new_name, new_name)
         return SymbolCopy([(new_name, text)])
     if same_library:
-        return SymbolCopy([(new_name, _renamed(leaf, new_name, new_name if follows else None))])
+        return SymbolCopy(
+            [(new_name, renamed_symbol(leaf, new_name, new_name if follows else None))]
+        )
     symbols = []
     for index in range(len(chain) - 1, -1, -1):
         symbol = chain[index]
         name = new_name if index == 0 else symbol.name
-        symbols.append((name, _renamed(symbol, name, name if follows else None)))
+        symbols.append((name, renamed_symbol(symbol, name, name if follows else None)))
     return SymbolCopy(symbols)
 
 
@@ -240,8 +248,9 @@ def symbols_in_version(library: Path, work: Path, written: int) -> dict[str, Lib
     return read_library(out)
 
 
-def footprint_copy(source: Path, new_name: str, work: Path) -> tuple[str, bytes]:
-    """The file name and the bytes of a footprint with a new name, as KiCad saves it.
+def footprint_copy(source: Path, new_name: str, work: Path) -> tuple[str, bytes, bool]:
+    """The file name and the bytes of a footprint with a new name, as KiCad saves it, and
+    True when the Value got the new name.
 
     1. KiCad saves the source footprint in its version (fp upgrade --force).
     2. The Value gets the new name when it was equal to the old name.
@@ -285,4 +294,4 @@ def footprint_copy(source: Path, new_name: str, work: Path) -> tuple[str, bytes]
     result = (out / file_name).read_bytes()
     if (again / file_name).read_bytes() != result:
         raise CopyError("KiCad saved the footprint again with other bytes: no file written.")
-    return file_name, result
+    return file_name, result, bool(edits)

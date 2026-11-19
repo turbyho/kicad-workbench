@@ -72,7 +72,10 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
   libraries through kicad-cli, with a check of the result. The copy of a symbol (with
   its parents) or a footprint into a project library, as "Save As" of KiCad. The fields,
   keywords and footprint filters of a symbol of a project library, as the Symbol
-  Properties dialog.
+  Properties dialog. Derived symbols, as "Derive from existing symbol". The rename and
+  the delete of the symbols and the footprints of a project library, as the library
+  tree of the editors, with a list of the uses in the project that KiCad does not
+  change.
 - **BOM.** The BOM of kicad-cli with the fields, the groups, the DNP filter and the
   variants of KiCad 10.
 - **Edits.** New projects, symbols from the libraries, wires, labels and junctions as

@@ -50,6 +50,19 @@ def filter_matches(filters: tuple[str, ...] | list[str], nickname: str, name: st
     return False
 
 
+def parse_lib_id(text: str) -> tuple[str, str]:
+    """LIB_ID::Parse with no fix: (the nickname, the item name). The nickname is the text
+    before the first ":" (none: empty). An item name with a character that
+    LIB_ID::isLegalChar refuses gives an empty item name (Parse returns before
+    SetLibItemName). LIB_ID::operator== compares the two parts."""
+    nickname, colon, name = text.partition(":")
+    if not colon:
+        nickname, name = "", text
+    if any(char in _ILLEGAL_NAME_CHARS for char in name):
+        name = ""
+    return nickname, name
+
+
 def footprint_id_problem(footprint: str) -> str | None:
     """The error of a footprint ID that KiCad cannot use (LIB_ID::Parse), or None."""
     nickname, colon, name = footprint.partition(":")

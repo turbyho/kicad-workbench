@@ -390,6 +390,14 @@ def edited(node: Node, edits: list[tuple[int, int, str]]) -> str:
     return text
 
 
+def removal(source: str, start: int, end: int) -> tuple[int, int, str]:
+    """Return the edit that removes a range of the text with the blanks before it, thus
+    the lines of a list on its own lines (an edit for edited)."""
+    while start > 0 and source[start - 1] in " \t\n":
+        start -= 1
+    return (start, end, "")
+
+
 def indent(text: str, depth: int) -> str:
     """Indent the lines of the text of a list with tabs, as KiCad writes a file.
 
@@ -435,3 +443,26 @@ def property_field(prop: Node) -> tuple[str, str] | None:
     if not atoms:
         return None
     return atoms[0].value, atoms[1].value if len(atoms) > 1 else ""
+
+
+def parse_bool(node: Node, where: str) -> bool:
+    """The value of a (token yes|no) (SCH_IO_KICAD_SEXPR_PARSER::parseBool: the bare
+    keywords yes and no; a quoted string is an other token).
+
+    Raises:
+        InputError: The value is not yes or no.
+    """
+    atoms = node.atoms()
+    if len(atoms) != 1 or atoms[0].quoted or atoms[0].text not in ("yes", "no"):
+        text = node.source[node.start : node.end]
+        raise InputError(f"The {text} of {where} is not yes or no: KiCad cannot read it.")
+    return atoms[0].text == "yes"
+
+
+def parse_maybe_absent_bool(node: Node, where: str) -> bool:
+    """parseMaybeAbsentBool( true ): (token) is true, else parse_bool.
+
+    Raises:
+        InputError: The value is not yes or no.
+    """
+    return True if not node.atoms() else parse_bool(node, where)

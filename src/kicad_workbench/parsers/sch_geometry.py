@@ -181,6 +181,23 @@ _ORIENTATIONS = (
 )
 
 
+def symbol_transform(where: Placement) -> Transform:
+    """Return the TRANSFORM of a placed symbol after the load (parseSchematicSymbol: the
+    transform of the angle of (at ...), then SetOrientation of the mirror)."""
+    transform = _ANGLE_TRANSFORMS[where.angle]
+    if where.mirror:
+        transform = set_orientation(
+            transform, SYM_MIRROR_X if where.mirror == "x" else SYM_MIRROR_Y
+        )
+    return transform
+
+
+def transform_coordinate(transform: Transform, x: int, y: int) -> Point:
+    """TRANSFORM::TransformCoordinate: (x1 * x + y1 * y, x2 * x + y2 * y)."""
+    x1, y1, x2, y2 = transform
+    return x1 * x + y1 * y, x2 * x + y2 * y
+
+
 def symbol_orientation(where: Placement) -> int:
     """Return the orientation flags of a placed symbol (SCH_SYMBOL::GetOrientation of
     KiCad 10.0.6).
@@ -191,11 +208,7 @@ def symbol_orientation(where: Placement) -> int:
     alone changes the transform of the value before it), and gives the first value
     whose transform is the transform of the symbol. No value: SYM_NORMAL.
     """
-    transform = _ANGLE_TRANSFORMS[where.angle]
-    if where.mirror:
-        transform = set_orientation(
-            transform, SYM_MIRROR_X if where.mirror == "x" else SYM_MIRROR_Y
-        )
+    transform = symbol_transform(where)
     temp = transform
     for orientation in _ORIENTATIONS:
         temp = set_orientation(temp, orientation)

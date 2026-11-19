@@ -74,9 +74,12 @@ from ..parsers.sexpr import (
     edited,
     indent,
     parse,
+    parse_bool,
+    parse_maybe_absent_bool,
     property_atoms,
     property_field,
     quote,
+    removal,
 )
 from ..parsers.sheet_list import screens_by_file
 from ..parsers.symbol_info import letter_reference
@@ -198,20 +201,6 @@ ATTRIBUTES = (
 _TOKENS = {token: (name, inverted) for name, token, inverted in ATTRIBUTES}
 
 
-def _token_value(node: Node, where: str) -> bool:
-    """The value of a (token yes|no) (SCH_IO_KICAD_SEXPR_PARSER::parseBool: the bare
-    keywords yes and no; a quoted string is an other token).
-
-    Raises:
-        InputError: The value is not yes or no.
-    """
-    atoms = node.atoms()
-    if len(atoms) != 1 or atoms[0].quoted or atoms[0].text not in ("yes", "no"):
-        text = node.source[node.start : node.end]
-        raise InputError(f"The {text} of {where} is not yes or no: KiCad cannot read it.")
-    return atoms[0].text == "yes"
-
-
 def _last(node: Node, head: str) -> Node | None:
     """The last child with the head: the parser sets the attribute from each token, thus
     the last one stays."""
@@ -219,14 +208,14 @@ def _last(node: Node, head: str) -> Node | None:
     return children[-1] if children else None
 
 
-def _symbol_tokens(symbol: Node, where: str) -> dict[str, bool]:
+def symbol_tokens(symbol: Node, where: str) -> dict[str, bool]:
     """The attribute tokens of a placed symbol as the parser reads them: with no token,
     the attribute is false (the SYMBOL constructor), thus an inverted token is true."""
     tokens = {token: inverted for _name, token, inverted in ATTRIBUTES}
     for token in tokens:
         node = _last(symbol, token)
         if node is not None:
-            tokens[token] = _token_value(node, where)
+            tokens[token] = parse_bool(node, where)
     return tokens
 
 
@@ -462,12 +451,12 @@ class _Variants:
     new: dict[str, _Variant]
 
 
-def _read_variants(
+def read_variants(
     label: str, record: SchematicFile, path: Node, symbol: tuple[str, int], symbol_node: Node
 ) -> _Variants:
     """The variants of a (path ...). The parser starts each variant with the attributes
     of the symbol (SCH_SYMBOL_VARIANT::InitializeAttributes): a token of the file
-    changes one (the last token of a name stays); _variant_edit adds the attributes of
+    changes one (the last token of a name stays); variant_edit adds the attributes of
     the symbol.
 
     Raises:
@@ -482,7 +471,7 @@ def _read_variants(
         if name is None:
             continue
         tokens = {
-            item.head: _token_value(item, f"a variant of {label}")
+            item.head: parse_bool(item, f"a variant of {label}")
             for item in node.children()
             if item.head in _TOKENS
         }
@@ -500,7 +489,7 @@ def _read_variants(
 
 def _instance_variants(instance: PlacedInstance, record: SchematicFile) -> _Variants:
     assert instance.path is not None
-    return _read_variants(instance.reference, record, instance.path, instance.key, instance.symbol)
+    return read_variants(instance.reference, record, instance.path, instance.key, instance.symbol)
 
 
 def _variant_text(
@@ -539,7 +528,7 @@ def _variants_text(
     )
 
 
-def _variant_edit(
+def variant_edit(
     state: _Variants, before: dict[str, bool], after: dict[str, bool]
 ) -> tuple[int, int, str] | None:
     """Return the one edit that writes all variants of an instance, sorted by name
@@ -568,10 +557,8 @@ def _variant_edit(
             )
         if text:
             return (state.nodes[0].start, state.nodes[-1].end, _replacement(state.nodes[0], text))
-        start, source = state.nodes[0].start, path.source
-        while start > 0 and source[start - 1] in " \t\n":
-            start -= 1  # with the blanks before the first variant
-        return (start, state.nodes[-1].end, "")
+        # With the blanks before the first variant.
+        return removal(path.source, state.nodes[0].start, state.nodes[-1].end)
     if not text:
         return None
     if children:
@@ -617,7 +604,7 @@ def _plan(
             "The tool cannot read the full sheet hierarchy, thus it cannot find each "
             "reference of a symbol: " + " ".join(problems) + " Correct it in KiCad first."
         )
-    files, shared = _screens_of_files(list(screens.values()))
+    files, shared = screens_of_files(list(screens.values()))
     known_variants: set[str] = set()
     if any(c.variant for c in changes):
         known_variants = project_variants(project).union(
@@ -687,8 +674,8 @@ def _plan(
     for state in plan.variants.values():
         before, after = plan.tokens.get(state.symbol, (None, None))
         if before is None:
-            before = after = _symbol_tokens(state.symbol_node, state.label)
-        edit = _variant_edit(state, before, after)
+            before = after = symbol_tokens(state.symbol_node, state.label)
+        edit = variant_edit(state, before, after)
         if edit is not None:
             plan.edits.setdefault(state.file, []).append(edit)
     texts = {}
@@ -701,7 +688,7 @@ def _plan(
     return texts, plan.rows, files, list(dict.fromkeys(warnings))
 
 
-def _screens_of_files(screens: list[SchematicFile]) -> tuple[dict[Path, SchematicFile], set[str]]:
+def screens_of_files(screens: list[SchematicFile]) -> tuple[dict[Path, SchematicFile], set[str]]:
     """Return the screens by their file, and the keys (Screen.key) of the screens of a
     file of the disk with more than one screen.
 
@@ -720,7 +707,7 @@ def _screens_of_files(screens: list[SchematicFile]) -> tuple[dict[Path, Schemati
 
 
 def _check_one_screen(instance: PlacedInstance, shared: set[str], what: str) -> None:
-    """Refuse a change of a symbol of a file with more than one screen (_screens_of_files).
+    """Refuse a change of a symbol of a file with more than one screen (screens_of_files).
 
     Raises:
         InputError: The file of the symbol has more than one screen.
@@ -904,11 +891,11 @@ def _plan_attribute_symbol(
 ) -> None:
     """The attributes of a symbol (DIALOG_SYMBOL_PROPERTIES with no variant: SetDNP and
     the others set the attribute of the symbol). Each variant of each instance of the
-    symbol keeps the attribute of the load where its file has no token: _variant_edit
+    symbol keeps the attribute of the load where its file has no token: variant_edit
     then writes that value as a token, as KiCad does."""
     symbol = instance.symbol
     label = f"{instance.reference}{unit_text}"
-    before = _symbol_tokens(symbol, label)
+    before = symbol_tokens(symbol, label)
     after = dict(before)
     file_edits = plan.edits.setdefault(instance.file, [])
     for name, token, inverted in ATTRIBUTES:
@@ -944,7 +931,7 @@ def _plan_attribute_symbol(
             if path.children("variant"):
                 plan.variants.setdefault(
                     (instance.file, path.start),
-                    _read_variants(label, record, path, instance.key, symbol),
+                    read_variants(label, record, path, instance.key, symbol),
                 )
 
 
@@ -969,7 +956,7 @@ def _plan_attribute_variant(
     )
     loaded, current = plan.tokens.get(instance.key, (None, None))
     if loaded is None:
-        loaded = current = _symbol_tokens(instance.symbol, label)
+        loaded = current = symbol_tokens(instance.symbol, label)
     if change.variant in state.new:
         tokens, fields = state.new[change.variant]
         start = {token: tokens.get(token, loaded[token]) for token in loaded}
@@ -1008,13 +995,12 @@ def _hide_state(prop: Node, label: str) -> tuple[bool, Node | None]:
         if not isinstance(item, Node):
             continue
         if item.head == "hide":
-            hidden, token = _token_value(item, f"the Footprint field of {label}"), item
+            hidden, token = parse_bool(item, f"the Footprint field of {label}"), item
         elif item.head == "effects":
             for sub in item.items[1:]:
                 if isinstance(sub, Node) and sub.head == "hide":
                     # parseMaybeAbsentBool: (hide) is hidden.
-                    where = f"the Footprint field of {label}"
-                    hidden = _token_value(sub, where) if sub.atoms() else True
+                    hidden = parse_maybe_absent_bool(sub, f"the Footprint field of {label}")
                     token = sub
                 elif not isinstance(sub, Node) and not sub.quoted and sub.text == "hide":
                     hidden, token = True, None

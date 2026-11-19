@@ -1,6 +1,6 @@
 # Tools
 
-The server has 76 tools. Each tool returns Markdown text (the image tools also return
+The server has 77 tools. Each tool returns Markdown text (the image tools also return
 PNG images). An error starts with "❌", a warning with "⚠️". An error that the tool
 does not expect (a defect of the tool) also gives the traceback. The agent selects
 the tools: this list tells you what the agent can do, and with which limits.
@@ -189,6 +189,7 @@ KiCad. `create_kicad_project` makes new files. See [editing.md](editing.md).
 | `set_symbol_fields(schematic_path, changes)` | Writes fields of placed symbols, as KiCad writes them: each unit of a reference, a new field hidden, the fields of a variant of KiCad 10. It checks all changes and files first |
 | `set_symbol_attributes(schematic_path, changes)` | Writes the attributes of placed symbols as the Symbol Properties dialog: Do not populate, Exclude from BOM, board, position files and simulation, for each unit, also of a variant of KiCad 10. A variant keeps the old value of a changed attribute of the symbol, as KiCad. KiCad 10 only |
 | `assign_footprint(schematic_path, assignments)` | Assigns footprints to placed symbols, as CvPcb saves them: the Footprint field of each unit, an empty visible field becomes hidden. The footprint must be in a library that KiCad loads; the footprint filters and the pin count give a warning. KiCad 10 only |
+| `update_symbols_from_library(schematic_path, match?, pattern?, fields?, options?)` | Updates placed symbols from their library symbols, as "Update Symbols from Library" of the schematic editor: the match (all, reference, value or library ID), the fields of the update, the ten options with the defaults of the dialog; the new shape, the pins and the copy in `lib_symbols`. It refuses a match that leaves an old copy with the same name in the file (KiCad then makes a copy with an other name). KiCad 10 only |
 | `setup_pcb_layout(schematic_path, width?, height?, unit?, overwrite?)` | A new board with an outline, written by `pcbnew` of the installed KiCad. It does not replace an existing board without `overwrite=True` |
 
 ## Live board edits (IPC)

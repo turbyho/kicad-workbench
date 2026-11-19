@@ -25,7 +25,8 @@ mcp = FastMCP(
       and footprints.
     - BOM: the BOM of kicad-cli, and the check of the confirmed MPNs.
     - Edits: symbols, wires, labels, the fields, the attributes and the footprints of
-      placed symbols, new projects and boards.
+      placed symbols, the update of placed symbols from the libraries, new projects and
+      boards.
     - Exports: SVG, 3D view, STEP, Gerber.
 
     An error starts with "❌", a warning with "⚠️". When a tool gives a step for the
@@ -82,6 +83,7 @@ from .tools import (  # noqa: F401, E402
     schematic_editor,
     schematic_search,
     symbol_fields,
+    symbol_update,
     validation,
     visualization,
 )

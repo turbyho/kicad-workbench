@@ -81,8 +81,9 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
 - **Edits.** New projects, symbols from the libraries, wires, labels and junctions as
   the schematic editor makes them, and the fields and the attributes (DNP, the
   exclusions from the BOM, the board, the position files and the simulation) of
-  placed symbols, and their footprints as CvPcb assigns them (with the checks of the
-  footprint filters and of the pin count). The server
+  placed symbols, their footprints as CvPcb assigns them (with the checks of the
+  footprint filters and of the pin count), and the update of placed symbols from
+  their library symbols, as "Update Symbols from Library". The server
   writes the format of the file version, and refuses a file that KiCad has open.
 - **File versions.** Each KiCad opens a file of an older version, and its next save
   writes the file in its own version. The server does not convert files: the user

@@ -338,7 +338,7 @@ def _set(fields: list[_Field], field: _Field) -> None:
     fields.append(field)
 
 
-def _mandatory_name(name: str) -> str | None:
+def mandatory_name(name: str) -> str | None:
     """The parser of a library symbol finds a mandatory field by its name with
     no difference of case (parseProperty of KiCad 8, 9 and 10)."""
     for canonical in SYMBOL_FIELD_NAMES:
@@ -365,7 +365,7 @@ def _fields(symbol: LibrarySymbol, kicad: int) -> list[_Field]:
         name = atoms[0].value
         value = atoms[1].value if len(atoms) > 1 else ""
         value = file_text(value, symbol.version)
-        mandatory = _mandatory_name(name)
+        mandatory = mandatory_name(name)
         id_node = prop.first("id")
         if id_node is not None:
             try:

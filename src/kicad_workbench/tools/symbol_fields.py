@@ -1,4 +1,5 @@
-"""The tool set_symbol_fields: write the fields of placed symbols, as KiCad does.
+"""The tools set_symbol_fields and set_symbol_attributes: write the fields and the
+attributes of placed symbols, as KiCad does.
 
 The rules come from the KiCad source (branch 10.0, tags 8.0.9 and 9.0.9). See
 plans/roadmap.md, "Phase 4", "Step 1":
@@ -23,6 +24,13 @@ plans/roadmap.md, "Phase 4", "Step 1":
   version (user, 2026-11-05: as KiCad). Value_Confirmed and MPN_Confirmed are
   always hidden, also in an other spelling (field_key): the model of confirmed
   MPNs of datasheet-lens, decisions 5 and 27.
+- The attributes (DNP, Exclude from BOM, board, position files, simulation; KiCad
+  10.0.6, plans/roadmap.md, "Step 8"): SCH_IO_KICAD_SEXPR::saveSymbol writes the five
+  tokens of the symbol each time, and a token of a variant only when it differs from
+  the symbol. The parser starts each variant with the attributes of the symbol
+  (SCH_SYMBOL_VARIANT::InitializeAttributes): a change of the symbol keeps the old
+  value in each variant. SyncOtherUnits of the dialog does not give the other units
+  Exclude from simulation: the tool sets each unit.
 - The format of the file version (SCH_IO_KICAD_SEXPR::saveField): before
   SCHEMATIC_FIELD_FLAGS the hidden state is in the effects, from it in the
   property. Variants exist from SCHEMATIC_VARIANTS. A file older than
@@ -33,8 +41,9 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..errors import InputError
 from ..parsers.annotation import kicad_major, split_reference
@@ -48,6 +57,7 @@ from ..parsers.kicad_versions import (
     EMPTY_TEXT_MARKER,
     KICAD8,
     SCHEMATIC_FIELD_FLAGS,
+    SCHEMATIC_VARIANT_IN_BOM,
     SCHEMATIC_VARIANTS,
     KicadFileError,
     file_text,
@@ -72,7 +82,7 @@ from ..parsers.symbol_info import letter_reference
 from ..parsers.unit_fields import is_confirmed_field, is_mpn_confirmed_field
 from ..server import mcp
 from ..utils.file_versions import with_schematic_versions
-from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem
+from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem, kicad_10_problem
 from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
 from ..utils.library_tables import kicad_environment
@@ -92,6 +102,8 @@ _IU_PER_MM = 10000
 class FieldChange(BaseModel):
     """The fields to write into one reference."""
 
+    what: ClassVar[str] = "fields"
+
     reference: str = Field(description="The reference of the symbol, for example U3.")
     fields: dict[str, str] = Field(
         description=(
@@ -107,6 +119,96 @@ class FieldChange(BaseModel):
             "variant. The symbol must have each field. Empty: the fields of the symbol."
         ),
     )
+
+    def payload(self) -> object:
+        """What the change writes: two references of one symbol must have the same."""
+        return self.fields
+
+
+class SymbolAttributes(BaseModel):
+    """The attributes of the Symbol Properties dialog. A missing attribute does not change."""
+
+    # An other name (for example the token in_bom of the file) is an error, not a change
+    # that the tool does not write.
+    model_config = ConfigDict(extra="forbid")
+
+    dnp: bool | None = Field(default=None, description='"Do not populate".')
+    exclude_from_bom: bool | None = Field(
+        default=None, description='"Exclude from bill of materials".'
+    )
+    exclude_from_board: bool | None = Field(default=None, description='"Exclude from board".')
+    exclude_from_position_files: bool | None = Field(
+        default=None, description='"Exclude from position files".'
+    )
+    exclude_from_simulation: bool | None = Field(
+        default=None, description='"Exclude from simulation".'
+    )
+
+
+class AttributeChange(BaseModel):
+    """The attributes to write into one reference."""
+
+    model_config = ConfigDict(extra="forbid")
+    what: ClassVar[str] = "attributes"
+
+    reference: str = Field(description="The reference of the symbol, for example U3.")
+    attributes: SymbolAttributes = Field(description="The attributes to set.")
+    variant: str = Field(
+        default="",
+        description=(
+            "The name of a variant of the project (KiCad 10): the tool writes the attributes of "
+            "the variant. Empty: the attributes of the symbol."
+        ),
+    )
+
+    def payload(self) -> object:
+        """What the change writes: two references of one symbol must have the same."""
+        return self.attributes
+
+
+# The attributes of a placed symbol: (the name of SymbolAttributes, the token of the
+# file, True when the token has the inverted logic: "in_bom yes" is "not excluded"), in
+# the order of the tokens of a variant (SCH_IO_KICAD_SEXPR::saveSymbol).
+ATTRIBUTES = (
+    ("dnp", "dnp", False),
+    ("exclude_from_simulation", "exclude_from_sim", False),
+    ("exclude_from_bom", "in_bom", True),
+    ("exclude_from_board", "on_board", True),
+    ("exclude_from_position_files", "in_pos_files", True),
+)
+_TOKENS = {token: (name, inverted) for name, token, inverted in ATTRIBUTES}
+
+
+def _token_value(node: Node, where: str) -> bool:
+    """The value of a (token yes|no) (SCH_IO_KICAD_SEXPR_PARSER::parseBool: the bare
+    keywords yes and no; a quoted string is an other token).
+
+    Raises:
+        InputError: The value is not yes or no.
+    """
+    atoms = node.atoms()
+    if len(atoms) != 1 or atoms[0].quoted or atoms[0].text not in ("yes", "no"):
+        text = node.source[node.start : node.end]
+        raise InputError(f"The {text} of {where} is not yes or no: KiCad cannot read it.")
+    return atoms[0].text == "yes"
+
+
+def _last(node: Node, head: str) -> Node | None:
+    """The last child with the head: the parser sets the attribute from each token, thus
+    the last one stays."""
+    children = node.children(head)
+    return children[-1] if children else None
+
+
+def _symbol_tokens(symbol: Node, where: str) -> dict[str, bool]:
+    """The attribute tokens of a placed symbol as the parser reads them: with no token,
+    the attribute is false (the SYMBOL constructor), thus an inverted token is true."""
+    tokens = {token: inverted for _name, token, inverted in ATTRIBUTES}
+    for token in tokens:
+        node = _last(symbol, token)
+        if node is not None:
+            tokens[token] = _token_value(node, where)
+    return tokens
 
 
 def _field_nodes(symbol: Node, name: str, kicad: int) -> list[Node]:
@@ -258,9 +360,7 @@ class _Row:
     shared: str = ""
 
 
-
-
-def _check_change(change: FieldChange, known_variants: set[str]) -> None:
+def _check_change(change: "Change", known_variants: set[str]) -> None:
     """Refuse a change that KiCad cannot keep as the change gives it.
 
     Raises:
@@ -273,6 +373,11 @@ def _check_change(change: FieldChange, known_variants: set[str]) -> None:
             f"The reference {change.reference!r} is not annotated. Annotate the schematic in "
             "KiCad first."
         )
+    if isinstance(change, AttributeChange):
+        if all(getattr(change.attributes, name) is None for name, _t, _i in ATTRIBUTES):
+            raise InputError(f"The change of {change.reference} has no attributes.")
+        _check_variant(change, known_variants)
+        return
     if not change.fields:
         raise InputError(f"The change of {change.reference} has no fields.")
     mandatory = {name.lower(): name for name in SYMBOL_FIELD_NAMES}
@@ -296,6 +401,11 @@ def _check_change(change: FieldChange, known_variants: set[str]) -> None:
         error = _field_error(name, value) or _field_error("field name", name)
         if error:
             raise InputError(error.removeprefix("❌ "))
+    _check_variant(change, known_variants)
+
+
+def _check_variant(change: "Change", known_variants: set[str]) -> None:
+    """Refuse a variant that the project does not have."""
     if change.variant and change.variant not in known_variants:
         listed = ", ".join(repr(n) for n in sorted(known_variants)) or "none"
         raise InputError(
@@ -304,68 +414,126 @@ def _check_change(change: FieldChange, known_variants: set[str]) -> None:
         )
 
 
+# A variant: (its attribute tokens in the file, its fields).
+_Variant = tuple[dict[str, bool], dict[str, str]]
+
+
 @dataclass
 class _Variants:
     """The variants of one instance (one (path ...)): the original and the new state."""
 
-    instance: PlacedInstance
+    label: str  # the reference, for the messages
+    file: Path
+    path: Node  # the (path ...) of the instance
+    symbol: tuple[str, int]  # the key of the symbol (PlacedSymbol.key)
+    symbol_node: Node  # the placed symbol that holds the path
     nodes: list[Node]  # the (variant ...) nodes of the file, in their order
-    # name -> (the other items of the variant as text: dnp, in_bom, ...; the fields)
-    original: dict[str, tuple[list[str], dict[str, str]]]
-    new: dict[str, tuple[list[str], dict[str, str]]]
+    original: dict[str, _Variant]
+    new: dict[str, _Variant]
 
 
-def _read_variants(instance: PlacedInstance) -> _Variants:
-    assert instance.path is not None
-    nodes = instance.path.children("variant")
-    original: dict[str, tuple[list[str], dict[str, str]]] = {}
+def _read_variants(
+    label: str, record: SchematicFile, path: Node, symbol: tuple[str, int], symbol_node: Node
+) -> _Variants:
+    """The variants of a (path ...). The parser starts each variant with the attributes
+    of the symbol (SCH_SYMBOL_VARIANT::InitializeAttributes): a token of the file
+    changes one (the last token of a name stays); _variant_edit adds the attributes of
+    the symbol.
+
+    Raises:
+        InputError: A token is not yes or no, or (in_bom ...) of a variant has the
+            inverted logic of a file before SCHEMATIC_VARIANT_IN_BOM (the tool writes
+            only the format of the installed KiCad).
+    """
+    nodes = path.children("variant")
+    original: dict[str, _Variant] = {}
     for node in nodes:
         name = node.first("name")
         if name is None:
             continue
-        others = [
-            item.source[item.start : item.end]
+        tokens = {
+            item.head: _token_value(item, f"a variant of {label}")
             for item in node.children()
-            if item.head not in ("name", "field")
-        ]
-        original[name.value(0, "")] = (others, _variant_fields(node))
-    new = {name: (others, dict(fields)) for name, (others, fields) in original.items()}
-    return _Variants(instance, nodes, original, new)
+            if item.head in _TOKENS
+        }
+        if "in_bom" in tokens and record.version < SCHEMATIC_VARIANT_IN_BOM:
+            raise InputError(
+                f"The variant {name.value(0, '')!r} of {label} in {record.file.name} has the "
+                f"(in_bom ...) of an older format (file version {record.version}), which "
+                "KiCad reads with the inverted logic. Open and save the schematic in KiCad "
+                "10 first."
+            )
+        original[name.value(0, "")] = (tokens, _variant_fields(node))
+    new = {name: (dict(tokens), dict(fields)) for name, (tokens, fields) in original.items()}
+    return _Variants(label, record.file, path, symbol, symbol_node, nodes, original, new)
 
 
-def _variant_text(name: str, others: list[str], fields: dict[str, str]) -> str:
+def _instance_variants(instance: PlacedInstance, record: SchematicFile) -> _Variants:
+    assert instance.path is not None
+    return _read_variants(instance.reference, record, instance.path, instance.key, instance.symbol)
+
+
+def _variant_text(
+    name: str, variant: _Variant, before: dict[str, bool], after: dict[str, bool]
+) -> str:
     """Return a (variant ...) with one list on each line, or "" when it has no
-    differentials (SCH_IO_KICAD_SEXPR writes no such variant)."""
-    if not others and not fields:
+    differentials (SCH_IO_KICAD_SEXPR writes no such variant).
+
+    Args:
+        before: The attribute tokens of the symbol when KiCad loaded the file: the
+            start of each variant (InitializeAttributes).
+        after: The attribute tokens of the symbol after the change: KiCad writes a token
+            of the variant only when it differs from it.
+    """
+    tokens, fields = variant
+    parts = []
+    for _name, token, _inverted in ATTRIBUTES:
+        value = tokens.get(token, before[token])
+        if value != after[token]:
+            parts.append(f"({token} {'yes' if value else 'no'})")
+    if not parts and not fields:
         return ""
-    parts = [f"(name {quote(name)})", *others]
+    parts = [f"(name {quote(name)})", *parts]
     parts += [
         f"(field\n(name {quote(k)})\n(value {quote(v)})\n)" for k, v in sorted(fields.items())
     ]
     return "(variant\n" + "\n".join(parts) + "\n)"
 
 
-def _variant_edit(state: _Variants) -> tuple[int, int, str] | None:
+def _variants_text(
+    variants: dict[str, _Variant], before: dict[str, bool], after: dict[str, bool]
+) -> str:
+    """The text of all variants of an instance, sorted by name (std::map)."""
+    return "\n".join(
+        t for name in sorted(variants) if (t := _variant_text(name, variants[name], before, after))
+    )
+
+
+def _variant_edit(
+    state: _Variants, before: dict[str, bool], after: dict[str, bool]
+) -> tuple[int, int, str] | None:
     """Return the one edit that writes all variants of an instance, sorted by name
     as SCH_IO_KICAD_SEXPR writes them (std::map), or None when they do not change.
     One edit for all variants: two edits next to each other cannot overlap.
 
+    Args:
+        before, after: The attribute tokens of the symbol (_variant_text).
+
     Raises:
         InputError: The variants are not next to each other in the instance.
     """
-    if state.new == state.original:
+    text = _variants_text(state.new, before, after)
+    # A change that gives the same variants (for example a value equal to the value that
+    # the variant has from the symbol) is no edit.
+    if text == _variants_text(state.original, before, before):
         return None
-    path = state.instance.path
-    assert path is not None
-    text = "\n".join(
-        t for name in sorted(state.new) if (t := _variant_text(name, *state.new[name]))
-    )
+    path = state.path
     children = path.children()
     if state.nodes:
         first, last = children.index(state.nodes[0]), children.index(state.nodes[-1])
         if last - first + 1 != len(state.nodes):
             raise InputError(
-                f"The variants of {state.instance.reference} in {state.instance.file.name} are "
+                f"The variants of {state.label} in {state.file.name} are "
                 "not next to each other. Open and save the schematic in KiCad first."
             )
         if text:
@@ -381,8 +549,28 @@ def _variant_edit(state: _Variants) -> tuple[int, int, str] | None:
     return (path.end - 1, path.end - 1, " " + _one_line(text))
 
 
+Change = FieldChange | AttributeChange
+
+
+@dataclass
+class _Plan:
+    """The state of a plan: the edits of each file, the rows of the output, the
+    warnings, and the attribute tokens of each changed symbol."""
+
+    files: dict[Path, SchematicFile]
+    edits: dict[Path, list[tuple[int, int, str]]]
+    rows: list[_Row]
+    # The texts of the fields of each symbol after the changes of the symbols: the
+    # base of the variants (a text equal to it is no differential).
+    base: dict[tuple[str, int], dict[str, str]]
+    variants: dict[tuple[Path, int], _Variants]  # by (file, offset of the path)
+    # The attribute tokens of each symbol whose attributes change: (when KiCad loaded
+    # the file, after the change).
+    tokens: dict[tuple[str, int], tuple[dict[str, bool], dict[str, bool]]]
+
+
 def _plan(
-    project: Path, kicad: str, changes: list[FieldChange], size: float
+    project: Path, kicad: str, changes: list[Change], size: float
 ) -> tuple[dict[Path, str], list[_Row], dict[Path, SchematicFile], list[str]]:
     """Return the new text of each file to write, the rows of the output, the
     files, and the warnings.
@@ -405,7 +593,7 @@ def _plan(
         known_variants = project_variants(project).union(
             *(file_variants(f.root) for f in screens.values())
         )
-    by_key: dict[tuple[str, str], FieldChange] = {}
+    by_key: dict[tuple[str, str], Change] = {}
     for change in changes:
         _check_change(change, known_variants)
         key = (change.reference.upper(), change.variant)
@@ -418,14 +606,9 @@ def _plan(
         groups.setdefault(instance.reference.upper(), []).append(instance)
         references.setdefault(instance.key, set()).add(instance.reference)
 
-    edits: dict[Path, list[tuple[int, int, str]]] = {}
-    rows: list[_Row] = []
+    plan = _Plan(files, {}, [], {}, {}, {})
     warnings: list[str] = []
-    # The texts of the fields of each symbol after the changes of the symbols: the
-    # base of the variants (a text equal to it is no differential).
-    base: dict[tuple[str, int], dict[str, str]] = {}
-    done: dict[tuple[str, int], list[_Row]] = {}  # the symbols that got their fields
-    variants: dict[tuple[Path, int], _Variants] = {}  # by (file, offset of the path)
+    done: dict[tuple[str, int], list[_Row]] = {}  # the symbols that got their changes
     for (key, variant), change in sorted(by_key.items(), key=lambda item: item[0][1] != ""):
         group = groups.get(key)
         if not group:
@@ -439,35 +622,48 @@ def _plan(
         for instance in sorted(group, key=lambda i: i.unit):
             # The letters of the unit of a package with more units (U1A), else empty.
             unit_text = letter_reference(instance.unit) if instance.unit_count > 1 else ""
-            _check_one_screen(instance, shared)
+            _check_one_screen(instance, shared, change.what)
             record = files[instance.file]
             if variant:
-                _plan_variant(change, instance, record, base, variants, rows, unit_text)
+                if isinstance(change, AttributeChange):
+                    _plan_attribute_variant(change, instance, record, plan, unit_text)
+                else:
+                    _plan_variant(
+                        change, instance, record, plan.base, plan.variants, plan.rows, unit_text
+                    )
                 continue
             _check_shared(change, instance, references, by_key)
             if instance.key in done:
-                rows += [
+                plan.rows += [
                     _Row(reference, unit_text, "", r.field, r.before, r.after, r.file, r.reference)
                     for r in done[instance.key]
                 ]
                 continue
-            start = len(rows)
-            _plan_symbol(change, instance, record, size, base, edits, rows, unit_text)
-            done[instance.key] = rows[start:]
-            if any(r.before != r.after for r in rows[start:]):
-                warnings += _other_projects(instance, project.stem)
-    for state in variants.values():
-        edit = _variant_edit(state)
+            start = len(plan.rows)
+            if isinstance(change, AttributeChange):
+                _plan_attribute_symbol(change, instance, record, plan, unit_text)
+            else:
+                _plan_symbol(
+                    change, instance, record, size, plan.base, plan.edits, plan.rows, unit_text
+                )
+            done[instance.key] = plan.rows[start:]
+            if any(r.before != r.after for r in plan.rows[start:]):
+                warnings += _other_projects(instance, project.stem, change.what)
+    for state in plan.variants.values():
+        before, after = plan.tokens.get(state.symbol, (None, None))
+        if before is None:
+            before = after = _symbol_tokens(state.symbol_node, state.label)
+        edit = _variant_edit(state, before, after)
         if edit is not None:
-            edits.setdefault(state.instance.file, []).append(edit)
+            plan.edits.setdefault(state.file, []).append(edit)
     texts = {}
-    for path, file_edits in edits.items():
+    for path, file_edits in plan.edits.items():
         if file_edits:
             root = files[path].root
             texts[path] = (
                 root.source[: root.start] + edited(root, file_edits) + root.source[root.end :]
             )
-    return texts, rows, files, list(dict.fromkeys(warnings))
+    return texts, plan.rows, files, list(dict.fromkeys(warnings))
 
 
 def _screens_of_files(screens: list[SchematicFile]) -> tuple[dict[Path, SchematicFile], set[str]]:
@@ -488,7 +684,7 @@ def _screens_of_files(screens: list[SchematicFile]) -> tuple[dict[Path, Schemati
     return {screen.file: screen for screen in screens if screen.key not in shared}, shared
 
 
-def _check_one_screen(instance: PlacedInstance, shared: set[str]) -> None:
+def _check_one_screen(instance: PlacedInstance, shared: set[str], what: str) -> None:
     """Refuse a change of a symbol of a file with more than one screen (_screens_of_files).
 
     Raises:
@@ -498,12 +694,12 @@ def _check_one_screen(instance: PlacedInstance, shared: set[str]) -> None:
         raise InputError(
             f"KiCad loads the file {instance.file} of {instance.reference} under more than "
             "one name: KiCad keeps a copy of its symbols for each name, and the save of one "
-            "copy removes the changes of the other. The tool does not change the fields "
+            f"copy removes the changes of the other. The tool does not change the {what} "
             "of such a file. Give the file one name in all sheets."
         )
 
 
-def _other_projects(instance: PlacedInstance, project_name: str) -> list[str]:
+def _other_projects(instance: PlacedInstance, project_name: str, what: str) -> list[str]:
     """Return a warning when the symbol has instances of an other project: KiCad
     keeps the fields of the symbol for that project too (user, 2026-11-05: write
     and warn)."""
@@ -519,7 +715,7 @@ def _other_projects(instance: PlacedInstance, project_name: str) -> list[str]:
         return []
     return [
         f"The file {instance.file.name} has instances of the projects {', '.join(names)}: "
-        f"KiCad keeps the fields of {instance.reference} for them too (it can be an old "
+        f"KiCad keeps the {what} of {instance.reference} for them too (it can be an old "
         "copy of the sheet)."
     ]
 
@@ -529,27 +725,29 @@ def _variant_label(variant: str) -> str:
 
 
 def _check_shared(
-    change: FieldChange,
+    change: "Change",
     instance: PlacedInstance,
-    references: dict[tuple[Path, int], set[str]],
-    by_key: dict[tuple[str, str], FieldChange],
+    references: dict[tuple[str, int], set[str]],
+    by_key: dict[tuple[str, str], "Change"],
 ) -> None:
     """Refuse a change of a symbol that an other reference uses too (a sheet that
     the hierarchy uses more than one time), when the changes do not give that
-    reference the same fields (user, 2026-11-05)."""
+    reference the same fields or attributes (user, 2026-11-05)."""
+    what = change.what
     others = sorted(
         ref for ref in references[instance.key] if ref.upper() != change.reference.upper()
     )
     missing = [
         ref
         for ref in others
-        if (other := by_key.get((ref.upper(), ""))) is None or other.fields != change.fields
+        if (other := by_key.get((ref.upper(), ""))) is None or other.payload() != change.payload()
     ]
     if missing:
         raise InputError(
             f"The symbol of {change.reference} is in a sheet that the hierarchy uses more than one "
-            f"time: KiCad keeps its fields for {', '.join(missing)} too. Give the same fields for "
-            f"{', '.join([change.reference, *missing])}, or write different fields through a variant."
+            f"time: KiCad keeps its {what} for {', '.join(missing)} too. Give the same {what} for "
+            f"{', '.join([change.reference, *missing])}, or write different {what} through a "
+            "variant."
         )
 
 
@@ -623,8 +821,10 @@ def _plan_variant(
             f"The symbol {label} has no instance for its sheet path, thus it has no variants. "
             "Open and save the schematic in KiCad first."
         )
-    state = variants.setdefault((instance.file, instance.path.start), _read_variants(instance))
-    others, fields = state.new.get(change.variant, ([], {}))
+    state = variants.setdefault(
+        (instance.file, instance.path.start), _instance_variants(instance, record)
+    )
+    tokens, fields = state.new.get(change.variant, ({}, {}))
     texts = base.get(instance.key, {})
     for requested, value in change.fields.items():
         nodes = _field_nodes(instance.symbol, requested, record.kicad)
@@ -647,7 +847,113 @@ def _plan_variant(
         rows.append(
             _Row(instance.reference, unit_text, change.variant, name, before, value, instance.file)
         )
-    state.new[change.variant] = (others, fields)
+    state.new[change.variant] = (tokens, fields)
+
+
+def _yes_no(token: str, value: bool) -> str:
+    """The attribute of a token value as a text: "in_bom yes" is "exclude_from_bom no"."""
+    _name, inverted = _TOKENS[token]
+    return "yes" if value != inverted else "no"
+
+
+def _plan_attribute_symbol(
+    change: AttributeChange,
+    instance: PlacedInstance,
+    record: SchematicFile,
+    plan: _Plan,
+    unit_text: str,
+) -> None:
+    """The attributes of a symbol (DIALOG_SYMBOL_PROPERTIES with no variant: SetDNP and
+    the others set the attribute of the symbol). Each variant of each instance of the
+    symbol keeps the attribute of the load where its file has no token: _variant_edit
+    then writes that value as a token, as KiCad does."""
+    symbol = instance.symbol
+    label = f"{instance.reference}{unit_text}"
+    before = _symbol_tokens(symbol, label)
+    after = dict(before)
+    file_edits = plan.edits.setdefault(instance.file, [])
+    for name, token, inverted in ATTRIBUTES:
+        value = getattr(change.attributes, name)
+        if value is None:
+            continue
+        node = _last(symbol, token)
+        if node is None:
+            raise InputError(
+                f"The symbol {label} in {instance.file.name} has no ({token} ...): KiCad 10 "
+                "writes it for each symbol. Open and save the schematic in KiCad first."
+            )
+        after[token] = value != inverted
+        if after[token] != before[token]:
+            atom = node.atoms()[0]
+            file_edits.append((atom.start, atom.end, "yes" if after[token] else "no"))
+        plan.rows.append(
+            _Row(
+                instance.reference,
+                unit_text,
+                "",
+                name,
+                _yes_no(token, before[token]),
+                _yes_no(token, after[token]),
+                instance.file,
+            )
+        )
+    plan.tokens[instance.key] = (before, after)
+    # All instances of the symbol (also of other projects): KiCad writes each of them.
+    instances = symbol.first("instances")
+    for project in instances.children("project") if instances is not None else []:
+        for path in project.children("path"):
+            if path.children("variant"):
+                plan.variants.setdefault(
+                    (instance.file, path.start),
+                    _read_variants(label, record, path, instance.key, symbol),
+                )
+
+
+def _plan_attribute_variant(
+    change: AttributeChange,
+    instance: PlacedInstance,
+    record: SchematicFile,
+    plan: _Plan,
+    unit_text: str,
+) -> None:
+    """The attributes of a variant of the instance (SetDNP with a variant: an existing
+    variant gets the value; a new variant starts with the attributes of the symbol,
+    InitializeAttributes)."""
+    label = f"{instance.reference}{unit_text}"
+    if instance.path is None:
+        raise InputError(
+            f"The symbol {label} has no instance for its sheet path, thus it has no variants. "
+            "Open and save the schematic in KiCad first."
+        )
+    state = plan.variants.setdefault(
+        (instance.file, instance.path.start), _instance_variants(instance, record)
+    )
+    loaded, current = plan.tokens.get(instance.key, (None, None))
+    if loaded is None:
+        loaded = current = _symbol_tokens(instance.symbol, label)
+    if change.variant in state.new:
+        tokens, fields = state.new[change.variant]
+        start = {token: tokens.get(token, loaded[token]) for token in loaded}
+    else:
+        tokens, fields = dict(current), {}
+        start = dict(current)
+    for name, token, inverted in ATTRIBUTES:
+        value = getattr(change.attributes, name)
+        if value is None:
+            continue
+        tokens[token] = value != inverted
+        plan.rows.append(
+            _Row(
+                instance.reference,
+                unit_text,
+                change.variant,
+                name,
+                _yes_no(token, start[token]),
+                _yes_no(token, tokens[token]),
+                instance.file,
+            )
+        )
+    state.new[change.variant] = (tokens, fields)
 
 
 def _check_text(instance: PlacedInstance, record: SchematicFile, value: str) -> None:
@@ -661,17 +967,20 @@ def _check_text(instance: PlacedInstance, record: SchematicFile, value: str) -> 
         )
 
 
-def _output(project: Path, rows: list[_Row], written: list[Path], problems: list[str]) -> str:
+def _output(
+    project: Path, rows: list[_Row], written: list[Path], problems: list[str], kind: str
+) -> str:
     changed = [r for r in rows if r.before != r.after and not r.shared]
-    lines = [f"# Fields of the symbols of {project.name}", ""]
+    noun, column = ("attribute", "Attribute") if kind == "attributes" else ("field", "Field")
+    lines = [f"# {column}s of the symbols of {project.name}", ""]
     if not written:
-        lines.append("✅ The fields have these values already. The tool wrote no file.")
+        lines.append(f"✅ The {noun}s have these values already. The tool wrote no file.")
     else:
         files = ", ".join(f"`{p.name}`" for p in written)
-        lines.append(f"✅ The tool wrote {len(changed)} field values into {files}.")
+        lines.append(f"✅ The tool wrote {len(changed)} {noun} values into {files}.")
     lines += [
         "",
-        "| Reference | Units | Variant | Field | Before | After | File |",
+        f"| Reference | Units | Variant | {column} | Before | After | File |",
         "|---|---|---|---|---|---|---|",
     ]
     for r in rows:
@@ -686,14 +995,22 @@ def _output(project: Path, rows: list[_Row], written: list[Path], problems: list
             f"{r.file.name} (the symbol of {r.shared})" if r.shared else r.file.name,
         )
         lines.append("| " + " | ".join(cell(c) for c in cells) + " |")
-    lines += [
-        "",
-        "Each field goes into each unit of the reference. A new field is hidden as KiCad 9 "
-        "and 10 make it (a file of KiCad 8: visible; Value_Confirmed and MPN_Confirmed: always "
-        "hidden). A "
-        "variant keeps only the fields that are different from the fields of the symbol "
-        "(KiCad).",
-    ]
+    if kind == "attributes":
+        lines += [
+            "",
+            "Each attribute goes into each unit of the reference. A variant keeps only the "
+            "attributes that are different from the attributes of the symbol (KiCad). A change "
+            "of an attribute of the symbol does not change a variant: KiCad then writes the old "
+            "value into each variant.",
+        ]
+    else:
+        lines += [
+            "",
+            "Each field goes into each unit of the reference. A new field is hidden as KiCad 9 "
+            "and 10 make it (a file of KiCad 8: visible; Value_Confirmed and MPN_Confirmed: "
+            "always hidden). A variant keeps only the fields that are different from the fields "
+            "of the symbol (KiCad).",
+        ]
     lines += [f"⚠️ {problem}" for problem in problems]
     return "\n".join(lines)
 
@@ -709,18 +1026,21 @@ def _check_texts(texts: dict[Path, str]) -> str | None:
     return None
 
 
-async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> str:
+async def _set_symbols(schematic_path: str, changes: list[Change], kind: str) -> str:
     path = Path(os.path.abspath(os.path.expanduser(schematic_path)))
     if path.suffix != ".kicad_sch" or not path.is_file():
         return f"❌ The schematic {path} does not exist or is not a .kicad_sch file."
     if not changes:
-        return "❌ changes is empty. Give the fields to write."
+        return f"❌ changes is empty. Give the {kind} to write."
     try:
         project = await asyncio.to_thread(schematic_project_file, path)
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
     kicad = await get_kicad_version()
-    if kicad_problem := installed_kicad_problem(kicad):
+    if kind == "attributes":
+        if kicad_problem := kicad_10_problem(kicad, "set_symbol_attributes has"):
+            return f"❌ {kicad_problem}"
+    elif kicad_problem := installed_kicad_problem(kicad):
         return f"❌ {kicad_problem}"
     try:
         kicad_major(kicad)
@@ -740,7 +1060,7 @@ async def _set_symbol_fields(schematic_path: str, changes: list[FieldChange]) ->
     if isinstance(result, str):
         return result
     written, warnings = result
-    return _output(project, rows, written, problems + warnings)
+    return _output(project, rows, written, problems + warnings, kind)
 
 
 @mcp.tool()
@@ -791,6 +1111,60 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
         A table of the fields before and after the write, and the files.
     """
     try:
-        return await _set_symbol_fields(schematic_path, changes)
+        return await _set_symbols(schematic_path, changes, FieldChange.what)
+    except Exception as e:
+        return error_answer(e, "Error")
+
+
+@mcp.tool()
+@with_schematic_versions("schematic_path", write=True)
+async def set_symbol_attributes(schematic_path: str, changes: list[AttributeChange]) -> str:
+    """Write the attributes of placed symbols, as the Symbol Properties dialog of KiCad 10
+    sets them: "Do not populate" (dnp), "Exclude from bill of materials", "Exclude from
+    board", "Exclude from position files" and "Exclude from simulation".
+
+    The tool writes each attribute into each unit of the reference. KiCad 10.0.6 gives
+    the other units the same DNP and Exclude from BOM, board and position files, but
+    not Exclude from simulation (it keeps that one for each unit): the tool sets each
+    unit, as the dialog on each unit does. The tool changes only the attributes. The
+    OK of the dialog also copies the fields of the unit (not the Reference) to the
+    other units (SCH_SYMBOL::SyncOtherUnits). The tool does not copy the fields: units with
+    different fields keep them (set_symbol_fields changes the fields).
+
+    With a variant (KiCad 10), the tool writes the attributes of that variant: a value
+    equal to the attribute of the symbol is no differential, and KiCad writes no
+    variant with no differentials. A change of an attribute of the symbol does not
+    change the variants: KiCad keeps the old value in each variant (the variant starts
+    with the attributes of the symbol when KiCad loads the file), thus the file then
+    has the old value as a token of each variant. This is correct, not a defect.
+
+    A symbol in a sheet that the hierarchy uses more than one time has one set of
+    attributes for all its references (U201 and U301): give the same attributes for each
+    of these references, or write different attributes through a variant.
+
+    The tool checks all changes and all files first, and writes no file when a check
+    fails. It writes all files or no file. KiCad must not have the files open. A
+    schematic file of the project with an older version than the installed KiCad writes
+    is an error: the user converts it in KiCad first. The tool refuses a reference that
+    is not annotated (U?), a duplicate reference, a variant that the project does not
+    have, an attribute name that it does not know, a symbol with no token for an
+    attribute to change (KiCad 10 writes the five tokens: save the schematic in KiCad
+    first), a token whose value is not yes or no, the variants of an instance that are
+    not next to each other, a file that KiCad loads under more than one name, and a
+    project whose full sheet hierarchy the tool cannot read. The installed KiCad must be
+    KiCad 10.0.
+
+    Args:
+        schematic_path: A .kicad_sch file of the project. The tool finds the
+            references in the full project.
+        changes: One item for each reference (and variant): the reference, the
+            attributes to set (a missing attribute does not change), and the variant
+            name (empty: the symbol).
+
+    Returns:
+        A table of the attributes before and after the write, and the files.
+    """
+    try:
+        return await _set_symbols(schematic_path, changes, AttributeChange.what)
     except Exception as e:
         return error_answer(e, "Error")

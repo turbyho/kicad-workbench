@@ -79,7 +79,9 @@ See [docs/datasheet-lens.md](https://github.com/turbyho/kicad-workbench/blob/mai
 - **BOM.** The BOM of kicad-cli with the fields, the groups, the DNP filter and the
   variants of KiCad 10.
 - **Edits.** New projects, symbols from the libraries, wires, labels and junctions as
-  the schematic editor makes them, and the fields of placed symbols. The server
+  the schematic editor makes them, and the fields and the attributes (DNP, the
+  exclusions from the BOM, the board, the position files and the simulation) of
+  placed symbols. The server
   writes the format of the file version, and refuses a file that KiCad has open.
 - **File versions.** Each KiCad opens a file of an older version, and its next save
   writes the file in its own version. The server does not convert files: the user

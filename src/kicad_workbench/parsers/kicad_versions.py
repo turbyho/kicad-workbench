@@ -63,6 +63,10 @@ EMPTY_TEXT_MARKER = 20250318
 # From this version, a schematic has variants: (variant ...) in the instances of
 # a symbol (SEXPR_SCHEMATIC_FILE_VERSION 20250922, sch_file_versions.h).
 SCHEMATIC_VARIANTS = 20250922
+# From this version, (in_bom ...) of a variant has the positive logic; before it, the
+# parser inverts it (parseSchematicSymbol of KiCad 10.0.6, SEXPR_SCHEMATIC_FILE_VERSION
+# 20260306).
+SCHEMATIC_VARIANT_IN_BOM = 20260306
 # From this version, KiCad writes hide, show_name and do_not_autoplace of a field
 # in the property; before it, the hidden state is in the effects
 # (SEXPR_SCHEMATIC_FILE_VERSION 20251028, "Updated properties formatting").

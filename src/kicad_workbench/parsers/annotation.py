@@ -358,6 +358,11 @@ def _lower(char: str) -> str:
     return lower if len(lower) == 1 else char
 
 
+def wx_lower(text: str) -> str:
+    """``wxString::Lower``: each character in lower case (one character for each)."""
+    return "".join(_lower(char) for char in text)
+
+
 def cmp_no_case(a: str, b: str) -> int:
     """``wxString::CmpNoCase``: the characters in lower case, then the length."""
     for char_a, char_b in zip(a, b, strict=False):

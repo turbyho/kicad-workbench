@@ -402,7 +402,12 @@ def board(tmp_path, monkeypatch):
     async def read_pads(items, embedded=False):
         state["items"] = items
         pads = [state["pads"].get(name) for _library, name in items]
-        return state["reader"], [None if p is None else FootprintItems(p, (), ()) for p in pads]
+        return state["reader"], [
+            None
+            if p is None
+            else FootprintItems(p, len({n.number for n in p if n.number and n.on_copper}), (), ())
+            for p in pads
+        ]
 
     monkeypatch.setattr(kicad_cli_module, "run_kicad_cli_sync", kicad_cli)
     monkeypatch.setattr(library_tools, "read_footprints", read_pads)

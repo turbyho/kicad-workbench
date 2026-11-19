@@ -39,6 +39,7 @@ plans/roadmap.md, "Phase 4", "Step 1":
 
 import asyncio
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -82,6 +83,7 @@ from ..parsers.symbol_info import letter_reference
 from ..parsers.unit_fields import is_confirmed_field, is_mpn_confirmed_field
 from ..server import mcp
 from ..utils.file_versions import with_schematic_versions
+from ..utils.footprint_filter import footprint_id_problem
 from ..utils.kicad_cli import get_kicad_version, installed_kicad_problem, kicad_10_problem
 from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError, read_kicad_json
@@ -164,6 +166,23 @@ class AttributeChange(BaseModel):
     def payload(self) -> object:
         """What the change writes: two references of one symbol must have the same."""
         return self.attributes
+
+
+class FootprintChange(BaseModel):
+    """The footprint to write into the Footprint field of one reference, as the save of
+    CvPcb does it (assign_footprint)."""
+
+    model_config = ConfigDict(extra="forbid")
+    what: ClassVar[str] = "footprint"
+    # CvPcb writes the field of the symbol, never the field of a variant.
+    variant: ClassVar[str] = ""
+
+    reference: str
+    footprint: str  # "<nickname>:<name>", or "" to remove the footprint.
+
+    def payload(self) -> object:
+        """What the change writes: two references of one symbol must have the same."""
+        return self.footprint
 
 
 # The attributes of a placed symbol: (the name of SymbolAttributes, the token of the
@@ -373,6 +392,17 @@ def _check_change(change: "Change", known_variants: set[str]) -> None:
             f"The reference {change.reference!r} is not annotated. Annotate the schematic in "
             "KiCad first."
         )
+    if isinstance(change, FootprintChange):
+        if change.reference.startswith("#"):
+            # SCH_SHEET_PATH::AppendSymbol (SYMBOL_FILTER_NON_POWER) and the netlist
+            # leave out each reference that starts with "#".
+            raise InputError(
+                f"{change.reference} is a power symbol or an other pseudo symbol (its reference "
+                'starts with "#"): CvPcb does not list it, and it gets no footprint on the board.'
+            )
+        if change.footprint and (problem := footprint_id_problem(change.footprint)):
+            raise InputError(f"{change.reference}: {problem}")
+        return
     if isinstance(change, AttributeChange):
         if all(getattr(change.attributes, name) is None for name, _t, _i in ATTRIBUTES):
             raise InputError(f"The change of {change.reference} has no attributes.")
@@ -549,7 +579,7 @@ def _variant_edit(
     return (path.end - 1, path.end - 1, " " + _one_line(text))
 
 
-Change = FieldChange | AttributeChange
+Change = FieldChange | AttributeChange | FootprintChange
 
 
 @dataclass
@@ -633,6 +663,9 @@ def _plan(
                     )
                 continue
             _check_shared(change, instance, references, by_key)
+            if isinstance(change, FootprintChange):
+                # The variants belong to each instance (sheet path), also of one symbol.
+                warnings += _footprint_variants(instance)
             if instance.key in done:
                 plan.rows += [
                     _Row(reference, unit_text, "", r.field, r.before, r.after, r.file, r.reference)
@@ -640,7 +673,9 @@ def _plan(
                 ]
                 continue
             start = len(plan.rows)
-            if isinstance(change, AttributeChange):
+            if isinstance(change, FootprintChange):
+                _plan_footprint_symbol(change, instance, record, plan, unit_text)
+            elif isinstance(change, AttributeChange):
                 _plan_attribute_symbol(change, instance, record, plan, unit_text)
             else:
                 _plan_symbol(
@@ -743,11 +778,15 @@ def _check_shared(
         if (other := by_key.get((ref.upper(), ""))) is None or other.payload() != change.payload()
     ]
     if missing:
+        other = (
+            "or write a different footprint into a variant with set_symbol_fields"
+            if isinstance(change, FootprintChange)
+            else f"or write different {what} through a variant"
+        )
         raise InputError(
             f"The symbol of {change.reference} is in a sheet that the hierarchy uses more than one "
             f"time: KiCad keeps its {what} for {', '.join(missing)} too. Give the same {what} for "
-            f"{', '.join([change.reference, *missing])}, or write different {what} through a "
-            "variant."
+            f"{', '.join([change.reference, *missing])}, {other}."
         )
 
 
@@ -956,6 +995,130 @@ def _plan_attribute_variant(
     state.new[change.variant] = (tokens, fields)
 
 
+FOOTPRINT_VISIBLE = "Footprint field visible"
+
+
+def _hide_state(prop: Node, label: str) -> tuple[bool, Node | None]:
+    """Return (the field is hidden, the (hide ...) that sets it, or None), as
+    parseSchField reads the field: a (hide yes|no) of the property (parseBool) and a
+    hide of its (effects ...) (parseEDA_TEXT: (hide), (hide yes|no) or the bare token);
+    the last one stays. A bare token gives None (no value to change)."""
+    hidden, token = False, None
+    for item in prop.items[1:]:
+        if not isinstance(item, Node):
+            continue
+        if item.head == "hide":
+            hidden, token = _token_value(item, f"the Footprint field of {label}"), item
+        elif item.head == "effects":
+            for sub in item.items[1:]:
+                if isinstance(sub, Node) and sub.head == "hide":
+                    # parseMaybeAbsentBool: (hide) is hidden.
+                    where = f"the Footprint field of {label}"
+                    hidden = _token_value(sub, where) if sub.atoms() else True
+                    token = sub
+                elif not isinstance(sub, Node) and not sub.quoted and sub.text == "hide":
+                    hidden, token = True, None
+    return hidden, token
+
+
+def _hide_edit(prop: Node, token: Node | None) -> tuple[int, int, str]:
+    """The edit that hides a visible field: the value of its (hide no) becomes yes, else
+    a new (hide yes) after the (at ...) of the property, where SCH_IO_KICAD_SEXPR::saveField
+    writes it."""
+    if token is not None:
+        atoms = token.atoms()
+        if atoms:
+            return (atoms[0].start, atoms[0].end, "yes")
+        return (token.end - 1, token.end - 1, " yes")
+    at = prop.first("at")
+    if at is not None:
+        return _insert_after(at, "(hide yes)")
+    atoms = property_atoms(prop)
+    return (atoms[-1].end, atoms[-1].end, " (hide yes)")
+
+
+def _plan_footprint_symbol(
+    change: FootprintChange,
+    instance: PlacedInstance,
+    record: SchematicFile,
+    plan: _Plan,
+    unit_text: str,
+) -> None:
+    """Plan the footprint of one placed symbol as SCH_EDITOR_CONTROL::AssignFootprints
+    (KiCad 10.0.6) sets it: the text of the Footprint field of the symbol, when it
+    differs from the old text. A Footprint field that was empty and visible becomes
+    hidden (SetVisible, with no commit). The save of CvPcb (MAIL_SCH_SAVE) writes it
+    also with no change of a footprint: SCH_EDIT_FRAME::SaveProject of KiCad 10 starts
+    at the virtual root sheet, which has no file, thus it never skips a save with no
+    changes (measured in the GUI of KiCad 10.0.6).
+
+    Raises:
+        InputError: The symbol has no library symbol (CvPcb does not list it), no
+            Footprint field or more than one, or a text variable in the field (KiCad
+            compares the resolved text).
+    """
+    label = f"{instance.reference}{unit_text}"
+    if not instance.has_library_symbol:
+        raise InputError(
+            f"The symbol {label} has no library symbol in the schematic: CvPcb does not list "
+            "it (SCH_SHEET_PATH::AppendSymbol). Repair the symbol in KiCad first."
+        )
+    nodes = _field_nodes(instance.symbol, "Footprint", record.kicad)
+    if len(nodes) != 1:
+        problem = "no Footprint field" if not nodes else "the Footprint field more than one time"
+        raise InputError(
+            f"The symbol {label} has {problem}. KiCad 10 writes one Footprint field for "
+            "each symbol: open and save the schematic in KiCad first."
+        )
+    prop = nodes[0]
+    before = _field_text(prop, record)
+    if "${" in before:
+        raise InputError(
+            f"The Footprint field of {label} has a text variable ({before!r}). KiCad compares "
+            "the footprint with the resolved text, which the tool cannot resolve. Change the "
+            "footprint in KiCad."
+        )
+    file_edits = plan.edits.setdefault(instance.file, [])
+    if before != change.footprint:
+        atoms = property_atoms(prop)
+        if len(atoms) > 1:
+            file_edits.append((atoms[1].start, atoms[1].end, quote(change.footprint)))
+        else:
+            file_edits.append((atoms[0].end, atoms[0].end, " " + quote(change.footprint)))
+    plan.rows.append(
+        _Row(
+            instance.reference, unit_text, "", "Footprint", before, change.footprint, instance.file
+        )
+    )
+    if not before:
+        hidden, token = _hide_state(prop, label)
+        if not hidden:
+            file_edits.append(_hide_edit(prop, token))
+            plan.rows.append(
+                _Row(
+                    instance.reference, unit_text, "", FOOTPRINT_VISIBLE, "yes", "no", instance.file
+                )
+            )
+
+
+def _footprint_variants(instance: PlacedInstance) -> list[str]:
+    """The warning for the variants of an instance with a Footprint of their own: they
+    keep it (AssignFootprints writes only the field of the symbol)."""
+    own = []
+    holder = instance.variants
+    for variant in holder.children("variant") if holder is not None else []:
+        name = variant.first("name")
+        if name is not None and "Footprint" in _variant_fields(variant):
+            own.append(name.value(0, ""))
+    if not own:
+        return []
+    return [
+        f"The variants {', '.join(repr(n) for n in sorted(own))} of {instance.reference} have a "
+        "Footprint of their own: they keep it (CvPcb writes only the field of the symbol). "
+        "set_symbol_fields with the variant changes it."
+    ]
+
+
 def _check_text(instance: PlacedInstance, record: SchematicFile, value: str) -> None:
     """Refuse "~" in a file older than EMPTY_TEXT_MARKER: KiCad reads it as an
     empty field (parseSchField), thus it cannot keep the text "~"."""
@@ -967,20 +1130,69 @@ def _check_text(instance: PlacedInstance, record: SchematicFile, value: str) -> 
         )
 
 
+@dataclass(frozen=True)
+class _Kind:
+    """The texts of the output of one kind of change."""
+
+    noun: str  # "field": "The tool wrote 2 field values"
+    column: str  # the column of the table
+    title: str  # "# <title> of the symbols of <project>"
+    note: str  # the text after the table
+    # The tool for KiCad 10 only (kicad_10_problem), or None (installed_kicad_problem).
+    tool: str | None = None
+
+
+_KINDS = {
+    FieldChange.what: _Kind(
+        "field",
+        "Field",
+        "Fields",
+        "Each field goes into each unit of the reference. A new field is hidden as KiCad 9 "
+        "and 10 make it (a file of KiCad 8: visible; Value_Confirmed and MPN_Confirmed: "
+        "always hidden). A variant keeps only the fields that are different from the fields "
+        "of the symbol (KiCad).",
+    ),
+    AttributeChange.what: _Kind(
+        "attribute",
+        "Attribute",
+        "Attributes",
+        "Each attribute goes into each unit of the reference. A variant keeps only the "
+        "attributes that are different from the attributes of the symbol (KiCad). A change "
+        "of an attribute of the symbol does not change a variant: KiCad then writes the old "
+        "value into each variant.",
+        tool="set_symbol_attributes",
+    ),
+    FootprintChange.what: _Kind(
+        "Footprint field",
+        "Field",
+        "Footprints",
+        "Each footprint goes into the Footprint field of each unit of the reference, not into "
+        "a variant (CvPcb). A Footprint field of the call that is empty and visible becomes "
+        f'hidden ("{FOOTPRINT_VISIBLE}"), as the save of CvPcb does.',
+        tool="assign_footprint",
+    ),
+}
+
+
 def _output(
-    project: Path, rows: list[_Row], written: list[Path], problems: list[str], kind: str
+    project: Path,
+    rows: list[_Row],
+    written: list[Path],
+    problems: list[str],
+    kind: _Kind,
+    checks: list[str] | None = None,
 ) -> str:
     changed = [r for r in rows if r.before != r.after and not r.shared]
-    noun, column = ("attribute", "Attribute") if kind == "attributes" else ("field", "Field")
-    lines = [f"# {column}s of the symbols of {project.name}", ""]
+    lines = [f"# {kind.title} of the symbols of {project.name}", ""]
     if not written:
-        lines.append(f"✅ The {noun}s have these values already. The tool wrote no file.")
+        lines.append(f"✅ The {kind.noun}s have these values already. The tool wrote no file.")
     else:
         files = ", ".join(f"`{p.name}`" for p in written)
-        lines.append(f"✅ The tool wrote {len(changed)} {noun} values into {files}.")
+        values = "value" if len(changed) == 1 else "values"
+        lines.append(f"✅ The tool wrote {len(changed)} {kind.noun} {values} into {files}.")
     lines += [
         "",
-        f"| Reference | Units | Variant | {column} | Before | After | File |",
+        f"| Reference | Units | Variant | {kind.column} | Before | After | File |",
         "|---|---|---|---|---|---|---|",
     ]
     for r in rows:
@@ -995,22 +1207,9 @@ def _output(
             f"{r.file.name} (the symbol of {r.shared})" if r.shared else r.file.name,
         )
         lines.append("| " + " | ".join(cell(c) for c in cells) + " |")
-    if kind == "attributes":
-        lines += [
-            "",
-            "Each attribute goes into each unit of the reference. A variant keeps only the "
-            "attributes that are different from the attributes of the symbol (KiCad). A change "
-            "of an attribute of the symbol does not change a variant: KiCad then writes the old "
-            "value into each variant.",
-        ]
-    else:
-        lines += [
-            "",
-            "Each field goes into each unit of the reference. A new field is hidden as KiCad 9 "
-            "and 10 make it (a file of KiCad 8: visible; Value_Confirmed and MPN_Confirmed: "
-            "always hidden). A variant keeps only the fields that are different from the fields "
-            "of the symbol (KiCad).",
-        ]
+    lines += ["", kind.note]
+    if checks:
+        lines += ["", *checks]
     lines += [f"⚠️ {problem}" for problem in problems]
     return "\n".join(lines)
 
@@ -1026,19 +1225,33 @@ def _check_texts(texts: dict[Path, str]) -> str | None:
     return None
 
 
-async def _set_symbols(schematic_path: str, changes: list[Change], kind: str) -> str:
+# The check of a footprint assignment after the plan and before the write: (the project,
+# the installed KiCad) -> (the lines of the output, the warnings), or the text of an error.
+Check = Callable[[Path, str], Awaitable["tuple[list[str], list[str]] | str"]]
+
+
+async def set_symbols(
+    schematic_path: str, changes: list[Change], what: str, check: Check | None = None
+) -> str:
+    """Plan the changes of one kind (the what of its Change class), check the plan, then
+    write all files or no file, and return the output of the tool.
+
+    Args:
+        check: An other check after the plan and before the write (assign_footprint).
+    """
+    kind = _KINDS[what]
     path = Path(os.path.abspath(os.path.expanduser(schematic_path)))
     if path.suffix != ".kicad_sch" or not path.is_file():
         return f"❌ The schematic {path} does not exist or is not a .kicad_sch file."
     if not changes:
-        return f"❌ changes is empty. Give the {kind} to write."
+        return f"❌ changes is empty. Give the {what} to write."
     try:
         project = await asyncio.to_thread(schematic_project_file, path)
     except AmbiguousRootError as e:
         return f"❌ {e}. Give the root schematic of the project."
     kicad = await get_kicad_version()
-    if kind == "attributes":
-        if kicad_problem := kicad_10_problem(kicad, "set_symbol_attributes has"):
+    if kind.tool is not None:
+        if kicad_problem := kicad_10_problem(kicad, f"{kind.tool} has"):
             return f"❌ {kicad_problem}"
     elif kicad_problem := installed_kicad_problem(kicad):
         return f"❌ {kicad_problem}"
@@ -1054,13 +1267,20 @@ async def _set_symbols(schematic_path: str, changes: list[Change], kind: str) ->
     error = await asyncio.to_thread(_check_texts, texts)
     if error:
         return f"❌ {error} The tool wrote no file."
+    checks: list[str] = []
+    if check is not None:
+        found = await check(project, kicad)
+        if isinstance(found, str):
+            return found
+        checks, check_warnings = found
+        problems = problems + check_warnings
     # All files or no file: the units of one package must not get different fields.
     stamps = {file: files[file].stamp for file in texts}
     result = await asyncio.to_thread(write_schematics, texts, stamps)
     if isinstance(result, str):
         return result
     written, warnings = result
-    return _output(project, rows, written, problems + warnings, kind)
+    return _output(project, rows, written, problems + warnings, kind, checks)
 
 
 @mcp.tool()
@@ -1111,7 +1331,7 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
         A table of the fields before and after the write, and the files.
     """
     try:
-        return await _set_symbols(schematic_path, changes, FieldChange.what)
+        return await set_symbols(schematic_path, changes, FieldChange.what)
     except Exception as e:
         return error_answer(e, "Error")
 
@@ -1165,6 +1385,6 @@ async def set_symbol_attributes(schematic_path: str, changes: list[AttributeChan
         A table of the attributes before and after the write, and the files.
     """
     try:
-        return await _set_symbols(schematic_path, changes, AttributeChange.what)
+        return await set_symbols(schematic_path, changes, AttributeChange.what)
     except Exception as e:
         return error_answer(e, "Error")

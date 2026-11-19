@@ -924,7 +924,30 @@ def _find_footprint(
         InputError: The project path gives no project or more than one.
     """
     project = project_file(project_path)
-    row, problems, file = _footprint_file(library_name, footprint_name, kicad, project)
+    row, problems, file = checked_footprint_file(library_name, footprint_name, kicad, project)
+    return project, row, problems, file
+
+
+def checked_footprint_file(
+    library_name: str,
+    footprint_name: str,
+    kicad: str,
+    project: Path | None,
+    rows: tuple[list[LibraryRow], list[str]] | None = None,
+) -> tuple[LibraryRow, list[str], Path]:
+    """Find the .kicad_mod file of a footprint (_footprint_file), and compare its file
+    version with the installed KiCad.
+
+    rows: the result of library_rows("footprint", kicad, project), or None.
+
+    Returns:
+        (the library row, the problems of the library tables, the .kicad_mod file).
+
+    Raises:
+        LibraryLookupError: The library or the footprint is not there, or its file is
+            newer than the installed KiCad (an older file gives a warning).
+    """
+    row, problems, file = _footprint_file(library_name, footprint_name, kicad, project, rows)
     version = library_file_version(file, "footprint")
     try:
         files = {row.path: [(file, version)]}
@@ -932,11 +955,15 @@ def _find_footprint(
     except FileVersionError as e:
         raise LibraryLookupError(str(e)) from e
     record_library_warnings(warnings)
-    return project, row, problems, file
+    return row, problems, file
 
 
 def _footprint_file(
-    library_name: str, footprint_name: str, kicad: str, project: Path | None
+    library_name: str,
+    footprint_name: str,
+    kicad: str,
+    project: Path | None,
+    rows: tuple[list[LibraryRow], list[str]] | None = None,
 ) -> tuple[LibraryRow, list[str], Path]:
     """Find the .kicad_mod file of a footprint in the library tables of KiCad and of a project.
 
@@ -946,7 +973,7 @@ def _footprint_file(
     Raises:
         LibraryLookupError: The library or the footprint is not there.
     """
-    row, problems, files = _footprint_library(library_name, kicad, project)
+    row, problems, files = _footprint_library(library_name, kicad, project, rows)
     file_name = f"{footprint_name}.kicad_mod"
     # KiCad finds a footprint by the name of a file of the directory, with
     # the same case (FP_CACHE), also on a file system that ignores the case.
@@ -1454,7 +1481,7 @@ def annotation_lines(found: "SchematicFootprints", kicad: str, effect: str) -> l
     return lines
 
 
-def _board_netlist(root: Path) -> tuple[str, str]:
+def board_netlist_text(root: Path) -> tuple[str, str]:
     """Write the netlist that "Update PCB from Schematic" gives pcbnew, with kicad-cli.
 
     The format kicadsexpr is the netlist of NETLIST_EXPORTER_KICAD, the
@@ -1802,7 +1829,7 @@ async def schematic_footprints(
     root, tops = await asyncio.to_thread(netlist_root, project, kicad)
     # The annotation checks do not need the netlist: they run at the same time.
     netlist, annotation, update = await asyncio.gather(
-        asyncio.to_thread(_board_netlist, root),
+        asyncio.to_thread(board_netlist_text, root),
         _netlist_annotation(root, kicad),
         _update_annotation(project, kicad),
         return_exceptions=True,

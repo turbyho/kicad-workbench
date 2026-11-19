@@ -735,6 +735,8 @@ class TestWithKiCad:
                 PadNumber("3", True),
                 PadNumber("", False),
             ),
+            # GetUniquePadCount: the pads 1, 2 and 3 (the paste pad has no copper).
+            unique_pad_count=3,
             models=(("${KIPRJMOD}/x.step", False),),
             embedded_files=None,
         )

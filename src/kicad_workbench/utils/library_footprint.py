@@ -447,6 +447,8 @@ class FootprintItems:
     """The pads, the 3D models and the embedded files of a footprint, as pcbnew loaded it."""
 
     pads: tuple[PadNumber, ...]
+    # FOOTPRINT::GetUniquePadCount(DO_NOT_INCLUDE_NPTH): the pin count filter of CvPcb.
+    unique_pad_count: int
     models: tuple[tuple[str, bool], ...]  # (FP_3DMODEL::m_Filename, m_Show)
     # The names of the embedded files, or None when the caller did not ask for them.
     embedded_files: tuple[str, ...] | None
@@ -504,6 +506,7 @@ for library, entries in libraries.items():
             text = writer.GetStringOutput(True)
         result[index] = {
             "pads": [[pad.GetNumber(), pad.IsOnCopperLayer()] for pad in footprint.Pads()],
+            "unique_pads": footprint.GetUniquePadCount(pcbnew.DO_NOT_INCLUDE_NPTH),
             "models": models,
             "text": text,
         }
@@ -548,6 +551,7 @@ async def read_footprints(
         footprints.append(
             FootprintItems(
                 pads=tuple(PadNumber(n, c) for n, c in found["pads"]),
+                unique_pad_count=found["unique_pads"],
                 models=tuple((file, shown) for file, shown in found["models"]),
                 embedded_files=(
                     (embedded_file_names(found["text"]) if found["text"] else ())

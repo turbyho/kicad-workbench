@@ -178,9 +178,9 @@ def project(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(args, 0, b"", b"")
 
     two = FootprintItems(
-        (PadNumber("1", True), PadNumber("2", True)), (("${KIPRJMOD}/m.step", True),), ()
+        (PadNumber("1", True), PadNumber("2", True)), 2, (("${KIPRJMOD}/m.step", True),), ()
     )
-    test = FootprintItems((PadNumber("1", True),), (("lost.step", True), ("", True)), ())
+    test = FootprintItems((PadNumber("1", True),), 1, (("lost.step", True), ("", True)), ())
 
     async def read_footprints(items, embedded=False):
         assert embedded

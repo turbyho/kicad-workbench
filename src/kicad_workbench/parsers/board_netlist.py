@@ -71,3 +71,62 @@ def read_board_netlist(text: str) -> list[NetlistComponent]:
                     )
                 )
     return list(components.values())
+
+
+@dataclass(frozen=True)
+class CvpcbPart:
+    """What CvPcb knows of the library symbol of a component: the pin count and the
+    footprint filters (COMPONENT::GetPinCount, GetFootprintFilters)."""
+
+    pin_count: int
+    filters: tuple[str, ...]
+
+
+def read_cvpcb_parts(text: str) -> dict[str, CvpcbPart]:
+    """Return the pin count and the footprint filters of each component of a netlist,
+    by reference, as CvPcb reads them (KICAD_NETLIST_PARSER::parseLibPartList).
+
+    The (libsource (lib ...) (part ...)) of a component names its (libpart ...). A
+    libpart gives its pin count (the number of its (pin ...) items) and its filters
+    (the (fp ...) items that are not empty) to each component of its lib and part, or
+    of one of its (alias ...) names: a later libpart replaces the values of an earlier
+    one. A component of no libpart has no pins and no filters (the COMPONENT
+    constructor).
+
+    Raises:
+        SExprError: The text is not an S-expression.
+    """
+    root = parse(text)
+    sources: dict[str, tuple[str, str]] = {}
+    section = root.first("components")
+    for comp in section.children("comp") if section is not None else []:
+        libsource = comp.first("libsource")
+        source = (
+            (_text(libsource, "lib"), _text(libsource, "part"))
+            if libsource is not None
+            else ("", "")
+        )
+        # GetComponentByReference finds the first component of a reference.
+        sources.setdefault(_text(comp, "ref"), source)
+    parts = dict.fromkeys(sources, CvpcbPart(0, ()))
+    section = root.first("libparts")
+    for libpart in section.children("libpart") if section is not None else []:
+        library, name = _text(libpart, "lib"), _text(libpart, "part")
+        # The parser adds the items of each (footprints ...), (pins ...) and
+        # (aliases ...) of the libpart.
+        filters = tuple(
+            value
+            for footprints in libpart.children("footprints")
+            for fp in footprints.children("fp")
+            if (value := fp.value(0, ""))
+        )
+        count = sum(len(pins.children("pin")) for pins in libpart.children("pins"))
+        names = {name} | {
+            alias.value(0, "")
+            for aliases in libpart.children("aliases")
+            for alias in aliases.children("alias")
+        }
+        for reference, (source_library, source_name) in sources.items():
+            if source_library == library and source_name in names:
+                parts[reference] = CvpcbPart(count, filters)
+    return parts

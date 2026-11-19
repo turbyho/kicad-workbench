@@ -24,8 +24,8 @@ mcp = FastMCP(
       of their symbols, derived symbols, the rename and the delete of their symbols
       and footprints.
     - BOM: the BOM of kicad-cli, and the check of the confirmed MPNs.
-    - Edits: symbols, wires, labels, the fields and the attributes of placed symbols,
-      new projects and boards.
+    - Edits: symbols, wires, labels, the fields, the attributes and the footprints of
+      placed symbols, new projects and boards.
     - Exports: SVG, 3D view, STEP, Gerber.
 
     An error starts with "❌", a warning with "⚠️". When a tool gives a step for the
@@ -66,6 +66,7 @@ mcp.add_middleware(KicadBuildNotes())
 from .tools import (  # noqa: F401, E402
     bom,
     field_check,
+    footprint_assignment,
     hierarchical_analysis,
     ipc,
     jobs,

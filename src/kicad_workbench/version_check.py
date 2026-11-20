@@ -107,10 +107,18 @@ def _same_version(a: str, b: str) -> bool:
         return a == b
 
 
-def restart_reason(running: str = __version__) -> str | None:
+def running_version() -> str:
+    """The version of the code that this process loaded (__version__)."""
+    return __version__
+
+
+def restart_reason(running: str | None = None) -> str | None:
     """The text that tells the user to restart the LLM client, or None: the
-    installed version is not the version that this process loaded. Not for an
-    editable install: its metadata does not follow the source tree."""
+    installed version is not the version that this process loaded (running, or
+    running_version). Not for an editable install: its metadata does not follow the
+    source tree."""
+    if running is None:
+        running = running_version()
     installed = installed_version()
     if (
         installed is None

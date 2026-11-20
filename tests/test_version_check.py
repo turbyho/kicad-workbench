@@ -39,12 +39,15 @@ def cache(tmp_path, monkeypatch):
     monkeypatch.setattr(vc, "_defects", {})
 
 
-def enable(monkeypatch, installed="0.1.0"):
-    """The check applies: no stop in the environment, an install from an index."""
+def enable(monkeypatch, installed="0.1.0", running=None):
+    """The check applies: no stop in the environment, an install from an index. The
+    process runs the version running, or the installed version (no restart note),
+    whatever __version__ is."""
     monkeypatch.delenv(vc.DISABLE_ENV, raising=False)
     monkeypatch.setattr(vc, "is_editable_install", lambda: False)
     monkeypatch.setattr(vc, "runs_installed_code", lambda: True)
     monkeypatch.setattr(vc, "installed_version", lambda: installed)
+    monkeypatch.setattr(vc, "running_version", lambda: running or installed)
     monkeypatch.setattr(vc, "_told", set())
     monkeypatch.setattr(vc, "_defects", {})
 
@@ -345,7 +348,7 @@ async def test_middleware_adds_the_notes_one_time(monkeypatch):
 
 async def test_middleware_with_an_image(monkeypatch):
     # An upgrade while the server runs: the restart note.
-    enable(monkeypatch, installed=f"{__version__}.post1")
+    enable(monkeypatch, installed=f"{__version__}.post1", running=__version__)
     async with Client(server()) as client:
         result = await client.call_tool("image_tool", {})
     kinds = [item.type for item in result.content]

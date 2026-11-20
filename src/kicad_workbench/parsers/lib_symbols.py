@@ -22,9 +22,11 @@ derived symbol, (extends "<parent>"), is its root symbol with these changes
 - All other items come from the root: the units, the pins, the drawings, the
   pin settings, the unit lock and the power flag.
 
-The text of each item stays as it is in the library. Thus KiCad reads it in
-the schematic as in the library, when kicad_versions.symbol_library_problem
-finds no problem for each symbol of the chain.
+The text of each item stays as it is in the chain. With KiCad 10.0 the tools give
+flatten the text of a save of the library in kicad-cli (utils/library_saved.py:
+the texts as KiCad loads them), with KiCad 8 and 9 the text of the file. KiCad
+reads it in the schematic in the same way, when kicad_versions.symbol_library_problem
+finds no problem for each symbol of that chain (library_saved.schematic_chain).
 """
 
 import hashlib
@@ -227,8 +229,26 @@ def read_library(path: Path) -> dict[str, LibrarySymbol]:
         # When the stamp is reliable now, the next read needs no digest.
         _keep(path, (library.stamp, library.digest_to_keep(), cached[2]))
         return cached[2]
+    symbols = _library_symbols(library.files, library.contents)
+    _keep(path, (library.stamp, library.digest_to_keep(), symbols))
+    return symbols
+
+
+def read_library_file(path: Path) -> dict[str, LibrarySymbol]:
+    """Read the symbols of one .kicad_sym file with no cache (for example a temporary
+    file), with the rules of read_library.
+
+    Raises:
+        OSError, KiCadEncodingError, SExprError, KicadParseError, LocaleNumberError: As
+            read_library.
+    """
+    return _library_symbols([path], [path.read_bytes()])
+
+
+def _library_symbols(files: list[Path], contents: list) -> dict[str, LibrarySymbol]:
+    """The symbols of the files of a library (the bytes of each file, or its OSError)."""
     found: dict[str, list[LibrarySymbol]] = {}
-    for file, data in zip(library.files, library.contents, strict=True):
+    for file, data in zip(files, contents, strict=True):
         if isinstance(data, OSError):
             raise data
         text = decode_as_kicad(data, file)
@@ -247,7 +267,6 @@ def read_library(path: Path) -> dict[str, LibrarySymbol]:
         last = versions[-1]
         others = tuple(symbol.file for symbol in versions[:-1])
         symbols[name] = LibrarySymbol(name, last.node, last.file, last.version, others)
-    _keep(path, (library.stamp, library.digest_to_keep(), symbols))
     return symbols
 
 

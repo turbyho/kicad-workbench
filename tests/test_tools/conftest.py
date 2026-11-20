@@ -11,6 +11,12 @@ gives a warning, or an error for a tool that writes. The tests of a tool test it
 on the fixtures as they are, files of KiCad 8, 9 and 10: thus each test gets no check,
 except a test with the marker file_versions (the tests of the check;
 spike/kicad-versions/schematic_versions_check.py compares it with KiCad).
+
+For flatten, the tools of KiCad 10 save a library in kicad-cli first
+(utils/library_saved.py). The tests use the library file as it is (most fixtures are
+not files that KiCad saved, and CI has no KiCad), except a test with the marker
+kicad_save (spike/kicad-versions/library_saved_check.py compares the result with
+KiCad).
 """
 
 import json
@@ -23,9 +29,9 @@ import pytest
 
 from kicad_workbench.parsers import c_numbers
 from kicad_workbench.parsers.sub_symbols import sub_symbol_unit
-from kicad_workbench.utils import file_versions, kicad_cli
+from kicad_workbench.utils import file_versions, kicad_cli, library_saved
 
-from .kicad_stub import TEST_KICAD
+from .kicad_stub import TEST_KICAD, saved_symbols_stub
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +47,12 @@ def _no_file_version_check(request, monkeypatch):
             "check_library_versions",
             lambda kind, libraries, kicad: file_versions.LibraryCheck([], [], set()),
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_library_save(request, monkeypatch):
+    if request.node.get_closest_marker("kicad_save") is None:
+        monkeypatch.setattr(library_saved, "_saved_symbols", saved_symbols_stub)
 
 
 @pytest.fixture

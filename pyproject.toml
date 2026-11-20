@@ -112,4 +112,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "file_versions: the test runs the check of the file versions of the schematics and the boards against the installed KiCad (utils/file_versions.py)",
+    "kicad_save: the test saves the libraries in kicad-cli for flatten (utils/library_saved.py)",
 ]

@@ -180,10 +180,10 @@ class TestVersions:
 def library(tmp_path, monkeypatch):
     """Give add_component_from_library a library "Device" of a file version."""
 
-    def make(version: int, **parts):
+    def make(version: int, kicad: str = "10.0.6", **parts):
         path = tmp_path / "Device.kicad_sym"
         path.write_text(library_text(version, **parts), encoding="utf-8")
-        use_global_table(tmp_path, monkeypatch, row("Device", path))
+        use_global_table(tmp_path, monkeypatch, row("Device", path), kicad=kicad)
         return path
 
     return make
@@ -212,22 +212,44 @@ class TestComponent:
             assert token in content
         assert "(version 20260306)" in content
 
+    # The installed KiCad of each case: KiCad 10.0 saves the library symbols in
+    # kicad-cli first (library_saved), thus the conversions apply to the text of the
+    # file only with KiCad 8 and 9 and with a nightly build (test_library_saved.py: a
+    # KiCad 8 or 9 symbol with "~" goes into a KiCad 10 schematic).
     @pytest.mark.parametrize(
-        "library_version, parts, schematic_version, advice",
+        "library_version, parts, schematic_version, kicad, advice",
         [
-            (20251024, {}, 20250114, "Open the schematic in KiCad 10.0 and save it"),
-            (20231120, {"pin_name": "~"}, 20260306, "Use a symbol library of KiCad 10.0."),
-            (20251024, {"font": BOLD}, 20261025, "Use a symbol library of the nightly build"),
+            (20251024, {}, 20250114, "9.0.9", "Open the schematic in KiCad 10.0 and save it"),
+            (
+                20231120,
+                {"sub_symbols": BARE_BAR},
+                20250114,
+                "9.0.9",
+                "Use a symbol library of KiCad 9.0.",
+            ),
+            (
+                20251024,
+                {"font": BOLD},
+                20261025,
+                "10.99.0",
+                "Use a symbol library of the nightly build",
+            ),
             # A nightly build of KiCad 9 between two releases.
-            (20231120, {"sub_symbols": BARE_BAR}, 20240620, "of the nightly build"),
+            (20231120, {"sub_symbols": BARE_BAR}, 20240620, "9.0.9", "of the nightly build"),
             # A nightly library that is older than the nightly schematic.
-            (20260500, {"font": BOLD}, 20261025, "Use a symbol library of the nightly build"),
+            (
+                20260500,
+                {"font": BOLD},
+                20261025,
+                "10.99.0",
+                "Use a symbol library of the nightly build",
+            ),
         ],
     )
     def test_symbol_that_reads_in_a_different_way_is_refused(
-        self, tmp_path, library, library_version, parts, schematic_version, advice
+        self, tmp_path, library, library_version, parts, schematic_version, kicad, advice
     ):
-        library(library_version, **parts)
+        library(library_version, kicad=kicad, **parts)
         sch = write_schematic(tmp_path, schematic_version)
         before = sch.read_text(encoding="utf-8")
         result = add_resistor(sch)

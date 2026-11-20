@@ -129,7 +129,10 @@ def symbol_copy(
     """The symbols that "Save As" writes into the target (DoSave).
 
     Args:
-        chain: The symbol and its parents (symbol_chain), in the version of the target.
+        chain: The symbol and its parents (symbol_chain), in the version of the target,
+            as KiCad loads them (a save in kicad-cli: library_saved, or the conversion
+            of an older library). The Value follows the name when the Value of this
+            text is equal to the name (valueFollowsName of DoSave).
         new_name: The name of the leaf (dialog_symbol_name).
         same_library: The target is the library of the symbol.
         flatten_symbol: The "Flatten" check box.

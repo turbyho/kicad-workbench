@@ -370,17 +370,12 @@ _BAR_LIBRARY = 20240529
 _BAR_SCHEMATIC = 20240620
 
 
-def symbol_library_problem(symbol: Node, library: int | None, schematic: int) -> str | None:
-    """Return why a symbol of a library cannot go into a schematic, or None.
+def library_version_problem(library: int | None, schematic: int) -> str | None:
+    """Return why the file version of a symbol library does not fit a schematic, or None.
 
     Args:
-        symbol: The (symbol ...) of the library.
         library: The file version of the symbol library, or None.
         schematic: The file version of the schematic.
-
-    Raises:
-        KicadParseError: KiCad cannot read the name of a sub-symbol.
-        LocaleNumberError: A number of such a name depends on the locale of KiCad.
     """
     if library is None:
         return "The symbol library has no file version, (version N)."
@@ -395,6 +390,27 @@ def symbol_library_problem(symbol: Node, library: int | None, schematic: int) ->
             f"the schematic ({schematic}). The KiCad version of the schematic cannot "
             "read the symbol."
         )
+    return None
+
+
+def symbol_library_problem(symbol: Node, library: int | None, schematic: int) -> str | None:
+    """Return why a symbol of a library cannot go into a schematic, or None.
+
+    The symbol is the text that goes into the schematic: KiCad reads it there with the
+    version of the schematic (library_version_problem, then the conversions).
+
+    Args:
+        symbol: The (symbol ...) of the library.
+        library: The file version of the symbol library, or None.
+        schematic: The file version of the schematic.
+
+    Raises:
+        KicadParseError: KiCad cannot read the name of a sub-symbol.
+        LocaleNumberError: A number of such a name depends on the locale of KiCad.
+    """
+    problem = library_version_problem(library, schematic)
+    if problem is not None:
+        return problem
     reasons = [
         f"for a file version before {version}, {meaning}"
         for version, applies, meaning in _SYMBOL_CONVERSIONS

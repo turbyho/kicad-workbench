@@ -37,7 +37,7 @@ from ..parsers.kicad_fields import (
     WX_SPACE,
     rules_for_version,
 )
-from ..parsers.kicad_versions import KicadFileError, symbol_library_problem
+from ..parsers.kicad_versions import KicadFileError
 from ..parsers.lib_symbols import (
     flatten,
     mandatory_name,
@@ -80,6 +80,7 @@ from ..utils.kicad_lock import write_schematics
 from ..utils.kicad_text import KiCadEncodingError
 from ..utils.library_copy import escape_lib_id
 from ..utils.library_lookup import LibraryLookupError, find_library_symbol
+from ..utils.library_saved import SavedLibraryError, SymbolLibraryError, schematic_chain
 from ..utils.sch_hierarchy import AmbiguousRootError, schematic_project_file
 from ..utils.symbol_update import (
     FieldState,
@@ -234,7 +235,8 @@ def _update_pins(pins: list[_Pin], new: list[_LibPin]) -> list[_Pin]:
 
     KiCad keeps the pins in sets of pointers: the order in which a library pin with no
     pin of its number takes an unused pin of the file, and the order of the new pins,
-    is the order in memory. The tool uses the order of the files.
+    is the order in memory. The tool uses the order of the placed pins in the file, and
+    of the library pins in the save of KiCad (library_saved).
     """
     by_number: dict[str, list[_Pin]] = {}
     for pin in pins:
@@ -630,14 +632,20 @@ def _definition(
         warnings = file_versions.check_library_files("symbol", {row.path: files}, kicad)
     except (LibraryLookupError, file_versions.FileVersionError) as e:
         raise InputError(f"{_label(item)}: KiCad does not find the symbol: {e}") from e
-    for symbol in chain:
-        problem = symbol_library_problem(symbol.node, symbol.version, version)
-        if problem is not None:
-            raise InputError(f"{_label(item)}: {problem}")
+    try:
+        # flatten copies the text of the file: the text of a save in KiCad, which KiCad
+        # must read in the schematic in the same way (library_saved.schematic_chain).
+        saved = schematic_chain(chain, row.path, kicad, version)
+    except SymbolLibraryError as e:
+        raise InputError(f"{_label(item)}: {e.problem}") from e
+    except (KicadFileError, SavedLibraryError) as e:
+        raise InputError(
+            f"{_label(item)}: the library symbol {item.lib_id} of {row.path}: {e}"
+        ) from e
     library_warnings.extend(w for w in warnings if w not in library_warnings)
     problems.extend(p for p in table_problems if p not in problems)
     try:
-        text = flatten(chain, item.lib_id, rules_for_version(version).kicad)
+        text = flatten(saved, item.lib_id, rules_for_version(version).kicad)
         node = parse(text)
         # KicadParseError (a sub-symbol name) is a KicadFileError.
         item.definition = _Definition(
@@ -1081,12 +1089,16 @@ async def update_symbols_from_library(
     Each matching symbol gets the library symbol of its library ID (from the global and
     the project symbol library tables, flattened): the new shape and pins, the keywords
     and the footprint filters (always, as the dialog). The fields, the attributes and the
-    alternate pins follow the options, with the defaults of the dialog.
+    alternate pins follow the options, with the defaults of the dialog. The library
+    symbol is the text of a save in kicad-cli, as KiCad loads it: kicad-cli saves each
+    library symbol with its parents one time (about 0.2 s), and again after a change of
+    their text; a cache keeps the last 256 saves.
 
     The pins follow the new library symbol (SCH_SYMBOL::UpdatePins): a pin keeps its
     UUID when the library symbol has its number; a new pin gets a new UUID, and a pin
     that the library symbol does not have goes. KiCad makes random UUIDs, and the order
-    of a new pin comes from the memory: the tool uses the order of the files.
+    of a new pin comes from the memory: the tool uses the order of the placed pins in
+    the file and of the library pins in the save of KiCad.
 
     The fields of the update (fields): with no list, the dialog defaults: Footprint,
     Datasheet and Description, and each user field of the matching symbols and of their

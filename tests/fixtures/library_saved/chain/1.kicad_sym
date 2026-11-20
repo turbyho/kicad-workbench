@@ -1,0 +1,3 @@
+(kicad_symbol_lib (version 20251024) (generator "kicad_symbol_editor") (generator_version "10.0")
+(symbol "P" (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27)))) (property "value" "P" (at 0 0 0) (effects (font (size 1.27 1.27)))) (property "Footprint" " Pkg:SOT23 " (at 0 0 0) (effects (font (size 1.27 1.27)))) (property "MPN" "a" (at 0 0 0) (effects (font (size 1.27 1.27)))) (property "MPN" "b" (at 0 0 0) (effects (font (size 1.27 1.27)))) (symbol "P_1_1" (pin passive line (at 0 0 0) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))) (embedded_fonts no))
+)

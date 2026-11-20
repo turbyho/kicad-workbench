@@ -1,7 +1,8 @@
 """Test schematics of a file version, and the version of the installed KiCad.
 
 add_component_from_library puts a symbol into a schematic only when KiCad reads
-it there as in the library (kicad_versions.symbol_library_problem). Thus a test
+it there in the same way (kicad_versions.symbol_library_problem, on the text of a
+save of the library with KiCad 10.0: library_saved.schematic_chain). Thus a test
 that adds a symbol of the installed libraries uses a schematic of their release.
 """
 

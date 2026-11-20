@@ -20,7 +20,6 @@ from ..parsers.kicad_versions import (
     kicad_release,
     release_of_schematic,
     release_of_symbol_library,
-    symbol_library_problem,
 )
 from ..parsers.lib_symbols import (
     LibraryPin,
@@ -88,6 +87,7 @@ from ..utils.kicad_project import (
     PRO_SUFFIX,
 )
 from ..utils.library_lookup import LibraryLookupError, find_library_symbol
+from ..utils.library_saved import SavedLibraryError, SymbolLibraryError, schematic_chain
 from ..utils.sch_hierarchy import (
     AmbiguousRootError,
     SheetPath,
@@ -354,13 +354,8 @@ def _field_error(field: str, value: str) -> str | None:
     return None
 
 
-def _library_error(
-    library: Path, symbol: Node, library_version: int | None, version: int
-) -> str | None:
-    """Return an error if a symbol of a library cannot go into a schematic, else None."""
-    problem = symbol_library_problem(symbol, library_version, version)
-    if problem is None:
-        return None
+def _library_error(library: Path, problem: str, library_version: int | None, version: int) -> str:
+    """Return the error for the problem of a symbol of a library (SymbolLibraryError)."""
     newest = RELEASES[-1]
     if is_release_schematic(version):
         own = f"a symbol library of KiCad {release_of_schematic(version).name}"
@@ -396,14 +391,14 @@ def _library_definition(
         warnings = file_versions.check_library_files("symbol", {row.path: files}, kicad)
     except (LibraryLookupError, FileVersionError) as e:
         return f"{error} {e}"
-    # Each symbol of the chain goes into the schematic in the format of its
-    # library file. KiCad must read it there in the same way.
+    # flatten copies the text of the file: the text of a save in KiCad 10, which KiCad
+    # must read in the schematic in the same way (library_saved.schematic_chain).
     try:
-        for symbol in chain:
-            if library_error := _library_error(symbol.file, symbol.node, symbol.version, version):
-                return library_error
-        text = flatten(chain, lib_id, rules_for_version(version).kicad)
-    except KicadFileError as e:
+        saved = schematic_chain(chain, row.path, kicad, version)
+        text = flatten(saved, lib_id, rules_for_version(version).kicad)
+    except SymbolLibraryError as e:
+        return _library_error(e.symbol.file, e.problem, e.symbol.version, version)
+    except (KicadFileError, SavedLibraryError) as e:
         return f"{error} {e}"
     record_library_warnings(warnings)
     return indent(text, 2), row.path, problems
@@ -1460,6 +1455,13 @@ async def add_component_from_library(
     exclude_from_sim, in_bom, on_board and in_pos_files of the library symbol,
     and the reference of its sheet path, as KiCad places a symbol. The tool
     does not move the fields (KiCad: autoplace).
+
+    With KiCad 10.0, the copy of the library symbol and its fields are the text of a
+    save of the library in kicad-cli (a library that KiCad did not save gets the
+    texts of KiCad: no blanks at the ends of a mandatory field, the canonical field
+    names, "<name>_1" for a second field of one name). kicad-cli saves the symbol
+    with its parents one time (about 0.2 s), and again after a change of their text; a
+    cache keeps the last saves.
 
     The connection grid is schematic.connection_grid_size of the project file
     (default 1.27 mm). ERC finds a pin off this grid (endpoint_off_grid).

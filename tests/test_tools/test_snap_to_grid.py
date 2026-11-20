@@ -147,7 +147,8 @@ class TestSymbol:
         library.write_text(
             LIBRARY.replace("(version 20251024)", "(version 20231120)"), encoding="utf-8"
         )
-        use_global_table(tmp_path, monkeypatch, row("Device", library))
+        # The files of KiCad 8: the installed KiCad 8 uses the text of the library.
+        use_global_table(tmp_path, monkeypatch, row("Device", library), kicad="8.0.9")
         sch = write_schematic(tmp_path, 20231120)
         result = add(sch, "NC")
         assert (

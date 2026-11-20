@@ -63,12 +63,15 @@ def device_library(tmp_path, monkeypatch):
     """A symbol library 'Device' with the symbol 'R', also without KiCad.
 
     add_component_from_library reads the symbol before it writes. Without a
-    library, it stops before the guard.
+    library, it stops before the guard. The library and the schematics are files of
+    KiCad 9, thus the installed KiCad is KiCad 9 (no save of the library in kicad-cli).
     """
     library_dir = tmp_path / "symbols"
     library_dir.mkdir()
     (library_dir / "Device.kicad_sym").write_text(DEVICE_LIBRARY, encoding="utf-8")
-    use_global_table(tmp_path, monkeypatch, row("Device", library_dir / "Device.kicad_sym"))
+    use_global_table(
+        tmp_path, monkeypatch, row("Device", library_dir / "Device.kicad_sym"), kicad="9.0.9"
+    )
 
 
 @pytest.fixture

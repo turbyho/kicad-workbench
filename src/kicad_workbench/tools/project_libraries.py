@@ -55,6 +55,7 @@ from ..utils.library_rename import (
     renamed_symbol_name,
     symbol_in_use,
 )
+from ..utils.library_saved import saved_chain
 from ..utils.library_symbol_fields import change_fields, symbol_editor_text_size, text_problem
 from ..utils.library_tables import (
     LibraryRow,
@@ -971,6 +972,12 @@ def _copy_symbol(
                     "has no verified rules for its conversion."
                 )
             chain = symbol_chain(symbols_in_version(row.path, Path(work), written), name)
+        else:
+            # DoSave uses the symbols as KiCad loads them: the Value that follows the
+            # name (valueFollowsName compares the loaded Value field) and the fields
+            # of the parents of flatten. The copy gets them from a save in kicad-cli
+            # (library_saved); the conversion above is a save in kicad-cli too.
+            chain = saved_chain(chain, row.path, context.kicad)
         copy = symbol_copy(chain, leaf_name, same, flatten_symbol)
         conflicts = symbol_conflicts(copy, target_symbols, chain, same)
         if conflicts and not overwrite:
@@ -1069,11 +1076,19 @@ async def copy_symbol_to_library(
     To an other library, a derived symbol goes with its parents (KiCad copies the full
     parent chain; only the symbol gets the new name). flatten=True saves only the
     flattened symbol, as the "Flatten" check box. The Value gets the new name when it
-    was equal to the old name. KiCad saves the library (kicad-cli), and a second save
-    must give the same bytes. The target must be a symbol library file of the project
-    table in the version of the installed KiCad (else: upgrade_project_libraries
-    first). KiCad must not have the project open. The installed KiCad must be KiCad
-    10.0.
+    was equal to the old name.
+
+    The copy starts from the symbols as KiCad loads them: the text of a save of the
+    library in kicad-cli (about 0.2 s, a cache keeps the last saves). Thus a library
+    that KiCad did not save gives the texts of KiCad: no blanks at the ends of a
+    mandatory field, the canonical field names ("value" is "Value"), "<name>_1" for a
+    second field of one name. The Value follows the new name also when the file has
+    "value" or blanks at the ends of the old name. KiCad saves the library
+    (kicad-cli), and a second save must give the same bytes.
+
+    The target must be a symbol library file of the project table in the version of
+    the installed KiCad (else: upgrade_project_libraries first). KiCad must not have
+    the project open. The installed KiCad must be KiCad 10.0.
 
     Args:
         project_path: The .kicad_pro file or the project folder.

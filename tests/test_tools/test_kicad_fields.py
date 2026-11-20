@@ -15,6 +15,7 @@ from kicad_workbench.parsers.kicad_fields import (
     record_field_rules,
     rules_for_file,
     sheet_fields,
+    symbol_field_props,
     symbol_fields,
     symbol_user_fields,
     with_field_rules_note,
@@ -369,6 +370,40 @@ class TestUserFields:
         symbol = item("symbol", '"MPN" "~"')
         assert symbol_user_fields(symbol, FieldRules(10, 20231120)) == [("MPN", "")]
         assert symbol_user_fields(symbol, KICAD_10) == [("MPN", "~")]
+
+
+class TestFieldProps:
+    """symbol_field_props: a field by its name as KiCad 10.0.6 loads it
+    (parseSchematicSymbol)."""
+
+    def test_a_second_field_of_one_name(self):
+        symbol = item("symbol", '"MPN" "A"', '"MPN" "B"')
+        a, b = symbol.children("property")
+        assert symbol_field_props(symbol, "MPN", KICAD_10) == ("MPN", [a])
+        assert symbol_field_props(symbol, "MPN_1", KICAD_10) == ("MPN_1", [b])
+        assert symbol_field_props(symbol, "MPN_2", KICAD_10) == ("MPN_2", [])
+
+    def test_a_mandatory_field_has_its_canonical_name_and_each_property(self):
+        symbol = item("symbol", '"value" "A"', '"Value" "B"')
+        assert symbol_field_props(symbol, "Value", KICAD_10) == (
+            "Value",
+            symbol.children("property"),
+        )
+
+    def test_two_fields_of_one_name_after_nine_free_names(self):
+        names = ['"MPN" "0"'] + [f'"MPN_{i}" "{i}"' for i in range(1, 10)]
+        symbol = item("symbol", *names, '"MPN" "last"')
+        props = symbol.children("property")
+        # The field MPN_9 gets the name "MPN" (symbol_user_field_nodes).
+        assert symbol_field_props(symbol, "MPN", KICAD_10) == ("MPN", [props[0], props[10]])
+        assert symbol_field_props(symbol, "MPN_9", KICAD_10) == ("MPN_9", [])
+
+    def test_kicad_8_and_9_use_the_names_of_the_file(self):
+        symbol = item("symbol", '"MPN" "A"', '"MPN" "B"', '"value" "C"')
+        props = symbol.children("property")
+        assert symbol_field_props(symbol, "MPN", KICAD_9) == ("MPN", props[:2])
+        assert symbol_field_props(symbol, "MPN_1", KICAD_9) == ("MPN_1", [])
+        assert symbol_field_props(symbol, "Value", KICAD_9) == ("Value", [])
 
 
 class TestMandatoryText:

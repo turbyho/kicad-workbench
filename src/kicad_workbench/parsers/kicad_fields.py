@@ -222,7 +222,16 @@ def symbol_user_fields(symbol: Node, rules: FieldRules) -> list[tuple[str, str]]
     """Return the user fields of a placed symbol as KiCad 10 loads them
     (SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol): (name, text), in the order of
     the file. None for KiCad 8 and 9: the server has no rules of their user fields
-    (new work has the rules of KiCad 10 only).
+    (new work has the rules of KiCad 10 only). symbol_user_field_nodes gives the rules.
+    """
+    fields = symbol_user_field_nodes(symbol, rules)
+    return None if fields is None else [(name, text) for name, text, _prop in fields]
+
+
+def symbol_user_field_nodes(symbol: Node, rules: FieldRules) -> list[tuple[str, str, Node]] | None:
+    """Return the user fields of a placed symbol as KiCad 10 loads them
+    (SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol): (name, text, the (property ...)
+    that sets the field), in the order of the file. None for KiCad 8 and 9.
 
     - A mandatory field (_symbol_field_id) is not a user field. The fields of the old
       simulation flag are no fields.
@@ -236,9 +245,9 @@ def symbol_user_fields(symbol: Node, rules: FieldRules) -> list[tuple[str, str]]
     """
     if rules.kicad != 10:
         return None
-    fields: list[tuple[str, str]] = []
+    fields: list[tuple[str, str, Node]] = []
     count: dict[str, int] = {}
-    for name, value, id_in_file, _prop in _properties(symbol):
+    for name, value, id_in_file, prop in _properties(symbol):
         if name in SIM_LEGACY_FIELDS or _symbol_field_id(name, id_in_file, rules) is not None:
             continue
         text = name if GENERATED_FIELD.fullmatch(name) else file_text(value, rules.file_version)
@@ -249,12 +258,37 @@ def symbol_user_fields(symbol: Node, rules: FieldRules) -> list[tuple[str, str]]
                 index = next(i for i, field in enumerate(fields) if field[0] == f"{name}_9")
                 count[f"{name}_9"] -= 1
                 count[name] += 1
-                fields[index] = (name, text)
+                fields[index] = (name, text, prop)
                 continue
             name = free
         count[name] = count.get(name, 0) + 1
-        fields.append((name, text))
+        fields.append((name, text, prop))
     return fields
+
+
+def symbol_field_props(symbol: Node, name: str, rules: FieldRules) -> tuple[str, list[Node]]:
+    """Return a field of a placed symbol by its name as KiCad loads it: (the name of the
+    field in KiCad, the (property ...) items that set it, in the order of the file).
+
+    KiCad 10: a mandatory field has its canonical name, and each property of the field
+    sets it (parseSchematicSymbol: *existing = *field, thus the last one stays). A user
+    field has the name of symbol_user_field_nodes (a second "MPN" is "MPN_1"). KiCad 8
+    and 9: the properties with the exact name (the server has no rules of their user
+    fields). A field that the symbol does not have gives (name, []).
+    """
+    if rules.kicad != 10:
+        props = [prop for field, _v, _i, prop in _properties(symbol) if field == name]
+        return name, props
+    field_id = _symbol_field_id(name, None, rules)
+    if field_id is not None:
+        props = [
+            prop
+            for field, _v, id_in_file, prop in _properties(symbol)
+            if _symbol_field_id(field, id_in_file, rules) == field_id
+        ]
+        return SYMBOL_FIELD_NAMES[field_id], props
+    fields = symbol_user_field_nodes(symbol, rules) or []
+    return name, [prop for field, _text, prop in fields if field == name]
 
 
 def _sheet_field_id_v9(name: str, id_in_file: int | None) -> int:

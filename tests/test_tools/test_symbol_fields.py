@@ -180,6 +180,49 @@ class TestSymbolFields:
             '(property "MPN" "X"'
         ) == 2
 
+    async def test_the_names_of_the_fields_as_kicad_loads_them(self, tmp_path):
+        # KiCad 10 loads a second "MPN" as "MPN_1" (parseSchematicSymbol), as
+        # get_symbol_details gives it.
+        second = '\t\t(property "MPN" "B"\n\t\t\t(at 100 50 0)\n\t\t\t(hide yes)\n\t\t)\n'
+        text = symbol("U1", 1, mpn="A").replace("\t\t(instances", second + "\t\t(instances", 1)
+        path = write_project(tmp_path, text)
+        out = await write(path, FieldChange(reference="U1", fields={"MPN_1": "Y"}))
+        assert "| U1 | A | - | MPN_1 | B | Y | board.kicad_sch |" in out, out
+        text = path.read_text(encoding="utf-8")
+        assert '(property "MPN" "A"' in text and '(property "MPN" "Y"' in text
+        assert "MPN_1" not in text
+        out = await write(path, FieldChange(reference="U1", fields={"MPN": "X"}))
+        assert "| U1 | A | - | MPN | A | X | board.kicad_sch |" in out, out
+        text = path.read_text(encoding="utf-8")
+        assert '(property "MPN" "X"' in text and '(property "MPN" "Y"' in text
+        # A variant has the name of the loaded field (GetName).
+        out = await write(path, FieldChange(reference="U1", fields={"MPN_1": "P"}, variant="Pro"))
+        assert "| U1 | A | Pro | MPN_1 | Y | P | board.kicad_sch |" in out, out
+        assert '(name "MPN_1")' in path.read_text(encoding="utf-8")
+
+    async def test_a_variant_of_a_mandatory_field_has_its_canonical_name(self, tmp_path):
+        # KiCad 10 loads "value" as the Value field, and a variant finds a mandatory
+        # field by its canonical name (SCH_FIELD::GetName, GetCanonicalFieldName).
+        text = symbol("U1", 1).replace('(property "Value" "LM358"', '(property "value" "LM358"', 1)
+        path = write_project(tmp_path, text)
+        out = await write(
+            path, FieldChange(reference="U1", fields={"Value": "TL072"}, variant="Pro")
+        )
+        assert "| U1 | A | Pro | Value | LM358 | TL072 | board.kicad_sch |" in out, out
+        text = path.read_text(encoding="utf-8")
+        assert '(name "Value")' in text and '(name "value")' not in text
+
+    async def test_two_values_are_refused(self, tmp_path):
+        # Each property of a mandatory field sets the field (the last one stays).
+        text = symbol("U1", 1).replace(
+            '\t\t(property "Value" "LM358"',
+            '\t\t(property "value" "X")\n\t\t(property "Value" "LM358"',
+            1,
+        )
+        path = write_project(tmp_path, text)
+        out = await write(path, FieldChange(reference="U1", fields={"Value": "TL072"}))
+        assert out.startswith("❌ The symbol U1A has the field 'Value' more than one time"), out
+
     async def test_variant(self, tmp_path):
         lite = (
             '\t\t\t\t\t(variant\n\t\t\t\t\t\t(name "Lite")\n\t\t\t\t\t\t(dnp yes)\n'

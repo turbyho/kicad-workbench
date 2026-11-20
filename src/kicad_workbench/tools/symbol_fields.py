@@ -53,6 +53,7 @@ from ..parsers.kicad_fields import (
     SYMBOL_FIELD_NAMES,
     WX_SPACE,
     is_mandatory_property,
+    symbol_field_props,
 )
 from ..parsers.kicad_versions import (
     EMPTY_TEXT_MARKER,
@@ -217,21 +218,6 @@ def symbol_tokens(symbol: Node, where: str) -> dict[str, bool]:
         if node is not None:
             tokens[token] = parse_bool(node, where)
     return tokens
-
-
-def _field_nodes(symbol: Node, name: str, kicad: int) -> list[Node]:
-    """Return the (property ...) of a field of a symbol: the exact name
-    (SCH_SYMBOL::GetField), and a mandatory field with no difference of case in
-    KiCad 10 (parseSchField)."""
-    mandatory = kicad == 10 and name.lower() in (n.lower() for n in SYMBOL_FIELD_NAMES)
-    nodes = []
-    for prop in symbol.children("property"):
-        field = property_field(prop)
-        if field is not None and (
-            field[0] == name or (mandatory and field[0].lower() == name.lower())
-        ):
-            nodes.append(prop)
-    return nodes
 
 
 def _field_text(prop: Node, record: SchematicFile) -> str:
@@ -791,8 +777,10 @@ def _plan_symbol(
     symbol = instance.symbol
     texts = base.setdefault(instance.key, {})
     new_props = []
-    for name, value in change.fields.items():
-        nodes = _field_nodes(symbol, name, record.kicad)
+    for requested, value in change.fields.items():
+        # The name as KiCad loads the field: get_symbol_details gives these names (a
+        # second "MPN" of the file is "MPN_1").
+        name, nodes = symbol_field_props(symbol, requested, record.rules)
         if len(nodes) > 1:
             raise InputError(
                 f"The symbol {instance.reference}{unit_text} has the field {name!r} more than "
@@ -809,7 +797,7 @@ def _plan_symbol(
                     file_edits.append((atoms[0].end, atoms[0].end, " " + quote(value)))
         else:
             before = None
-            new_props.append(_new_property(symbol, name, value, size, record.version))
+            new_props.append(_new_property(symbol, requested, value, size, record.version))
         texts[name] = value
         rows.append(
             _Row(
@@ -853,10 +841,15 @@ def _plan_variant(
     tokens, fields = state.new.get(change.variant, ({}, {}))
     texts = base.get(instance.key, {})
     for requested, value in change.fields.items():
-        nodes = _field_nodes(instance.symbol, requested, record.kicad)
+        name, nodes = symbol_field_props(instance.symbol, requested, record.rules)
+        if len(nodes) > 1:
+            raise InputError(
+                f"The symbol {label} has the field {name!r} more than one time. Correct it in "
+                "KiCad first."
+            )
         if nodes:
-            # KiCad finds the field of a variant by the name of the field (GetName).
-            name = property_field(nodes[0])[0]  # type: ignore[index]
+            # KiCad finds the field of a variant by the name of the field as KiCad
+            # loads it (GetName).
             symbol_text = texts.get(name, _field_text(nodes[0], record))
         elif requested in texts:  # a new field of the symbol in this call
             name, symbol_text = requested, texts[requested]
@@ -1049,7 +1042,7 @@ def _plan_footprint_symbol(
             f"The symbol {label} has no library symbol in the schematic: CvPcb does not list "
             "it (SCH_SHEET_PATH::AppendSymbol). Repair the symbol in KiCad first."
         )
-    nodes = _field_nodes(instance.symbol, "Footprint", record.kicad)
+    _name, nodes = symbol_field_props(instance.symbol, "Footprint", record.rules)
     if len(nodes) != 1:
         problem = "no Footprint field" if not nodes else "the Footprint field more than one time"
         raise InputError(
@@ -1293,10 +1286,17 @@ async def set_symbol_fields(schematic_path: str, changes: list[FieldChange]) -> 
     The tool refuses a reference that is not annotated (U?), a duplicate reference,
     the field Reference, a mandatory field name in an other case ("value": give
     "Value"), the fields Sim.Enable and Spice_Netlist_Enabled (KiCad removes them when
-    it loads the symbol), a symbol that has a field name more than one time, a file
-    that KiCad loads under more than one name, and a project whose full sheet
-    hierarchy the tool cannot read. An error gives the reason, and the step in KiCad
-    when one is necessary.
+    it loads the symbol), a symbol with two fields of one name (a mandatory field
+    two times, or more than ten user fields of one name), a file that KiCad loads
+    under more than one name, and a project whose full sheet hierarchy the tool
+    cannot read. An error gives the reason, and the step in KiCad when one is
+    necessary.
+
+    With KiCad 10, the field names are the names that KiCad gives the fields when it
+    loads the symbol, as get_symbol_details gives them: a second field "MPN" of the
+    file has the name "MPN_1" (to "MPN_9"). Give that name to write that field: the
+    tool changes its text and keeps its name in the file (KiCad writes "MPN_1" at its
+    next save). With KiCad 8 and 9, the names are the names of the file.
 
     A new field has the position of the symbol and the angle of the Reference field,
     as KiCad adds it. In a file of KiCad 8, a new field is visible on the body of the

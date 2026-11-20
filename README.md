@@ -25,7 +25,7 @@ the rules of the existing tools for KiCad 8 and 9 with KiCad 8.0.9 and 9.0.9.
   variant of KiCad 10), checks the MPN fields of the symbols, and writes the
   confirmed fields into the schematic.
 
-Status: in development (version 0.1). The tools work and have tests. The interfaces
+Status: in development (version 0.2). The tools work and have tests. The interfaces
 can change.
 
 ## Datasheets of the project with datasheet-lens
@@ -114,7 +114,7 @@ the MCP client (60 s in Claude Desktop) does not lose its result: `job_status` g
 - KiCad 10 or later, with kicad-cli: the supported version. The existing tools also
   work with KiCad 8 and 9, as before. New features are for KiCad 10 and later only:
   with KiCad 8 or 9, such a tool gives an error. The live board tools (`ipc_*`)
-  need a running KiCad 10.
+  need a running KiCad 10.0.6: the server has IPC rules only for this version.
 - Python 3.10 or later.
 - For exact board data: a Python that can import the module `pcbnew` of KiCad.
   Without it, the board tools (footprints, statistics, tracks, nets, zones) read the

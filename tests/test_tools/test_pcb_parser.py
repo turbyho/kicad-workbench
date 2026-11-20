@@ -284,7 +284,7 @@ def test_only_boards_of_kicad_8_to_10(tmp_path, version):
     path = tmp_path / "board.kicad_pcb"
     path.write_text(f"(kicad_pcb (version {version}))", encoding="utf-8")
     with pytest.raises(KicadFileError, match=f"file version {version}"):
-        PCBParser(str(path)).get_statistics()
+        PCBParser(str(path)).get_tracks()
 
 
 def test_kicad6_fields():
@@ -297,9 +297,10 @@ def test_kicad6_fields():
 def test_statistics(tmp_path):
     path = tmp_path / "board.kicad_pcb"
     path.write_text(KICAD9, encoding="utf-8")
-    stats = PCBParser(str(path)).get_statistics()
-    assert stats["total_tracks"] == 2 and stats["total_vias"] == 1
-    assert stats["total_pads"] == 2 and stats["layers"] == 4
+    parser = PCBParser(str(path))
+    assert len(parser.get_tracks()) == 2 and len(parser.get_vias()) == 1
+    assert sum(f.pad_count for f in parser.get_footprints()) == 2
+    assert parser.get_copper_layer_count() == 4
 
 
 def test_file_that_is_not_an_s_expression(tmp_path):

@@ -26,11 +26,13 @@
   `analyze_pcb_nets`, `analyze_pcb_signal_integrity`, `analyze_pcb_power_integrity`).
   These tools import `pcbnew` in the server process. Without it (but with KiCad
   installed), they read the board file as text, and their answer has a warning with
-  the limits: `get_pcb_statistics` gives no board outline and no design rules,
-  `analyze_pcb_nets` and `analyze_pcb_signal_integrity` give no design rules, and
-  `analyze_pcb_power_integrity` gives no fill state of the zones. When the server
-  process finds `pcbnew` but cannot import it (for example a build for an other
-  Python), the board tools give an error, not a text result.
+  the limits: `get_pcb_statistics` gives no board outline, no net count and no design
+  rules, `analyze_pcb_nets` gives no board outline and no design rules,
+  `analyze_pcb_signal_integrity` gives no design rules, and `find_tracks_by_net` and
+  `analyze_pcb_power_integrity` give no fill state of the zones. All other parts of
+  the answers are the same as with `pcbnew`. When the server process finds `pcbnew`
+  but cannot import it (for example a build for an other Python), the board tools
+  give an error, not a text result.
 
 Other tools also use `pcbnew`: `get_library_footprint`, `check_pin_pad_mapping`,
 `check_schematic_pin_pad_mapping`, `check_library_links` and

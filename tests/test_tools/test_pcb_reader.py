@@ -93,7 +93,7 @@ def test_no_kicad_is_an_error(pcbnew_not_importable, monkeypatch, tool, kwargs):
 def test_the_limits_of_each_tool(no_pcbnew):
     assert run("list_pcb_footprints", BOARD).endswith("not with pcbnew of KiCad.")
     stats = run("get_pcb_statistics", BOARD)
-    assert stats.endswith(": no board outline, no design rules.")
+    assert stats.endswith(": no board outline, no net count, no design rules.")
     # No size guess from the footprint positions.
     assert "**Dimensions:** not known" in stats
 
@@ -154,6 +154,58 @@ def test_the_two_readers_give_the_same_footprints(tmp_path, monkeypatch, kicad_v
     monkeypatch.setitem(sys.modules, "pcbnew", None)
     assert _footprint_rows(run("list_pcb_footprints", board)) == with_pcbnew
     assert len(with_pcbnew) == 2
+
+
+# The lines that only pcbnew gives (the limits of the text reader in each warning).
+PCBNEW_ONLY = (
+    "**Dimensions:**",
+    "**Nets:**",
+    "## Design Rules",
+    "**Smallest Clearance:**",
+    "**Default Track Width:**",
+    "**Default Via Size/Drill:**",
+    "**Diff Pair Width/Gap:**",
+    "## Design Rule Comparison",
+    "**Min track width in design:**",
+    "**Default track width (design rules):**",
+    "**Smallest clearance:**",
+    "⚠️ Some tracks are significantly narrower",
+    "**Diff Pair Design Rules:**",
+)
+
+
+def _without_pcbnew_facts(answer: str) -> list[str]:
+    """The lines of an answer with no line of PCBNEW_ONLY, no board size, no fill state
+    and no warning of the text reader."""
+    lines = []
+    for line in answer.splitlines():
+        if line.startswith(PCBNEW_ONLY) or line.startswith("⚠️ pcbnew not available"):
+            continue
+        if line.startswith("**Board:**") and " mm, " in line:
+            line = "**Board:** " + line.split(" mm, ", 1)[1]
+        line = line.replace(" (filled)", "").replace(" (unfilled)", "")
+        if line.startswith("**GND Coverage:**"):
+            line = line.split(" (", 1)[0]
+        if line or (lines and lines[-1]):  # one empty line between two sections
+            lines.append(line)
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+@pytest.mark.skipif(not _pcbnew_installed(), reason="pcbnew is not installed")
+@pytest.mark.parametrize(
+    "tool, kwargs", TOOLS[1:3] + TOOLS[4:] + [("analyze_pcb_signal_integrity", {"net_name": "GND"})]
+)
+def test_the_two_readers_give_the_same_answer(monkeypatch, kicad_version, tool, kwargs):
+    """One path for the two readers: the text reader gives the answer of pcbnew with no
+    facts that only pcbnew has (the limits in the warning of the text reader)."""
+    with_pcbnew = run(tool, BOARD, **kwargs)
+    pcb._pcbnew_importable.cache_clear()
+    monkeypatch.setitem(sys.modules, "pcbnew", None)
+    text = run(tool, BOARD, **kwargs)
+    assert "pcbnew not available" in text and "pcbnew not available" not in with_pcbnew
+    assert _without_pcbnew_facts(text) == _without_pcbnew_facts(with_pcbnew)
 
 
 @pytest.mark.parametrize("tool, kwargs", TOOLS)

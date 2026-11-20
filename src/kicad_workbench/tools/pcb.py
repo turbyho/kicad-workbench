@@ -6,7 +6,7 @@ import asyncio
 import functools
 
 from ..errors import WorkbenchError
-from ..parsers.pcb_items import PCBTrack, PCBVia, PCBZone
+from ..parsers.pcb_items import PCBTrack, PCBVia, PCBZone, net_track_stats, via_stats
 from ..server import mcp
 from ..utils import kicad_cli
 from ..utils.file_versions import with_board_versions
@@ -199,7 +199,7 @@ def list_pcb_footprints(
 
 @mcp.tool()
 @with_board_versions("file_path")
-@_board_tool(": no board outline, no design rules")
+@_board_tool(": no board outline, no net count, no design rules")
 def get_pcb_statistics(file_path: str) -> str:
     """Give the size, the layers, the counts and the design rules of a board.
 
@@ -207,35 +207,46 @@ def get_pcb_statistics(file_path: str) -> str:
     them: no rule area (keepout), no teardrop, and no zone on non-copper layers only.
     The size is the bounding box of the Edge.Cuts shapes of the board and of its
     footprints, with the line width (BOARD::ComputeBoundingBox): an outline of 100 x
-    100 mm with lines of 0.15 mm gives 100.15 x 100.15 mm.
+    100 mm with lines of 0.15 mm gives 100.15 x 100.15 mm. The pad count is all pads of
+    the footprints, also NPTH (FOOTPRINT::GetPadCount).
+
+    With the text reader (no pcbnew), the answer has no size, no net count and no design
+    rules.
 
     Args:
         file_path: The .kicad_pcb file.
 
     Returns:
         The size of the board, the copper layers, the thickness, the numbers of
-        footprints, tracks, vias, zones and nets, and the design rules.
+        footprints, pads, tracks, vias, zones and nets, and the design rules.
     """
     try:
         parser = _get_parser(file_path)
-
-        if _is_pcbnew(parser):
-            info = parser.get_board_info()
+        pcbnew = _is_pcbnew(parser)
+        footprints = parser.get_footprints()
+        info = parser.get_board_info() if pcbnew else None
+        if info is not None:
+            dimensions = f"{info['board_width_mm']:.2f} x {info['board_height_mm']:.2f} mm"
+        else:
+            dimensions = "not known (the text reader does not read the board outline)"
+        lines = [
+            f"# PCB Statistics: {file_path}",
+            "",
+            "## Board Information",
+            f"**Dimensions:** {dimensions}",
+            f"**Copper Layers:** {parser.get_copper_layer_count()}",
+            f"**Board Thickness:** {parser.get_board_thickness():.3f} mm",
+            "",
+            "## Elements",
+            f"**Footprints:** {len(footprints)}",
+            f"**Pads:** {sum(f.pad_count for f in footprints)}",
+            f"**Track Segments:** {len(parser.get_tracks())}",
+            f"**Vias:** {len(parser.get_vias())}",
+            f"**Copper Zones:** {len(parser.get_zones())}",
+        ]
+        if info is not None:
             rules = parser.get_design_rules()
-
-            lines = [
-                f"# PCB Statistics: {file_path}",
-                "",
-                "## Board Information",
-                f"**Dimensions:** {info['board_width_mm']:.2f} x {info['board_height_mm']:.2f} mm",
-                f"**Copper Layers:** {rules['copper_layers']}",
-                f"**Board Thickness:** {rules['board_thickness_mm']:.3f} mm",
-                "",
-                "## Elements",
-                f"**Footprints:** {info['footprints_count']}",
-                f"**Track Segments:** {info['tracks_count']}",
-                f"**Vias:** {info['vias_count']}",
-                f"**Copper Zones:** {info['zones_count']}",
+            lines += [
                 f"**Nets:** {info['nets_count']}",
                 "",
                 "## Design Rules",
@@ -244,28 +255,7 @@ def get_pcb_statistics(file_path: str) -> str:
                 f"**Default Via Size/Drill:** {rules['current_via_size_mm']:.4f} / {rules['current_via_drill_mm']:.4f} mm",
                 f"**Diff Pair Width/Gap:** {rules['current_diff_pair_width_mm']:.4f} / {rules['current_diff_pair_gap_mm']:.4f} mm",
             ]
-            return "\n".join(lines)
-        else:
-            stats = parser.get_statistics()
-            lines = [
-                f"# PCB Statistics: {file_path}",
-                "",
-                "## Board Information",
-                "**Dimensions:** not known (the text reader does not read the board outline)",
-                f"**Layers:** {stats['layers']}",
-                f"**Thickness:** {stats['thickness']:.2f} mm",
-                "",
-                "## Elements",
-                f"**Footprints:** {stats['total_footprints']}",
-                f"**Total Pads:** {stats['total_pads']}",
-                f"**Track Segments:** {stats['total_tracks']}",
-                f"**Vias:** {stats['total_vias']}",
-                f"**Copper Zones:** {stats['total_zones']}",
-                "",
-                "## Averages",
-                f"**Pads per Footprint:** {stats['total_pads'] / max(stats['total_footprints'], 1):.1f}",
-            ]
-            return "\n".join(lines)
+        return "\n".join(lines)
 
     except Exception as e:
         return error_answer(e, "Error parsing PCB")
@@ -273,7 +263,7 @@ def get_pcb_statistics(file_path: str) -> str:
 
 @mcp.tool()
 @with_board_versions("file_path")
-@_board_tool(": no design rules")
+@_board_tool(": no board outline, no design rules")
 def analyze_pcb_nets(file_path: str) -> str:
     """Give the routing of a board: track widths, vias, net lengths and layers.
 
@@ -286,6 +276,8 @@ def analyze_pcb_nets(file_path: str) -> str:
     The tool lists the 20 nets with the longest tracks. The warning about narrow
     tracks is a rule of the tool (a track narrower than half of the current track
     width of the board settings), not a DRC result: run_drc gives the checks of KiCad.
+    With the text reader (no pcbnew), the answer has no board size and no comparison
+    with the design rules.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -295,107 +287,31 @@ def analyze_pcb_nets(file_path: str) -> str:
     """
     try:
         parser = _get_parser(file_path)
-
-        if not _is_pcbnew(parser):
-            data = parser._parse_file()
-            tracks = data["tracks"]
-            vias = data["vias"]
-            zones = data["zones"]
-
-            lines = [
-                f"# PCB Routing Analysis: {file_path}",
-                "",
-                "## Overview",
-                f"**Track Segments:** {len(tracks)}",
-                f"**Vias:** {len(vias)}",
-                f"**Copper Zones:** {len(zones)}",
-            ]
-
-            # Track width distribution
-            width_counts: dict[str, int] = {}
-            for t in tracks:
-                key = f"{t['width']:.3f}mm"
-                width_counts[key] = width_counts.get(key, 0) + 1
-            if width_counts:
-                lines += [
-                    "",
-                    "## Track Width Distribution",
-                    "| Width | Count |",
-                    "|-------|-------|",
-                ]
-                for w, c in sorted(width_counts.items(), key=lambda x: -x[1]):
-                    lines.append(f"| {w} | {c}x |")
-
-            # Via drill distribution
-            drill_counts: dict[str, int] = {}
-            for v in vias:
-                key = f"{v['drill']:.3f}mm"
-                drill_counts[key] = drill_counts.get(key, 0) + 1
-            if drill_counts:
-                lines += [
-                    "",
-                    "## Via Drill Distribution",
-                    f"**Total vias:** {len(vias)}",
-                    "",
-                    "| Drill Size | Count |",
-                    "|------------|-------|",
-                ]
-                for d, c in sorted(drill_counts.items(), key=lambda x: -x[1]):
-                    lines.append(f"| {d} | {c}x |")
-
-            # Per-net track stats
-            net_stats: dict[str, dict] = {}
-            for t in tracks:
-                net = t.get("net", "(unnamed)")
-                if net not in net_stats:
-                    net_stats[net] = {"total_length": 0.0, "segment_count": 0, "widths": [], "layers": set()}
-                s = net_stats[net]
-                s["total_length"] += t.get("length", 0)
-                s["segment_count"] += 1
-                s["widths"].append(t["width"])
-                s["layers"].add(t["layer"])
-
-            top_nets = sorted(net_stats.items(), key=lambda x: -x[1]["total_length"])[:20]
-            if top_nets:
-                lines += [
-                    "",
-                    "## Top 20 Nets by Track Length",
-                    "| Net | Length (mm) | Segments | Widths | Layers |",
-                    "|-----|-------------|----------|--------|--------|",
-                ]
-                for name, s in top_nets:
-                    unique_widths = sorted({f"{w:.3f}" for w in s["widths"]})
-                    widths_str = ", ".join(unique_widths)
-                    layers_str = ", ".join(sorted(s["layers"]))
-                    lines.append(
-                        f"| {name} | {s['total_length']:.2f} | {s['segment_count']} | {widths_str} | {layers_str} |"
-                    )
-
-            return "\n".join(lines)
-
-        net_stats = parser.get_net_track_stats()
-        via_stats = parser.get_via_stats()
-        rules = parser.get_design_rules()
-        zones = parser.get_zones()
-        info = parser.get_board_info()
-
+        pcbnew = _is_pcbnew(parser)
+        tracks = parser.get_tracks()
+        net_stats = net_track_stats(tracks)
+        vias = via_stats(parser.get_vias())
+        copper = f"{parser.get_copper_layer_count()} copper layers"
+        if pcbnew:
+            info = parser.get_board_info()
+            board = f"{info['board_width_mm']:.2f} x {info['board_height_mm']:.2f} mm, {copper}"
+        else:
+            board = copper
         lines = [
             f"# PCB Routing Analysis: {file_path}",
             "",
             "## Overview",
-            f"**Board:** {info['board_width_mm']:.2f} x {info['board_height_mm']:.2f} mm, "
-            f"{rules['copper_layers']} copper layers",
-            f"**Tracks:** {info['tracks_count']} segments across {len(net_stats)} nets",
-            f"**Vias:** {info['vias_count']}",
-            f"**Zones:** {len(zones)} copper zones",
+            f"**Board:** {board}",
+            f"**Tracks:** {len(tracks)} segments across {len(net_stats)} nets",
+            f"**Vias:** {vias['count']}",
+            f"**Zones:** {len(parser.get_zones())} copper zones",
         ]
 
         # Track width distribution
         width_counts: dict[str, int] = {}
-        for s in net_stats.values():
-            for w in s["widths"]:
-                key = f"{w:.3f}mm"
-                width_counts[key] = width_counts.get(key, 0) + 1
+        for track in tracks:
+            key = f"{track.width:.3f}mm"
+            width_counts[key] = width_counts.get(key, 0) + 1
 
         if width_counts:
             lines += [
@@ -408,28 +324,26 @@ def analyze_pcb_nets(file_path: str) -> str:
                 lines.append(f"| {w} | {c}x |")
 
         # Via drill distribution
-        if via_stats["count"] > 0:
+        if vias["count"] > 0:
             lines += [
                 "",
                 "## Via Drill Distribution",
-                f"**Total vias:** {via_stats['count']}",
+                f"**Total vias:** {vias['count']}",
                 "",
                 "| Drill Size | Count |",
                 "|------------|-------|",
             ]
-            for drill, count in via_stats["drill_sizes"].items():
+            for drill, count in vias["drill_sizes"].items():
                 lines.append(f"| {drill} | {count}x |")
 
             lines += ["", "### Via Layer Spans"]
-            for span, count in via_stats["layer_spans"].items():
+            for span, count in vias["layer_spans"].items():
                 lines.append(f"- {span}: {count}x")
 
-        # Layer coverage — count each track on its own layer. Previously this
-        # added each net's TOTAL segment count to EVERY layer the net touches,
-        # inflating multi-layer net totals by the layer fanout.
+        # Each track on its own layer.
         layer_counts: dict[str, int] = {}
-        for t in parser.get_tracks():
-            layer_counts[t.layer] = layer_counts.get(t.layer, 0) + 1
+        for track in tracks:
+            layer_counts[track.layer] = layer_counts.get(track.layer, 0) + 1
 
         if layer_counts:
             lines += [
@@ -458,10 +372,10 @@ def analyze_pcb_nets(file_path: str) -> str:
                     f"| {name} | {s['total_length']:.2f} | {s['segment_count']} | {widths_str} | {layers_str} |"
                 )
 
-        # Design rule comparison
-        if net_stats:
-            all_widths = [w for s in net_stats.values() for w in s["widths"]]
-            min_width = min(all_widths) if all_widths else 0
+        # Design rule comparison (pcbnew: the text reader has no design rules)
+        if pcbnew and tracks:
+            rules = parser.get_design_rules()
+            min_width = min(track.width for track in tracks)
             rule_width = rules["current_track_width_mm"]
             lines += [
                 "",
@@ -548,9 +462,8 @@ def analyze_pcb_signal_integrity(
     nets (15) are the nets whose name has no power word (VDD, VCC, GND, VSS, 3V3, 5V,
     1V8, PGND, VBUS). The tool also gives the 10 nets with the most vias.
 
-    With the text reader (no pcbnew), the tool gives only the differential pairs and
-    the longest signal nets: no RF tracks, no nets with vias, no design rules, and
-    net_name has no effect.
+    With the text reader (no pcbnew), the answer has no design rules of the
+    differential pairs.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -561,99 +474,33 @@ def analyze_pcb_signal_integrity(
     """
     try:
         parser = _get_parser(file_path)
+        tracks = parser.get_tracks()
+        net_stats = net_track_stats(tracks)
 
-        if not _is_pcbnew(parser):
-            data = parser._parse_file()
-            tracks = data["tracks"]
-            if not tracks:
-                return "No tracks found in PCB file."
-
-            # Build net stats from text parser data
-            net_stats: dict[str, dict] = {}
-            for t in tracks:
-                net = t.get("net", "(unnamed)")
-                if net not in net_stats:
-                    net_stats[net] = {"total_length": 0.0, "segment_count": 0, "widths": [], "layers": set()}
-                s = net_stats[net]
-                s["total_length"] += t.get("length", 0)
-                s["segment_count"] += 1
-                s["widths"].append(t["width"])
-                s["layers"].add(t["layer"])
-
-            lines = [
-                f"# Signal Integrity Analysis: {file_path}",
+        lines = [f"# Signal Integrity Analysis: {file_path}"]
+        if _is_pcbnew(parser):
+            rules = parser.get_design_rules()
+            lines += [
+                "",
+                f"**Diff Pair Design Rules:** width={rules['current_diff_pair_width_mm']:.4f} mm, "
+                f"gap={rules['current_diff_pair_gap_mm']:.4f} mm",
             ]
-
-            # Auto-detect differential pairs
-            diff_pairs = _detect_diff_pairs(set(net_stats.keys()))
-            if diff_pairs:
-                lines += [
-                    "",
-                    "## Differential Pair Analysis",
-                    "| Pair | Net P | Net N | Length P | Length N | Delta | Status |",
-                    "|------|-------|-------|----------|----------|--------|---------|",
-                ]
-                for pair_name, net_p, net_n in diff_pairs:
-                    len_p = net_stats[net_p]["total_length"] if net_p in net_stats else 0
-                    len_n = net_stats[net_n]["total_length"] if net_n in net_stats else 0
-                    delta = abs(len_p - len_n)
-                    if delta < 0.127:
-                        status = "OK"
-                    elif delta < 0.5:
-                        status = "⚠️ Marginal"
-                    else:
-                        status = "❌ Mismatch"
-                    lines.append(
-                        f"| {pair_name} | {net_p} | {net_n} | {len_p:.3f} mm | "
-                        f"{len_n:.3f} mm | {delta:.3f} mm | {status} |"
-                    )
-
-            # Longest signal nets
-            power_keywords = ("VDD", "VCC", "GND", "VSS", "3V3", "5V", "1V8", "PGND", "VBUS")
-            signal_nets = [
-                (name, s) for name, s in net_stats.items()
-                if not any(kw in name.upper() for kw in power_keywords)
-            ]
-            top_signals = sorted(signal_nets, key=lambda x: -x[1]["total_length"])[:15]
-            if top_signals:
-                lines += [
-                    "",
-                    "## Longest Signal Nets (Top 15)",
-                    "| Net | Length (mm) | Segments | Layers |",
-                    "|-----|-------------|----------|--------|",
-                ]
-                for name, s in top_signals:
-                    layers = ", ".join(sorted(s["layers"]))
-                    lines.append(f"| {name} | {s['total_length']:.2f} | {s['segment_count']} | {layers} |")
-
-            return "\n".join(lines)
-
-        net_stats = parser.get_net_track_stats()
-        rules = parser.get_design_rules()
-
-        lines = [
-            f"# Signal Integrity Analysis: {file_path}",
-            "",
-            f"**Diff Pair Design Rules:** width={rules['current_diff_pair_width_mm']:.4f} mm, "
-            f"gap={rules['current_diff_pair_gap_mm']:.4f} mm",
-        ]
 
         # If specific net requested, show detail
         if net_name:
-            tracks = [t for t in parser.get_tracks() if t.net == net_name]
-            if not tracks:
+            net_tracks = [t for t in tracks if t.net == net_name]
+            if not net_tracks:
                 return f"No tracks found for net '{net_name}'."
-            total = sum(t.length for t in tracks)
+            total = sum(t.length for t in net_tracks)
             lines += [
                 "",
                 f"## Net: {net_name}",
-                f"**Segments:** {len(tracks)}, **Total Length:** {total:.3f} mm",
+                f"**Segments:** {len(net_tracks)}, **Total Length:** {total:.3f} mm",
             ]
             return "\n".join(lines)
 
         # Auto-detect differential pairs
-        net_names = set(net_stats.keys())
-        diff_pairs = _detect_diff_pairs(net_names)
+        diff_pairs = _detect_diff_pairs(set(net_stats))
 
         if diff_pairs:
             lines += [
@@ -693,13 +540,15 @@ def analyze_pcb_signal_integrity(
             for name in sorted(rf_nets):
                 s = net_stats[name]
                 widths = ", ".join(sorted({f"{w:.3f}" for w in s["widths"]}))
-                lines.append(f"| {name} | {s['total_length']:.3f} mm | {widths} mm | {s['segment_count']} |")
+                lines.append(
+                    f"| {name} | {s['total_length']:.3f} mm | {widths} mm | {s['segment_count']} |"
+                )
 
         # Top signal nets by length (exclude power/GND)
-        power_keywords = ("VDD", "VCC", "GND", "VSS", "3V3", "5V", "1V8", "PGND", "VBUS")
         signal_nets = [
-            (name, s) for name, s in net_stats.items()
-            if not any(kw in name.upper() for kw in power_keywords)
+            (name, s)
+            for name, s in net_stats.items()
+            if not any(kw in name.upper() for kw in _SIGNAL_EXCLUDED_WORDS)
         ]
         top_signals = sorted(signal_nets, key=lambda x: -x[1]["total_length"])[:15]
 
@@ -712,12 +561,14 @@ def analyze_pcb_signal_integrity(
             ]
             for name, s in top_signals:
                 layers = ", ".join(s["layers"])
-                lines.append(f"| {name} | {s['total_length']:.2f} | {s['segment_count']} | {layers} |")
+                lines.append(
+                    f"| {name} | {s['total_length']:.2f} | {s['segment_count']} | {layers} |"
+                )
 
         # Nets with most layer transitions (most vias = most transitions)
-        via_stats = parser.get_via_stats()
-        if via_stats["count"] > 0:
-            top_via_nets = list(via_stats["top_via_nets"].items())[:10]
+        vias = via_stats(parser.get_vias())
+        if vias["count"] > 0:
+            top_via_nets = list(vias["top_via_nets"].items())[:10]
             lines += [
                 "",
                 "## Nets with Most Vias (Layer Transitions)",
@@ -739,8 +590,10 @@ def analyze_pcb_signal_integrity(
 def analyze_pcb_power_integrity(file_path: str) -> str:
     """Give the copper zones of a board and the routing of its power nets (heuristic).
 
-    The tool finds a power net and a ground net from its name (for example VCC, VDD,
-    VBUS, GND), and gives the copper zones of each and the tracks of the power nets.
+    The tool finds a power net and a ground net from its name, and gives the copper
+    zones of each and the tracks of the power nets. A power net has VDD, VCC, VSS, 3V3,
+    5V, 1V8, VBUS, LDO or DCDC in its name; a ground net has GND, PGND, AGND, DGND or
+    CHASSIS (no difference between upper and lower case).
 
     The copper zones are the zones of the Zone Manager of KiCad: no rule area
     (keepout), no teardrop, and no zone on non-copper layers only. A zone can be on more
@@ -748,9 +601,8 @@ def analyze_pcb_power_integrity(file_path: str) -> str:
     the top, and counts each of them for the GND coverage. On a board with more than 2
     copper layers, a warning tells when the GND zones are not on each copper layer:
     this warning comes from the tool, not from a check of KiCad. "filled" is the fill
-    state that the file has. With the text reader (no pcbnew), the words of the power
-    nets are different (VDD, VCC, VBUS, LDO, DCDC; GND, PGND, AGND, DGND) and the
-    zones have no fill state.
+    state that the file has. With the text reader (no pcbnew), the zones have no fill
+    state.
 
     Args:
         file_path: The .kicad_pcb file.
@@ -760,96 +612,24 @@ def analyze_pcb_power_integrity(file_path: str) -> str:
     """
     try:
         parser = _get_parser(file_path)
-
-        if not _is_pcbnew(parser):
-            data = parser._parse_file()
-            tracks = data["tracks"]
-            zones = data["zones"]
-
-            lines = [
-                f"# Power Integrity Analysis: {file_path}",
-            ]
-
-            # Power zones
-            power_keywords = ("VDD", "VCC", "VBUS", "LDO", "DCDC")
-            gnd_keywords = ("GND", "PGND", "AGND", "DGND")
-
-            power_zones = [z for z in zones if any(kw in z.get("net_name", "").upper() for kw in power_keywords)]
-            gnd_zones = [z for z in zones if any(kw in z.get("net_name", "").upper() for kw in gnd_keywords)]
-
-            if power_zones:
-                lines += [
-                    "",
-                    "## Power Copper Zones",
-                    "| Net | Layers |",
-                    "|-----|--------|",
-                ]
-                for z in power_zones:
-                    lines.append(f"| {z['net_name']} | {_zone_layers(z['layers'])} |")
-
-            if gnd_zones:
-                lines += [
-                    "",
-                    "## GND Copper Zones",
-                    "| Net | Layers |",
-                    "|-----|--------|",
-                ]
-                for z in gnd_zones:
-                    lines.append(f"| {z['net_name']} | {_zone_layers(z['layers'])} |")
-                gnd_layers = {layer for z in gnd_zones for layer in z["layers"]}
-                lines.append(f"\n**GND Coverage:** {len(gnd_zones)} zones across {len(gnd_layers)} layers")
-                lines += _gnd_layer_warning(gnd_layers, data["general"]["layers"])
-
-            # Power net tracks
-            net_stats: dict[str, dict] = {}
-            for t in tracks:
-                net = t.get("net", "")
-                if not net:
-                    continue
-                if net not in net_stats:
-                    net_stats[net] = {"total_length": 0.0, "segment_count": 0, "widths": []}
-                net_stats[net]["total_length"] += t.get("length", 0)
-                net_stats[net]["segment_count"] += 1
-                net_stats[net]["widths"].append(t["width"])
-
-            power_tracks = [(n, s) for n, s in net_stats.items() if any(kw in n.upper() for kw in power_keywords)]
-            if power_tracks:
-                lines += [
-                    "",
-                    "## Power Net Track Routing",
-                    "| Net | Length (mm) | Segments | Min Width | Max Width |",
-                    "|-----|-------------|----------|-----------|-----------|",
-                ]
-                for name, s in sorted(power_tracks, key=lambda x: -x[1]["total_length"]):
-                    lines.append(
-                        f"| {name} | {s['total_length']:.2f} | {s['segment_count']} | "
-                        f"{min(s['widths']):.4f} mm | {max(s['widths']):.4f} mm |"
-                    )
-
-            return "\n".join(lines)
-
-        net_stats = parser.get_net_track_stats()
+        net_stats = net_track_stats(parser.get_tracks())
         zones = parser.get_zones()
-        rules = parser.get_design_rules()
+        copper_layers = parser.get_copper_layer_count()
 
         lines = [
             f"# Power Integrity Analysis: {file_path}",
             "",
-            f"**Board:** {rules['copper_layers']} layers, {rules['board_thickness_mm']:.3f} mm thick",
+            f"**Board:** {copper_layers} layers, {parser.get_board_thickness():.3f} mm thick",
         ]
 
-        # Identify power nets
-        power_keywords = ("VDD", "VCC", "VSS", "3V3", "5V", "1V8", "VBUS", "LDO", "DCDC")
-        gnd_keywords = ("GND", "PGND", "AGND", "DGND", "CHASSIS")
-
-        power_zones = [z for z in zones if any(kw in z.net_name.upper() for kw in power_keywords)]
-        gnd_zones = [z for z in zones if any(kw in z.net_name.upper() for kw in gnd_keywords)]
+        power_zones = [z for z in zones if any(kw in z.net_name.upper() for kw in _POWER_WORDS)]
+        gnd_zones = [z for z in zones if any(kw in z.net_name.upper() for kw in _GND_WORDS)]
 
         # Power zones by net
         power_zone_by_net: dict[str, list[str]] = {}
         for z in power_zones:
             power_zone_by_net.setdefault(z.net_name, []).append(
-                f"{_zone_layers(z.layers)} ({'filled' if z.filled else 'unfilled'})"
+                f"{_zone_layers(z.layers)}{_fill_state(z)}"
             )
 
         if power_zone_by_net:
@@ -867,7 +647,7 @@ def analyze_pcb_power_integrity(file_path: str) -> str:
         gnd_zone_by_net: dict[str, list[str]] = {}
         for z in gnd_zones:
             gnd_zone_by_net.setdefault(z.net_name, []).append(
-                f"{_zone_layers(z.layers)} ({'filled' if z.filled else 'unfilled'})"
+                f"{_zone_layers(z.layers)}{_fill_state(z)}"
             )
 
         if gnd_zone_by_net:
@@ -881,20 +661,18 @@ def analyze_pcb_power_integrity(file_path: str) -> str:
                 layers_str = "; ".join(layer_info)
                 lines.append(f"| {net} | {len(layer_info)} | {layers_str} |")
 
-            total_gnd_zones = len(gnd_zones)
-            filled_gnd_zones = sum(1 for z in gnd_zones if z.filled)
             gnd_layers = {layer for z in gnd_zones for layer in z.layers}
-            lines += [
-                "",
-                f"**GND Coverage:** {total_gnd_zones} zones across {len(gnd_layers)} layers "
-                f"({filled_gnd_zones} filled)",
-            ]
-            lines += _gnd_layer_warning(gnd_layers, rules["copper_layers"])
+            coverage = f"**GND Coverage:** {len(gnd_zones)} zones across {len(gnd_layers)} layers"
+            if all(z.filled is not None for z in gnd_zones):
+                coverage += f" ({sum(1 for z in gnd_zones if z.filled)} filled)"
+            lines += ["", coverage]
+            lines += _gnd_layer_warning(gnd_layers, copper_layers)
 
         # Power net track routing
         power_track_nets = [
-            (name, s) for name, s in net_stats.items()
-            if any(kw in name.upper() for kw in power_keywords)
+            (name, s)
+            for name, s in net_stats.items()
+            if any(kw in name.upper() for kw in _POWER_WORDS)
         ]
         if power_track_nets:
             lines += [
@@ -904,11 +682,9 @@ def analyze_pcb_power_integrity(file_path: str) -> str:
                 "|-----|-------------|----------|-----------|-----------|",
             ]
             for name, s in sorted(power_track_nets, key=lambda x: -x[1]["total_length"]):
-                min_w = min(s["widths"]) if s["widths"] else 0
-                max_w = max(s["widths"]) if s["widths"] else 0
                 lines.append(
                     f"| {name} | {s['total_length']:.2f} | {s['segment_count']} | "
-                    f"{min_w:.4f} mm | {max_w:.4f} mm |"
+                    f"{min(s['widths']):.4f} mm | {max(s['widths']):.4f} mm |"
                 )
 
         return "\n".join(lines)
@@ -918,6 +694,21 @@ def analyze_pcb_power_integrity(file_path: str) -> str:
 
 
 # ── Helpers ──────────────────────────────────────────────────
+
+
+# The words of the power nets and of the ground nets of analyze_pcb_power_integrity
+# (in the name in upper case), and the words of the nets that are not signal nets of
+# analyze_pcb_signal_integrity: rules of the tool, the same for the two readers.
+_POWER_WORDS = ("VDD", "VCC", "VSS", "3V3", "5V", "1V8", "VBUS", "LDO", "DCDC")
+_GND_WORDS = ("GND", "PGND", "AGND", "DGND", "CHASSIS")
+_SIGNAL_EXCLUDED_WORDS = ("VDD", "VCC", "GND", "VSS", "3V3", "5V", "1V8", "PGND", "VBUS")
+
+
+def _fill_state(zone: PCBZone) -> str:
+    """The fill state of a zone in the tables: none with the text reader."""
+    if zone.filled is None:
+        return ""
+    return " (filled)" if zone.filled else " (unfilled)"
 
 
 # The warning of find_tracks_by_net for a net with tracks of different widths.

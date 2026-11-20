@@ -261,14 +261,22 @@ class PCBParserKiCad:
             "zones_count": len(self._copper_zones()),
         }
 
+    def get_copper_layer_count(self) -> int:
+        """The copper layers of the board (the layer table: parseLayers,
+        SetCopperLayerCount)."""
+        return self.board.GetDesignSettings().GetCopperLayerCount()
+
+    def get_board_thickness(self) -> float:
+        """The board thickness in mm ((general (thickness ...)): parseGeneralSection,
+        SetBoardThickness; default 1.6 mm)."""
+        return self._to_mm(self.board.GetDesignSettings().GetBoardThickness())
+
     # ── Design Rules ────────────────────────────────────────
 
     def get_design_rules(self) -> dict[str, Any]:
         ds = self.board.GetDesignSettings()
         pcbnew = self._pcbnew
         return {
-            "board_thickness_mm": pcbnew.ToMM(ds.GetBoardThickness()),
-            "copper_layers": ds.GetCopperLayerCount(),
             "smallest_clearance_mm": pcbnew.ToMM(ds.GetSmallestClearanceValue()),
             "biggest_clearance_mm": pcbnew.ToMM(ds.GetBiggestClearanceValue()),
             "current_track_width_mm": pcbnew.ToMM(ds.GetCurrentTrackWidth()),
@@ -278,55 +286,4 @@ class PCBParserKiCad:
             "current_diff_pair_gap_mm": pcbnew.ToMM(ds.GetCurrentDiffPairGap()),
             "drc_epsilon_mm": pcbnew.ToMM(ds.GetDRCEpsilon()),
             "hole_plating_mm": pcbnew.ToMM(ds.GetHolePlatingThickness()),
-        }
-
-    # ── Aggregate Stats ─────────────────────────────────────
-
-    def get_net_track_stats(self) -> dict[str, dict[str, Any]]:
-        """Per-net track statistics: total_length, segment_count, widths, layers."""
-        stats: dict[str, dict[str, Any]] = {}
-        for track in self.get_tracks():
-            net = track.net or "(unnamed)"
-            if net not in stats:
-                stats[net] = {
-                    "total_length": 0.0,
-                    "segment_count": 0,
-                    "widths": [],
-                    "layers": set(),
-                }
-            s = stats[net]
-            s["total_length"] += track.length
-            s["segment_count"] += 1
-            s["widths"].append(track.width)
-            s["layers"].add(track.layer)
-        # Convert sets to sorted lists for JSON
-        for s in stats.values():
-            s["layers"] = sorted(s["layers"])
-        return stats
-
-    def get_via_stats(self) -> dict[str, Any]:
-        """Aggregate via statistics."""
-        vias = self.get_vias()
-        if not vias:
-            return {"count": 0}
-
-        drill_counts: dict[str, int] = {}
-        layer_span_counts: dict[str, int] = {}
-        net_via_counts: dict[str, int] = {}
-
-        for v in vias:
-            drill_key = f"{v.drill:.3f}mm"
-            drill_counts[drill_key] = drill_counts.get(drill_key, 0) + 1
-
-            span = f"{v.top_layer} -> {v.bottom_layer}"
-            layer_span_counts[span] = layer_span_counts.get(span, 0) + 1
-
-            net = v.net or "(unnamed)"
-            net_via_counts[net] = net_via_counts.get(net, 0) + 1
-
-        return {
-            "count": len(vias),
-            "drill_sizes": dict(sorted(drill_counts.items(), key=lambda x: -x[1])),
-            "layer_spans": layer_span_counts,
-            "top_via_nets": dict(sorted(net_via_counts.items(), key=lambda x: -x[1])[:20]),
         }

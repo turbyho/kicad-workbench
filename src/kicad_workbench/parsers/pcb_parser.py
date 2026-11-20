@@ -478,23 +478,13 @@ class PCBParser:
         data = self._parse_file()
         return [PCBFootprint.from_dict(f) for f in data["footprints"]]
 
-    def get_statistics(self) -> dict[str, Any]:
-        """Get PCB statistics.
+    def get_copper_layer_count(self) -> int:
+        """The copper layers of the board, as pcbnew gives them: the copper layers of the
+        layer table (PCB_IO_KICAD_SEXPR_PARSER::parseLayers, SetCopperLayerCount), 2 for a
+        board with no layer table (the BOARD default)."""
+        return self._parse_file()["general"]["layers"]
 
-        Returns:
-            Dictionary with statistics
-        """
-        data = self._parse_file()
-
-        # Calculate total pads from pad_count field
-        total_pads = sum(f.get("pad_count", 0) for f in data["footprints"])
-
-        return {
-            "total_footprints": len(data["footprints"]),
-            "total_pads": total_pads,
-            "total_tracks": len(data["tracks"]),
-            "total_vias": len(data["vias"]),
-            "total_zones": len(data["zones"]),
-            "layers": data["general"]["layers"],
-            "thickness": data["general"]["thickness"],
-        }
+    def get_board_thickness(self) -> float:
+        """The board thickness in mm, as pcbnew gives it: (general (thickness ...))
+        (parseGeneralSection, SetBoardThickness), else DEFAULT_BOARD_THICKNESS_MM (1.6)."""
+        return self._parse_file()["general"]["thickness"]

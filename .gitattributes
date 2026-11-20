@@ -1,0 +1,3 @@
+# The test fixtures are files of KiCad and of kicad-cli: the tests compare their bytes.
+# Git must not change their line ends (core.autocrlf on Windows).
+tests/fixtures/** -text

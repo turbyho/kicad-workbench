@@ -1113,7 +1113,9 @@ def test_save_checks_the_project_file_of_the_document(kicad, tmp_path):
         text = run(ipc.ipc_save_board(str(kicad.board_path)))
     finally:
         project.chmod(0o644)
-    if os.geteuid() != 0:
+    # root (Unix) can write a read-only file. Windows has no geteuid: the read-only
+    # attribute applies to each user.
+    if not (hasattr(os, "geteuid") and os.geteuid() == 0):
         assert text.startswith(f"❌ {project} is not writable. The tool did not save.")
         assert kicad.saves == 0
 

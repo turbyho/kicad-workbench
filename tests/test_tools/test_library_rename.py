@@ -5,6 +5,8 @@ tree of the symbol editor and of the footprint editor of KiCad 10.0.6. kicad-cli
 replaced by a copy of the file; the check with KiCad is
 spike/kicad-versions/library_rename_check.py."""
 
+from pathlib import Path
+
 import pytest
 
 from kicad_workbench.errors import InputError
@@ -275,13 +277,22 @@ class TestFootprintTools:
         assert (footprints.parent / "Mine.pretty" / "C_0603.kicad_mod").exists()
 
 
+def _no_case_difference(folder: Path) -> bool:
+    """True when the file system of the folder has no difference of case in file names
+    (Windows, macOS): "r_0603" finds the file "R_0603"."""
+    return (folder / "r_0603.kicad_mod").exists()
+
+
 class TestOneFile:
-    """A change of only the case on a file system with no difference of case: a hard
-    link gives the two names one file, as such a file system does."""
+    """A change of only the case on a file system with no difference of case: the file
+    system of the test (Windows, macOS), or a hard link that gives the two names one
+    file, as such a file system does (Linux)."""
 
     @pytest.fixture
     def one_file(self, footprints_project, monkeypatch):
         folder = footprints_project.parent / "Mine.pretty"
+        if _no_case_difference(folder):
+            return footprints_project
         (folder / "r_0603.kicad_mod").hardlink_to(folder / "R_0603.kicad_mod")
         # The folder shows one entry, as such a file system does.
         monkeypatch.setattr(
@@ -338,6 +349,8 @@ class TestOneFile:
     async def test_a_hard_link_with_an_other_name(self, footprints_project):
         # Two entries of one file: an other footprint for KiCad.
         folder = footprints_project.parent / "Mine.pretty"
+        if _no_case_difference(folder):
+            pytest.skip("the file system has no difference of case: one entry for the names")
         (folder / "r_0603.kicad_mod").hardlink_to(folder / "R_0603.kicad_mod")
         out = await rename_library_footprint(str(footprints_project), "Mine:R_0603", "r_0603")
         assert out.startswith("❌ Footprint 'r_0603' already exists"), out
